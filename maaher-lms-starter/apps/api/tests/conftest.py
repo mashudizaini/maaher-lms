@@ -37,6 +37,12 @@ def database():
                        (uuid4(), legacy_tenant, legacy_user))
             db.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES ('legacy-token-hash',%s,now()+interval '1 hour')", (legacy_user,))
         command.upgrade(config, "head")
+        command.downgrade(config, "0005_dev_totp")
+        with psycopg.connect(owner_url) as db:
+            for table in ("courses", "courses_teachers", "course_modules", "course_lessons"):
+                assert db.execute("SELECT to_regclass(%s)", ("public." + table,)).fetchone()[0] is None
+            assert db.execute("SELECT password_hash FROM users WHERE id=%s", (legacy_user,)).fetchone()[0] == 'legacy-hash'
+        command.upgrade(config, "head")
         with psycopg.connect(owner_url) as db:
             assert db.execute("SELECT password_hash FROM users WHERE id=%s", (legacy_user,)).fetchone()[0] == 'legacy-hash'
             assert db.execute("SELECT mfa_verified FROM sessions WHERE user_id=%s", (legacy_user,)).fetchone()[0] is False
@@ -81,11 +87,12 @@ def database():
             for table in ("users", "tenants", "memberships", "sessions", "login_attempts", "audit_events",
                           "invitations", "password_resets", "mfa_factors", "auth_events", "auth_mail_outbox",
                           "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit",
-                          "oidc_identities", "oidc_login_flows", "oidc_sessions"):
+                          "oidc_identities", "oidc_login_flows", "oidc_sessions",
+                          "courses", "courses_teachers", "course_modules", "course_lessons"):
                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
         command.upgrade(config, "head")
         with psycopg.connect(owner_url) as db:
-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0005_dev_totp"
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0006_courses"
         yield owner_url
     finally:
         if previous is None:

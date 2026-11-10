@@ -6,6 +6,7 @@ from .auth import router
 from .auth_lifecycle import router as lifecycle_router
 from .mfa import router as mfa_router
 from .oidc import router as oidc_router
+from .courses import router as courses_router
 from .traffic import ANONYMOUS_PATHS, admit
 from .auth_support import limited
 
@@ -14,10 +15,19 @@ app.include_router(router)
 app.include_router(lifecycle_router)
 app.include_router(mfa_router)
 app.include_router(oidc_router)
+app.include_router(courses_router)
 
 
 @app.middleware("http")
 async def private_responses(request, call_next):
+    if request.method == 'POST' and (request.url.path == '/courses' or request.url.path.startswith('/courses/')):
+        body = bytearray()
+        async for chunk in request.stream():
+            body.extend(chunk)
+            if len(body) > 262144:
+                return JSONResponse({'detail': 'Permintaan terlalu besar'}, status_code=413,
+                                    headers={'Cache-Control': 'no-store'})
+        request._body = bytes(body)
     if request.method == 'POST' and request.url.path in ANONYMOUS_PATHS:
         try:
             allowed = await run_in_threadpool(admit, request)

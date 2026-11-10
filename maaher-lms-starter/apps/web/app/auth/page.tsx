@@ -105,7 +105,7 @@ export default function Authentication() {
       <legend>Masuk dan keamanan akun</legend>
       <section aria-labelledby="oidc-heading">
         <h2 id="oidc-heading">Admin dan operator</h2>
-        <p>Gunakan akun organisasi yang telah didaftarkan beserta kunci keamanan Anda.</p>
+        <p>Gunakan akun organisasi yang telah didaftarkan dan selesaikan verifikasi yang diminta.</p>
         <button type="button" disabled={!oidcAvailable} onClick={() => void run(async () => {
           const result = await call('oidc/login', {});
           window.location.assign(result.authorization_url);
@@ -142,6 +142,7 @@ export default function Authentication() {
           const selected = await call('tenant-selection', {}); setRole(selected.role); setMessage('Organisasi dipilih');
           const self = await call('me'); setMyUser(self.user_id);
         })}>Gunakan organisasi</button>
+        {['admin','teacher'].includes(role) && <p><a href={`/courses?tenant=${encodeURIComponent(tenant)}`}>Kelola kursus</a></p>}
       </section>
       {externalLogin ? <section aria-labelledby="external-security-heading">
         <h2 id="external-security-heading">Keamanan akun organisasi</h2>

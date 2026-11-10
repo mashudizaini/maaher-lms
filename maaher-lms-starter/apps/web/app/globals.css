@@ -1,4 +1,4 @@
-body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 760px; padding: 0 1rem; }
+body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1100px; padding: 0 1rem; color: #172b3a; background: #f6f8fb; }
 fieldset { border: 0; padding: 0; }
 input, select, button { max-width: 100%; padding: .45rem; }
 input[readonly] { width: 90%; }
@@ -6,3 +6,50 @@ section { margin-block: 1.5rem; }
 table { border-collapse: collapse; width: 100%; }
 th, td { padding: .4rem; text-align: left; border-bottom: 1px solid #888; overflow-wrap: anywhere; }
 :focus-visible { outline: 3px solid #2458a6; outline-offset: 2px; }
+.eyebrow { font-size: .75rem; letter-spacing: .12em; color: #526b80; font-weight: 700; }
+.studio-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: 2rem; }
+.studio-header h1 { font-size: 2.2rem; margin: .3rem 0; }
+.studio-header nav, .button-row, .studio-toolbar, .inline-form { display: flex; gap: .65rem; flex-wrap: wrap; align-items: end; }
+.studio-header nav { padding-top: 1rem; }
+.courses-page button { border: 1px solid #c1cddb; background: white; color: #173c64; border-radius: .45rem; cursor: pointer; }
+.courses-page button:disabled { cursor: default; opacity: .5; }
+.courses-page input, .courses-page textarea, .courses-page select { box-sizing: border-box; border: 1px solid #b9c7d6; border-radius: .4rem; padding: .6rem; background: #fff; color: inherit; }
+.courses-page label { display: grid; gap: .35rem; font-size: .9rem; }
+.courses-page input[type=checkbox] { width: auto; }
+.studio-status { min-height: 1.5rem; padding: .8rem 0; color: #254e78; }
+.studio-grid { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0,1fr); gap: 1.5rem; align-items: start; }
+.studio-workspace { margin: 0; }
+.courses-page .check-label { display: flex; align-items: center; gap: .5rem; }
+.studio-panel { padding: 1.3rem; border: 1px solid #dce3ed; background: white; border-radius: .8rem; margin: 0 0 1.2rem; }
+.studio-panel h2, .studio-panel h3 { margin-top: 0; }
+.panel-heading, .module-heading { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+.stack-form { display: grid; gap: .9rem; margin-top: 1rem; }
+.stack-form > button, .stack-form > .button-row { justify-self: start; }
+.stack-form textarea { min-height: 90px; resize: vertical; }
+.inline-form { margin-block: 1rem; }
+.inline-form label { flex: 1; }
+.course-list, .module-list { list-style: none; margin: 1rem 0; padding: 0; }
+.course-list li { margin-bottom: .6rem; }
+.courses-page .course-card { text-align: left; width: 100%; display: grid; gap: .5rem; padding: .9rem; }
+.course-card strong { font-size: 1rem; }
+.course-card > span:last-child { font-size: .8rem; color: #5e7080; overflow-wrap: anywhere; }
+.courses-page .course-card.selected { border-color: #2863a3; background: #edf5ff; }
+.badge { font-size: .7rem; border-radius: 2rem; padding: .25rem .55rem; background: #edf0f5; width: fit-content; }
+.badge.published { background: #e1f3e9; color: #176540; }
+.badge.draft { background: #fff2d9; color: #795612; }
+.module-list > li { border-top: 1px solid #e0e6ef; padding-block: 1rem; }
+.module-list ol { padding-left: 1.3rem; }
+.module-list ol li { margin-block: .6rem; }
+.courses-page .text-button { border: none; color: #1d5d9c; text-align: left; }
+.muted { font-size: .85rem; color: #627385; }
+.resource-row { display: grid; gap: .5rem; padding-bottom: 1rem; }
+.courses-page .markdown-editor { min-height: 260px; font-family: ui-monospace, monospace; line-height: 1.6; }
+.lesson-preview { border-top: 1px solid #dce3ed; margin-top: 1.5rem; padding-top: 1rem; overflow-wrap: anywhere; }
+.lesson-preview pre { overflow-x: auto; padding: 1rem; background: #152d40; color: #f5f8fc; border-radius: .5rem; }
+.home-page { padding-block: 3rem; }
+.home-page h1 { font-size: 3rem; margin: .5rem 0; }
+.home-intro { max-width: 620px; font-size: 1.2rem; line-height: 1.7; color: #506b80; }
+.home-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 2rem; }
+.home-cards > a { border: 1px solid #dce3ed; border-radius: .8rem; padding: 1.5rem; color: #173c64; background: white; text-decoration: none; }
+.home-cards > a:hover { border-color: #2863a3; }
+@media(max-width: 740px) { .studio-grid, .home-cards { grid-template-columns: 1fr; } .studio-header { display: block; } .studio-panel { padding: 1rem; } }

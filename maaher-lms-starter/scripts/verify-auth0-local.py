@@ -112,10 +112,10 @@ def database(config, report):
                 report.add('database','FAIL','checker hanya untuk DB development sintetis maaher_test_*; tidak menginspeksi data pengguna')
                 return
             revision = owner.execute('SELECT version_num FROM alembic_version').fetchone()[0]
-            if revision != '0005_dev_totp':
+            if revision not in {'0005_dev_totp', '0006_courses'}:
                 report.add('database migration','FAIL','migration 0005 belum aktif; periksa source dan DB development yang dipilih')
                 return
-            report.add('database migration','PASS','0005 aktif pada DB sintetis')
+            report.add('database migration','PASS','schema Auth0 tersedia pada head yang dikenali di DB sintetis')
         with psycopg.connect(config['AUTH_DATABASE_URL'],connect_timeout=5,options='-c default_transaction_read_only=on') as auth:
             if auth.execute('SELECT current_database()').fetchone()[0] != name:
                 report.add('auth role','FAIL','auth dan migration URL menuju database berbeda')

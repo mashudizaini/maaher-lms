@@ -1,0 +1,152 @@
+{
+  "base_commit": "47335267d3e4d43ba42f7862ca6b8dd140fa5694",
+  "branch": "feat/LMS-02-course-management",
+  "generated_at": "2026-11-10T16:05:18.379526+00:00",
+  "scope": "Tenant-isolated course authoring development; auth parent unmerged",
+  "files": [
+    {
+      "path": ".github/workflows/lms-auth0.yml",
+      "bytes": 6980,
+      "sha256": "483ec585e396a92f81d60e658328f2aff4e11da58dd5a44fe3c325ee5c4f1846"
+    },
+    {
+      "path": "AUTH0-DEVELOPMENT.md",
+      "bytes": 989,
+      "sha256": "26d8adc8581845017fd3a8ae1775a8af12168f6d684c869c958966b6b7b7239f"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/courses.py",
+      "bytes": 17653,
+      "sha256": "ec6cca98e5424a3209fcad4d84517e1f56ddeefdf7f5919d59a8b9bbaa880146"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/main.py",
+      "bytes": 2243,
+      "sha256": "92eaba3310ca7b0f32a15062678fb82eb8ba32f172564374e8a146dcdaadf6cb"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/migrations/courses.sql",
+      "bytes": 7507,
+      "sha256": "867be5ffab2dbb8a22a3d3fc66b460da65845b9cf337815872a16d2b76ab7b88"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/migrations/versions/0006_courses.py",
+      "bytes": 600,
+      "sha256": "24859f288626b0e80d9969220b6332ce1c5606eafeb14b24adef31bff20efe3e"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/conftest.py",
+      "bytes": 9305,
+      "sha256": "421a800e17a1670d9389163dfff00c8471ddfe21f9d55e2ba79a324652b04324"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_courses.py",
+      "bytes": 16149,
+      "sha256": "acf3bc954093f5f373bf1025e3b3a2f5600551a73f36940f14d8c21129edd2dc"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_review_regressions.py",
+      "bytes": 35077,
+      "sha256": "fe4617fa1faec15fae4e823c0cb11cb90f4eb134d86926b52d337360940fd43f"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts",
+      "bytes": 4369,
+      "sha256": "02fa7f247833a8f039eeedec118cc48a31e955ba736301caa18de83231873dc9"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/auth/page.tsx",
+      "bytes": 15847,
+      "sha256": "3ae4327b185e379f6094fbfbdaebb7ef3164afb0e3c007451308abf42ec49fa1"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/courses/page.tsx",
+      "bytes": 20251,
+      "sha256": "61e0313d97883523f1c5a70a18b42038ca6d2b86ce9e2c07d95d6c698ae21e3a"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/globals.css",
+      "bytes": 4305,
+      "sha256": "83955d2231d972099b3b65476baeb4d46d8a6216dee22a1357231f8597c131a8"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/layout.tsx",
+      "bytes": 397,
+      "sha256": "15d66a1a2f7c7c6439cfe713266550cea987351c747a8b8cadf06246fe927b6e"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/page.tsx",
+      "bytes": 567,
+      "sha256": "e3ce93f9e0762bf2d5e507ba1e4176cc0e254e24ebd3f6d447b0ef8a76a955b7"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/package-lock.json",
+      "bytes": 81419,
+      "sha256": "475f131ceee31126dd88c1b603f6f114f1f1e3d5853e592ce4435bf4592aaa3d"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/package.json",
+      "bytes": 555,
+      "sha256": "d68934bd6152e254981d300acd51006edab66b063531bf196cb7900e3948c999"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/tests/courses.spec.ts",
+      "bytes": 6528,
+      "sha256": "7a8233d975b79503e68efd4961f92ea2bf8a2c1a447c423c92036904a1417fe1"
+    },
+    {
+      "path": "maaher-lms-starter/docs/ARCHITECTURE.md",
+      "bytes": 7261,
+      "sha256": "2a691c4e39e462bc87dada97b9b86952a34601ff3e14b3e7d814d027a059359b"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-02-HANDOFF.md",
+      "bytes": 7567,
+      "sha256": "4535bd139a5df29111352ce03a0727ae1366cb4c501cc3e7717277f389daf166"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-02-MAC-SETUP.md",
+      "bytes": 4794,
+      "sha256": "4e653ca27beff4363e93dbba5db70953f70a955bae9b11022679c8803065f755"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-02-PR.md",
+      "bytes": 1353,
+      "sha256": "1513b1321ee0874274de0f360983f5ee6219f4b4923c29d0f83adeb0de23a7e1"
+    },
+    {
+      "path": "maaher-lms-starter/docs/adr/006-course-authoring.md",
+      "bytes": 4954,
+      "sha256": "d9771b7dfa9bc105a475aa783ab52f6f7ea67eb57f1a81f00fc651c428d4afd1"
+    },
+    {
+      "path": "maaher-lms-starter/docs/tickets/LMS-02.md",
+      "bytes": 1968,
+      "sha256": "06e0626ac3b8abb5eab7fed565508bbdb8eea03c9dae677d62a9e3bdc8bece04"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/test-lms01-browser.py",
+      "bytes": 5142,
+      "sha256": "b3c188c7b87193993e25f1f01b963de735e615ac1bda21b98aefbccf76b7d43f"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/verify-auth0-local.py",
+      "bytes": 12130,
+      "sha256": "774a0ec62541041d2991cb4458309d2510137e7aa8e1a6a0b3b2a22a66dc9162"
+    }
+  ],
+  "patch_sha256": "8be9e341d7838bc6b7ea6f55c97d1bdb0a124a7a26999fc78186a4b530052429",
+  "validation": {
+    "api_unit_passed": 198,
+    "browser_passed": 11,
+    "script_unit_passed": 12,
+    "action_unit_passed": 16,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "npm_production_vulnerabilities": 0,
+    "mac_course_uat": "PENDING",
+    "independent_review": "PENDING",
+    "remote_ci": "UNVERIFIED"
+  }
+}

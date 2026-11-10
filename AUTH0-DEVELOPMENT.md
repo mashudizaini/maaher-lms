@@ -1,6 +1,8 @@
 # Maaher LMS — Auth0 development
 
 Source aplikasi berada di [maaher-lms-starter](maaher-lms-starter).
+Pada branch LMS-02, kelanjutan setelah login tersedia di
+[setup kursus Mac](maaher-lms-starter/docs/LMS-02-MAC-SETUP.md).
 Gunakan branch `feat/LMS-01-auth0-development` dan jalankan perintah aplikasi
 dari subfolder tersebut.
 

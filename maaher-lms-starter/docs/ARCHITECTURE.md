@@ -30,6 +30,11 @@ All tenant-owned relations carry tenant_id; enforce composite FK where possible 
 5. Integration tests: cross-tenant reads/writes/downloads denied with direct identifiers; membership revocation stops access; teacher cannot grade unassigned course.
 
 ## Auth implementation and external decisions
+
+LMS-02 development menambah schema 0006 untuk authoring course/module/lesson dan
+assignment guru. Contract permission, RLS, version/publish, safe Markdown dan
+rollback dijelaskan pada [ADR-006](adr/006-course-authoring.md). Pembacaan materi
+siswa tetap menunggu enrollment; belum ada runner atau upload service.
 Pemilik menyetujui Auth0/OIDC untuk admin/operator pada 10 November 2026.
 Implementasi development tahap 1 dan batas produksinya dijelaskan pada
 [ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada

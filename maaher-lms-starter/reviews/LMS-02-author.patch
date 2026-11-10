@@ -1,0 +1,3089 @@
+diff --git a/.github/workflows/lms-auth0.yml b/.github/workflows/lms-auth0.yml
+index 23af91d..bc51c02 100644
+--- a/.github/workflows/lms-auth0.yml
++++ b/.github/workflows/lms-auth0.yml
+@@ -2,7 +2,7 @@ name: CI
+ on:
+   pull_request:
+   push:
+-    branches: [main, feat/LMS-01-auth0-development]
++    branches: [main, feat/LMS-01-auth0-development, feat/LMS-02-course-management]
+ permissions:
+   contents: read
+ 
+@@ -104,6 +104,20 @@ jobs:
+           TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
+           TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
+         run: python scripts/test-lms01-browser.py --oidc --dev-totp
++      - name: Create separate course browser test database
++        run: |
++          python - <<'PY'
++          import os,psycopg
++          with psycopg.connect(os.environ['TEST_MIGRATION_DATABASE_URL'],autocommit=True) as db:
++              db.execute('CREATE DATABASE maaher_test_courses_browser_ci')
++          PY
++      - name: Course authoring browser regression
++        env:
++          TEST_MIGRATION_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/maaher_test_courses_browser_ci
++          TEST_DATABASE_URL: postgresql://maaher_api@127.0.0.1:5432/maaher_test_courses_browser_ci
++          TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_courses_browser_ci
++          TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_courses_browser_ci
++        run: python scripts/test-lms01-browser.py --oidc --dev-totp --courses
+   web:
+     runs-on: ubuntu-latest
+     steps:
+diff --git a/AUTH0-DEVELOPMENT.md b/AUTH0-DEVELOPMENT.md
+index 441bfb0..2c3e91f 100644
+--- a/AUTH0-DEVELOPMENT.md
++++ b/AUTH0-DEVELOPMENT.md
+@@ -1,6 +1,8 @@
+ # Maaher LMS — Auth0 development
+ 
+ Source aplikasi berada di [maaher-lms-starter](maaher-lms-starter).
++Pada branch LMS-02, kelanjutan setelah login tersedia di
++[setup kursus Mac](maaher-lms-starter/docs/LMS-02-MAC-SETUP.md).
+ Gunakan branch `feat/LMS-01-auth0-development` dan jalankan perintah aplikasi
+ dari subfolder tersebut.
+ 
+diff --git a/maaher-lms-starter/apps/api/app/courses.py b/maaher-lms-starter/apps/api/app/courses.py
+new file mode 100644
+index 0000000..c91c4db
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/courses.py
+@@ -0,0 +1,325 @@
++"""Course authoring: validated session, tenant RLS, assignments and version locks."""
++import ipaddress
++import re
++from urllib.parse import urlsplit
++from uuid import UUID, uuid4
++
++from fastapi import APIRouter, Depends, HTTPException, Query
++from pydantic import BaseModel, ConfigDict, Field, field_validator
++from psycopg.types.json import Jsonb
++
++from .auth import connection, principal, verify_origin
++from .security import Principal
++
++router = APIRouter(prefix="/courses")
++
++
++def https_resource(value):
++    if any(ord(c) <= 32 or c == "\\" for c in value):
++        raise ValueError("Gunakan tautan HTTPS publik tanpa spasi atau kredensial")
++    try:
++        url = urlsplit(value)
++        host = (url.hostname or "").encode("idna").decode().lower().rstrip('.')
++        valid = (url.scheme == "https" and url.username is None and url.password is None
++                 and url.port in {None, 443} and bool(host))
++        try:
++            valid = valid and ipaddress.ip_address(host).is_global
++        except ValueError:
++            labels = host.split('.')
++            valid = (valid and 1 < len(labels) and len(host) <= 253
++                     and not host.endswith((".local", ".localhost", ".internal"))
++                     and bool(re.fullmatch(r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})", labels[-1]))
++                     and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels))
++    except (ValueError, UnicodeError):
++        valid = False
++    if not valid:
++        raise ValueError("Gunakan tautan HTTPS publik tanpa kredensial")
++    return value
++
++
++class Input(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++
++class Title(Input):
++    title: str = Field(min_length=1, max_length=160)
++
++    @field_validator("title")
++    @classmethod
++    def trimmed(cls, value):
++        if not value.strip():
++            raise ValueError("Judul wajib diisi")
++        return value.strip()
++
++
++class Version(Input):
++    version: int = Field(ge=1)
++
++
++class NewCourse(Title):
++    description: str = Field(default="", max_length=2000)
++
++
++class EditCourse(NewCourse, Version):
++    pass
++
++
++class Module(Title, Version):
++    pass
++
++
++class Resource(Input):
++    label: str = Field(min_length=1, max_length=120)
++    url: str = Field(min_length=1, max_length=2048)
++    _https = field_validator("url")(https_resource)
++
++
++class Lesson(Title, Version):
++    content: str = Field(default="", max_length=30000)
++    resources: list[Resource] = Field(default_factory=list, max_length=10)
++
++
++class Teacher(Version):
++    user_id: UUID
++    assigned: bool
++
++
++class Order(Version):
++    ids: list[UUID] = Field(max_length=50)
++
++
++def manager(actor: Principal = Depends(principal)):
++    if actor.role not in {"admin", "teacher"}:
++        raise HTTPException(403, "Pengelolaan kursus tersedia bagi admin dan pengajar")
++    return actor
++
++
++def admin(actor):
++    if actor.role != "admin":
++        raise HTTPException(403, "Tindakan ini memerlukan admin organisasi")
++
++
++def audit(db, actor, action, target, kind="course"):
++    db.execute("INSERT INTO audit_events(id,tenant_id,actor_id,action,target_type,target_id) VALUES(%s,%s,%s,%s,%s,%s)",
++               (uuid4(), actor.tenant_id, actor.user_id, action, kind, target))
++
++
++def locked(db, actor, course_id, version, archived=False):
++    row = db.execute("SELECT * FROM courses WHERE tenant_id=%s AND id=%s FOR UPDATE", (actor.tenant_id, course_id)).fetchone()
++    if not row:
++        raise HTTPException(404, "Kursus tidak ditemukan")
++    if row["version"] != version:
++        raise HTTPException(409, "Kursus telah berubah. Muat ulang sebelum menyimpan")
++    if row["state"] == "archived" and not archived:
++        raise HTTPException(409, "Pulihkan kursus dari arsip terlebih dahulu")
++    return row
++
++
++def changed(db, actor, course_id, state="draft"):
++    return db.execute("UPDATE courses SET state=%s,version=version+1,updated_at=now() WHERE tenant_id=%s AND id=%s RETURNING version,state",
++                      (state, actor.tenant_id, course_id)).fetchone()
++
++
++def draft(db, actor, course_id):
++    # The same transaction returns published courses to draft before any edit.
++    db.execute("UPDATE courses SET state='draft' WHERE tenant_id=%s AND id=%s", (actor.tenant_id, course_id))
++
++
++def module_exists(db, actor, cid, mid):
++    if not db.execute("SELECT 1 FROM course_modules WHERE tenant_id=%s AND course_id=%s AND id=%s", (actor.tenant_id, cid, mid)).fetchone():
++        raise HTTPException(404, "Modul tidak ditemukan")
++
++
++@router.get("")
++def course_list(after: UUID | None = None, archived: bool = False, limit: int = Query(30, ge=1, le=50),
++                actor=Depends(manager), db=Depends(connection, scope="function")):
++    rows = db.execute("""SELECT id,title,description,state,version,updated_at FROM courses WHERE tenant_id=%s
++        AND (id>%s::uuid OR %s::uuid IS NULL) AND (state='archived')=%s ORDER BY id LIMIT %s""",
++        (actor.tenant_id, after, after, archived, limit + 1)).fetchall()
++    return {"courses": rows[:limit], "next_cursor": str(rows[limit - 1]["id"]) if len(rows) > limit else None}
++
++
++@router.post("", dependencies=[Depends(verify_origin)], status_code=201)
++def create_course(body: NewCourse, actor=Depends(manager), db=Depends(connection, scope="function")):
++    admin(actor)
++    db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("course-create:" + str(actor.tenant_id),))
++    if db.execute("SELECT count(*) AS n FROM courses WHERE tenant_id=%s", (actor.tenant_id,)).fetchone()["n"] >= 500:
++        raise HTTPException(409, "Batas 500 kursus per organisasi telah tercapai")
++    cid = uuid4()
++    row = db.execute("INSERT INTO courses(id,tenant_id,owner_id,title,description) VALUES(%s,%s,%s,%s,%s) RETURNING id,version,state",
++                     (cid, actor.tenant_id, actor.user_id, body.title, body.description)).fetchone()
++    audit(db, actor, "course.created", cid)
++    return row
++
++
++@router.get("/{cid}")
++def course_detail(cid: UUID, actor=Depends(manager), db=Depends(connection, scope="function")):
++    row = db.execute("SELECT * FROM courses WHERE tenant_id=%s AND id=%s", (actor.tenant_id, cid)).fetchone()
++    if not row:
++        raise HTTPException(404, "Kursus tidak ditemukan")
++    modules = db.execute("SELECT id,title,position FROM course_modules WHERE tenant_id=%s AND course_id=%s ORDER BY position,id",
++                         (actor.tenant_id, cid)).fetchall()
++    lessons = db.execute("SELECT id,module_id,title,position FROM course_lessons WHERE tenant_id=%s AND course_id=%s ORDER BY position,id",
++                         (actor.tenant_id, cid)).fetchall()
++    for mod in modules:
++        mod["lessons"] = [lesson for lesson in lessons if lesson["module_id"] == mod["id"]]
++    row["modules"] = modules
++    row["teachers"] = [str(r["user_id"]) for r in db.execute("SELECT user_id FROM courses_teachers WHERE tenant_id=%s AND course_id=%s ORDER BY user_id", (actor.tenant_id, cid)).fetchall()]
++    return row
++
++
++@router.post("/{cid}", dependencies=[Depends(verify_origin)])
++def edit_course(cid: UUID, body: EditCourse, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version)
++    db.execute("UPDATE courses SET title=%s,description=%s WHERE tenant_id=%s AND id=%s", (body.title, body.description, actor.tenant_id, cid))
++    result = changed(db, actor, cid)
++    audit(db, actor, "course.updated", cid)
++    return result
++
++
++@router.post("/{cid}/publish", dependencies=[Depends(verify_origin)])
++def publish(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version)
++    modules = db.execute("SELECT id FROM course_modules WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid)).fetchall()
++    incomplete = db.execute("""SELECT 1 FROM course_modules m WHERE m.tenant_id=%s AND m.course_id=%s
++        AND NOT EXISTS(SELECT 1 FROM course_lessons l WHERE l.tenant_id=m.tenant_id AND l.course_id=m.course_id AND l.module_id=m.id) LIMIT 1""", (actor.tenant_id, cid)).fetchone()
++    empty = db.execute("SELECT 1 FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND length(btrim(content))=0 LIMIT 1", (actor.tenant_id, cid)).fetchone()
++    if not modules or incomplete or empty:
++        raise HTTPException(409, "Isi setiap modul dengan pelajaran dan materi sebelum menerbitkan")
++    result = changed(db, actor, cid, "published"); audit(db, actor, "course.published", cid)
++    return result
++
++
++@router.post("/{cid}/unpublish", dependencies=[Depends(verify_origin)])
++def unpublish(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version)
++    result = changed(db, actor, cid); audit(db, actor, "course.unpublished", cid)
++    return result
++
++
++@router.post("/{cid}/archive", dependencies=[Depends(verify_origin)])
++def archive(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
++    admin(actor); locked(db, actor, cid, body.version)
++    result = changed(db, actor, cid, "archived"); audit(db, actor, "course.archived", cid)
++    return result
++
++
++@router.post("/{cid}/restore", dependencies=[Depends(verify_origin)])
++def restore(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
++    admin(actor); locked(db, actor, cid, body.version, archived=True)
++    result = changed(db, actor, cid); audit(db, actor, "course.restored", cid)
++    return result
++
++
++@router.post("/{cid}/teachers", dependencies=[Depends(verify_origin)])
++def assign_teacher(cid: UUID, body: Teacher, actor=Depends(manager), db=Depends(connection, scope="function")):
++    admin(actor); locked(db, actor, cid, body.version)
++    if body.assigned:
++        role = db.execute("SELECT course_member_role(%s,%s) AS role", (actor.tenant_id, body.user_id)).fetchone()["role"]
++        if role != "teacher":
++            raise HTTPException(404, "Pengajar aktif tidak ditemukan dalam organisasi ini")
++        count = db.execute("SELECT count(*) AS n FROM courses_teachers WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid)).fetchone()["n"]
++        present = db.execute("SELECT 1 FROM courses_teachers WHERE tenant_id=%s AND course_id=%s AND user_id=%s", (actor.tenant_id, cid, body.user_id)).fetchone()
++        if count >= 50 and not present:
++            raise HTTPException(409, "Batas 50 pengajar per kursus telah tercapai")
++        db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (actor.tenant_id, cid, body.user_id))
++    else:
++        db.execute("DELETE FROM courses_teachers WHERE tenant_id=%s AND course_id=%s AND user_id=%s", (actor.tenant_id, cid, body.user_id))
++    result = changed(db, actor, cid); audit(db, actor, "course.teacher_assigned" if body.assigned else "course.teacher_removed", body.user_id, "course_teacher")
++    return result
++
++
++@router.post("/{cid}/modules", dependencies=[Depends(verify_origin)], status_code=201)
++def create_module(cid: UUID, body: Module, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version)
++    count = db.execute("SELECT count(*) AS n FROM course_modules WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid)).fetchone()["n"]
++    if count >= 30: raise HTTPException(409, "Batas 30 modul per kursus telah tercapai")
++    draft(db, actor, cid); mid = uuid4()
++    db.execute("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,%s,%s)", (mid, actor.tenant_id, cid, body.title, count + 1))
++    result = changed(db, actor, cid); audit(db, actor, "module.created", mid, "module")
++    return {**result, "id": mid}
++
++
++@router.post("/{cid}/modules/{mid}", dependencies=[Depends(verify_origin)])
++def edit_module(cid: UUID, mid: UUID, body: Module, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid); draft(db, actor, cid)
++    db.execute("UPDATE course_modules SET title=%s WHERE tenant_id=%s AND course_id=%s AND id=%s", (body.title, actor.tenant_id, cid, mid))
++    result = changed(db, actor, cid); audit(db, actor, "module.updated", mid, "module")
++    return result
++
++
++def reorder(db, actor, cid, table, ids, mid=None):
++    # Table is selected only by server constants, never by request input.
++    clause, params = "tenant_id=%s AND course_id=%s", [actor.tenant_id, cid]
++    if mid is not None: clause += " AND module_id=%s"; params.append(mid)
++    rows = db.execute("SELECT id FROM " + table + " WHERE " + clause + " ORDER BY position,id", params).fetchall()
++    if len(ids) != len(set(ids)) or set(ids) != {r["id"] for r in rows}:
++        raise HTTPException(409, "Urutan harus memuat seluruh item pada induk yang sama, tepat satu kali")
++    for position, item in enumerate(ids, 1):
++        db.execute("UPDATE " + table + " SET position=%s WHERE " + clause + " AND id=%s", [position, *params, item])
++
++
++@router.post("/{cid}/reorder-modules", dependencies=[Depends(verify_origin)])
++def order_modules(cid: UUID, body: Order, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version); draft(db, actor, cid)
++    reorder(db, actor, cid, "course_modules", body.ids)
++    result = changed(db, actor, cid); audit(db, actor, "module.reordered", cid)
++    return result
++
++
++@router.post("/{cid}/modules/{mid}/delete", dependencies=[Depends(verify_origin)])
++def delete_module(cid: UUID, mid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid); draft(db, actor, cid)
++    db.execute("DELETE FROM course_modules WHERE tenant_id=%s AND course_id=%s AND id=%s", (actor.tenant_id, cid, mid))
++    ids = [r["id"] for r in db.execute("SELECT id FROM course_modules WHERE tenant_id=%s AND course_id=%s ORDER BY position,id", (actor.tenant_id, cid)).fetchall()]
++    reorder(db, actor, cid, "course_modules", ids)
++    result = changed(db, actor, cid); audit(db, actor, "module.deleted", mid, "module")
++    return result
++
++
++@router.post("/{cid}/modules/{mid}/lessons", dependencies=[Depends(verify_origin)], status_code=201)
++def create_lesson(cid: UUID, mid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid)
++    count = db.execute("SELECT count(*) AS n FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s", (actor.tenant_id, cid, mid)).fetchone()["n"]
++    if count >= 50: raise HTTPException(409, "Batas 50 pelajaran per modul telah tercapai")
++    draft(db, actor, cid); lid = uuid4()
++    db.execute("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,resources,position) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
++               (lid, actor.tenant_id, cid, mid, body.title, body.content, Jsonb([r.model_dump() for r in body.resources]), count + 1))
++    result = changed(db, actor, cid); audit(db, actor, "lesson.created", lid, "lesson")
++    return {**result, "id": lid}
++
++
++@router.get("/{cid}/modules/{mid}/lessons/{lid}")
++def lesson_detail(cid: UUID, mid: UUID, lid: UUID, actor=Depends(manager), db=Depends(connection, scope="function")):
++    row = db.execute("SELECT id,title,content,resources FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s", (actor.tenant_id, cid, mid, lid)).fetchone()
++    if not row: raise HTTPException(404, "Pelajaran tidak ditemukan")
++    return row
++
++
++@router.post("/{cid}/modules/{mid}/lessons/{lid}", dependencies=[Depends(verify_origin)])
++def edit_lesson(cid: UUID, mid: UUID, lid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version); draft(db, actor, cid)
++    row = db.execute("UPDATE course_lessons SET title=%s,content=%s,resources=%s WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id",
++        (body.title, body.content, Jsonb([r.model_dump() for r in body.resources]), actor.tenant_id, cid, mid, lid)).fetchone()
++    if not row: raise HTTPException(404, "Pelajaran tidak ditemukan")
++    result = changed(db, actor, cid); audit(db, actor, "lesson.updated", lid, "lesson")
++    return result
++
++
++@router.post("/{cid}/modules/{mid}/reorder-lessons", dependencies=[Depends(verify_origin)])
++def order_lessons(cid: UUID, mid: UUID, body: Order, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid); draft(db, actor, cid)
++    reorder(db, actor, cid, "course_lessons", body.ids, mid)
++    result = changed(db, actor, cid); audit(db, actor, "lesson.reordered", mid, "module")
++    return result
++
++
++@router.post("/{cid}/modules/{mid}/lessons/{lid}/delete", dependencies=[Depends(verify_origin)])
++def delete_lesson(cid: UUID, mid: UUID, lid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
++    locked(db, actor, cid, body.version); draft(db, actor, cid)
++    row = db.execute("DELETE FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id", (actor.tenant_id, cid, mid, lid)).fetchone()
++    if not row: raise HTTPException(404, "Pelajaran tidak ditemukan")
++    ids = [r["id"] for r in db.execute("SELECT id FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s ORDER BY position,id", (actor.tenant_id, cid, mid)).fetchall()]
++    reorder(db, actor, cid, "course_lessons", ids, mid)
++    result = changed(db, actor, cid); audit(db, actor, "lesson.deleted", lid, "lesson")
++    return result
+diff --git a/maaher-lms-starter/apps/api/app/main.py b/maaher-lms-starter/apps/api/app/main.py
+index 1baea96..cd785a3 100644
+--- a/maaher-lms-starter/apps/api/app/main.py
++++ b/maaher-lms-starter/apps/api/app/main.py
+@@ -6,6 +6,7 @@ from .auth import router
+ from .auth_lifecycle import router as lifecycle_router
+ from .mfa import router as mfa_router
+ from .oidc import router as oidc_router
++from .courses import router as courses_router
+ from .traffic import ANONYMOUS_PATHS, admit
+ from .auth_support import limited
+ 
+@@ -14,10 +15,19 @@ app.include_router(router)
+ app.include_router(lifecycle_router)
+ app.include_router(mfa_router)
+ app.include_router(oidc_router)
++app.include_router(courses_router)
+ 
+ 
+ @app.middleware("http")
+ async def private_responses(request, call_next):
++    if request.method == 'POST' and (request.url.path == '/courses' or request.url.path.startswith('/courses/')):
++        body = bytearray()
++        async for chunk in request.stream():
++            body.extend(chunk)
++            if len(body) > 262144:
++                return JSONResponse({'detail': 'Permintaan terlalu besar'}, status_code=413,
++                                    headers={'Cache-Control': 'no-store'})
++        request._body = bytes(body)
+     if request.method == 'POST' and request.url.path in ANONYMOUS_PATHS:
+         try:
+             allowed = await run_in_threadpool(admit, request)
+diff --git a/maaher-lms-starter/apps/api/migrations/courses.sql b/maaher-lms-starter/apps/api/migrations/courses.sql
+new file mode 100644
+index 0000000..a97a8f3
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/courses.sql
+@@ -0,0 +1,127 @@
++CREATE TABLE courses (
++    id uuid PRIMARY KEY, tenant_id uuid NOT NULL REFERENCES tenants(id),
++    owner_id uuid NOT NULL REFERENCES users(id),
++    title text NOT NULL CHECK(length(btrim(title)) BETWEEN 1 AND 160),
++    description text NOT NULL DEFAULT '' CHECK(length(description)<=2000),
++    state text NOT NULL DEFAULT 'draft' CHECK(state IN ('draft','published','archived')),
++    version integer NOT NULL DEFAULT 1 CHECK(version>0),
++    created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(),
++    UNIQUE(tenant_id,id), FOREIGN KEY(tenant_id,owner_id) REFERENCES memberships(tenant_id,user_id)
++);
++-- statement
++CREATE TABLE courses_teachers (
++    tenant_id uuid NOT NULL, course_id uuid NOT NULL, user_id uuid NOT NULL,
++    PRIMARY KEY(tenant_id,course_id,user_id),
++    FOREIGN KEY(tenant_id,course_id) REFERENCES courses(tenant_id,id) ON DELETE CASCADE,
++    FOREIGN KEY(tenant_id,user_id) REFERENCES memberships(tenant_id,user_id)
++);
++-- statement
++CREATE TABLE course_modules (
++    id uuid PRIMARY KEY, tenant_id uuid NOT NULL, course_id uuid NOT NULL,
++    title text NOT NULL CHECK(length(btrim(title)) BETWEEN 1 AND 160),
++    position integer NOT NULL CHECK(position BETWEEN 1 AND 10000),
++    UNIQUE(tenant_id,course_id,id),
++    UNIQUE(tenant_id,course_id,position) DEFERRABLE INITIALLY DEFERRED,
++    FOREIGN KEY(tenant_id,course_id) REFERENCES courses(tenant_id,id) ON DELETE CASCADE
++);
++-- statement
++CREATE TABLE course_lessons (
++    id uuid PRIMARY KEY, tenant_id uuid NOT NULL, course_id uuid NOT NULL, module_id uuid NOT NULL,
++    title text NOT NULL CHECK(length(btrim(title)) BETWEEN 1 AND 160),
++    content text NOT NULL DEFAULT '' CHECK(length(content)<=30000),
++    resources jsonb NOT NULL DEFAULT '[]' CHECK(jsonb_typeof(resources)='array' AND jsonb_array_length(resources)<=10),
++    position integer NOT NULL CHECK(position BETWEEN 1 AND 10000),
++    UNIQUE(tenant_id,course_id,module_id,position) DEFERRABLE INITIALLY DEFERRED,
++    FOREIGN KEY(tenant_id,course_id,module_id) REFERENCES course_modules(tenant_id,course_id,id) ON DELETE CASCADE
++);
++-- statement
++CREATE FUNCTION course_member_role(p_tenant uuid,p_user uuid) RETURNS text
++LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
++DECLARE actor uuid; actor_role text;
++BEGIN
++    IF p_tenant::text IS DISTINCT FROM current_setting('app.tenant_id',true) THEN RETURN NULL; END IF;
++    actor:=public.runtime_identity();
++    SELECT m.role INTO actor_role FROM public.memberships m JOIN public.tenants t ON t.id=m.tenant_id
++      WHERE m.tenant_id=p_tenant AND m.user_id=actor AND m.status='active' AND t.status='active';
++    IF actor_role IS NULL OR (p_user<>actor AND actor_role<>'admin') THEN RETURN NULL; END IF;
++    RETURN (SELECT m.role FROM public.memberships m JOIN public.users u ON u.id=m.user_id
++            WHERE m.tenant_id=p_tenant AND m.user_id=p_user AND m.status='active' AND u.status='active');
++END $$;
++-- statement
++ALTER FUNCTION course_member_role(uuid,uuid) OWNER TO maaher_definer;
++-- statement
++REVOKE ALL ON FUNCTION course_member_role(uuid,uuid) FROM PUBLIC;
++-- statement
++GRANT EXECUTE ON FUNCTION course_member_role(uuid,uuid) TO maaher_runtime;
++-- statement
++CREATE FUNCTION course_can_manage(p_tenant uuid,p_course uuid) RETURNS boolean
++LANGUAGE sql STABLE SECURITY INVOKER SET search_path=pg_catalog,public,pg_temp AS $$
++    SELECT coalesce(public.course_member_role(p_tenant,public.runtime_identity())='admin'
++      OR (public.course_member_role(p_tenant,public.runtime_identity())='teacher' AND EXISTS(
++          SELECT 1 FROM public.courses_teachers a WHERE a.tenant_id=p_tenant AND a.course_id=p_course
++          AND a.user_id=public.runtime_identity())),false)
++$$;
++-- statement
++REVOKE ALL ON FUNCTION course_can_manage(uuid,uuid) FROM PUBLIC;
++-- statement
++GRANT EXECUTE ON FUNCTION course_can_manage(uuid,uuid) TO maaher_runtime;
++-- statement
++ALTER TABLE courses ENABLE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE courses FORCE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE courses_teachers ENABLE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE courses_teachers FORCE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE course_modules ENABLE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE course_modules FORCE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE course_lessons ENABLE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE course_lessons FORCE ROW LEVEL SECURITY;
++-- statement
++CREATE POLICY course_read ON courses FOR SELECT TO maaher_runtime USING(course_can_manage(tenant_id,id));
++-- statement
++CREATE POLICY course_create ON courses FOR INSERT TO maaher_runtime
++WITH CHECK(course_member_role(tenant_id,runtime_identity())='admin' AND owner_id=runtime_identity() AND state='draft' AND version=1);
++-- statement
++CREATE POLICY course_update ON courses FOR UPDATE TO maaher_runtime
++USING(course_can_manage(tenant_id,id) AND (state<>'archived' OR course_member_role(tenant_id,runtime_identity())='admin'))
++WITH CHECK(course_can_manage(tenant_id,id) AND (state<>'archived' OR course_member_role(tenant_id,runtime_identity())='admin'));
++-- statement
++CREATE POLICY assignment_read ON courses_teachers FOR SELECT TO maaher_runtime USING(
++    course_member_role(tenant_id,runtime_identity())='admin' OR
++    (user_id=runtime_identity() AND course_member_role(tenant_id,runtime_identity())='teacher'));
++-- statement
++CREATE POLICY assignment_add ON courses_teachers FOR INSERT TO maaher_runtime WITH CHECK(
++    course_member_role(tenant_id,runtime_identity())='admin' AND course_member_role(tenant_id,user_id)='teacher');
++-- statement
++CREATE POLICY assignment_remove ON courses_teachers FOR DELETE TO maaher_runtime USING(course_member_role(tenant_id,runtime_identity())='admin');
++-- statement
++CREATE POLICY module_read ON course_modules FOR SELECT TO maaher_runtime USING(course_can_manage(tenant_id,course_id));
++-- statement
++CREATE POLICY module_write ON course_modules FOR ALL TO maaher_runtime
++USING(course_can_manage(tenant_id,course_id) AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id=course_modules.tenant_id AND c.id=course_modules.course_id AND c.state='draft'))
++WITH CHECK(course_can_manage(tenant_id,course_id) AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id=course_modules.tenant_id AND c.id=course_modules.course_id AND c.state='draft'));
++-- statement
++CREATE POLICY lesson_read ON course_lessons FOR SELECT TO maaher_runtime USING(course_can_manage(tenant_id,course_id));
++-- statement
++CREATE POLICY lesson_write ON course_lessons FOR ALL TO maaher_runtime
++USING(course_can_manage(tenant_id,course_id) AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id=course_lessons.tenant_id AND c.id=course_lessons.course_id AND c.state='draft'))
++WITH CHECK(course_can_manage(tenant_id,course_id) AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id=course_lessons.tenant_id AND c.id=course_lessons.course_id AND c.state='draft'));
++-- statement
++REVOKE ALL ON courses,courses_teachers,course_modules,course_lessons FROM PUBLIC,maaher_auth;
++-- statement
++GRANT SELECT,INSERT ON courses TO maaher_runtime;
++-- statement
++GRANT UPDATE(title,description,state,version,updated_at) ON courses TO maaher_runtime;
++-- statement
++GRANT SELECT,INSERT,DELETE ON courses_teachers TO maaher_runtime;
++-- statement
++GRANT SELECT,INSERT,DELETE ON course_modules,course_lessons TO maaher_runtime;
++-- statement
++GRANT UPDATE(title,position) ON course_modules TO maaher_runtime;
++-- statement
++GRANT UPDATE(title,content,resources,position) ON course_lessons TO maaher_runtime;
+diff --git a/maaher-lms-starter/apps/api/migrations/versions/0006_courses.py b/maaher-lms-starter/apps/api/migrations/versions/0006_courses.py
+new file mode 100644
+index 0000000..5d7004c
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/versions/0006_courses.py
+@@ -0,0 +1,19 @@
++"""Tenant-isolated course authoring, assignments and lesson resources."""
++from pathlib import Path
++from alembic import op
++
++revision = "0006_courses"
++down_revision = "0005_dev_totp"
++branch_labels = None
++depends_on = None
++
++
++def upgrade():
++    for statement in (Path(__file__).parent.parent / "courses.sql").read_text().split("\n-- statement\n"):
++        op.execute(statement)
++
++
++def downgrade():
++    op.execute("DROP TABLE course_lessons,course_modules,courses_teachers,courses")
++    op.execute("DROP FUNCTION course_can_manage(uuid,uuid)")
++    op.execute("DROP FUNCTION course_member_role(uuid,uuid)")
+diff --git a/maaher-lms-starter/apps/api/tests/conftest.py b/maaher-lms-starter/apps/api/tests/conftest.py
+index 598b0e4..2ac1d65 100644
+--- a/maaher-lms-starter/apps/api/tests/conftest.py
++++ b/maaher-lms-starter/apps/api/tests/conftest.py
+@@ -37,6 +37,12 @@ def database():
+                        (uuid4(), legacy_tenant, legacy_user))
+             db.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES ('legacy-token-hash',%s,now()+interval '1 hour')", (legacy_user,))
+         command.upgrade(config, "head")
++        command.downgrade(config, "0005_dev_totp")
++        with psycopg.connect(owner_url) as db:
++            for table in ("courses", "courses_teachers", "course_modules", "course_lessons"):
++                assert db.execute("SELECT to_regclass(%s)", ("public." + table,)).fetchone()[0] is None
++            assert db.execute("SELECT password_hash FROM users WHERE id=%s", (legacy_user,)).fetchone()[0] == 'legacy-hash'
++        command.upgrade(config, "head")
+         with psycopg.connect(owner_url) as db:
+             assert db.execute("SELECT password_hash FROM users WHERE id=%s", (legacy_user,)).fetchone()[0] == 'legacy-hash'
+             assert db.execute("SELECT mfa_verified FROM sessions WHERE user_id=%s", (legacy_user,)).fetchone()[0] is False
+@@ -81,11 +87,12 @@ def database():
+             for table in ("users", "tenants", "memberships", "sessions", "login_attempts", "audit_events",
+                           "invitations", "password_resets", "mfa_factors", "auth_events", "auth_mail_outbox",
+                           "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit",
+-                          "oidc_identities", "oidc_login_flows", "oidc_sessions"):
++                          "oidc_identities", "oidc_login_flows", "oidc_sessions",
++                          "courses", "courses_teachers", "course_modules", "course_lessons"):
+                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
+         command.upgrade(config, "head")
+         with psycopg.connect(owner_url) as db:
+-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0005_dev_totp"
++            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0006_courses"
+         yield owner_url
+     finally:
+         if previous is None:
+diff --git a/maaher-lms-starter/apps/api/tests/test_courses.py b/maaher-lms-starter/apps/api/tests/test_courses.py
+new file mode 100644
+index 0000000..8624bca
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_courses.py
+@@ -0,0 +1,252 @@
++"""Authoring against real PostgreSQL roles, RLS and composite constraints."""
++import os
++from concurrent.futures import ThreadPoolExecutor
++from uuid import uuid4
++
++import psycopg
++import pytest
++from fastapi.testclient import TestClient
++from pydantic import ValidationError
++
++from app.courses import Resource
++from app.database import transaction, session_context, tenant_context, user_context
++from app.main import app
++from app.security import token_digest
++from auth_helpers import make_admin, sign_in
++
++
++@pytest.fixture
++def author(identity):
++    headers, _ = make_admin(identity)
++    client = identity[0]
++    response = client.post('/courses', json={'title': 'Python untuk pemula', 'description': 'Belajar dari dasar'}, headers=headers)
++    assert response.status_code == 201, response.text
++    return identity, headers, response.json()['id']
++
++
++def detail(author):
++    identity, headers, cid = author
++    response = identity[0].get('/courses/' + cid, headers=headers)
++    assert response.status_code == 200, response.text
++    return response.json()
++
++
++def write(author, path='', **body):
++    identity, headers, cid = author
++    return identity[0].post('/courses/' + cid + path, json={'version': detail(author)['version'], **body}, headers=headers)
++
++
++def filled(author):
++    mod = write(author, '/modules', title='Dasar Python'); assert mod.status_code == 201, mod.text
++    mid = mod.json()['id']
++    lesson = write(author, f'/modules/{mid}/lessons', title='Hello Python', content='# Halo\n\n```python\nprint("Halo")\n```',
++                   resources=[{'label': 'Dokumentasi Python', 'url': 'https://docs.python.org/3/'}])
++    assert lesson.status_code == 201, lesson.text
++    return mid, lesson.json()['id']
++
++
++def test_course_lifecycle_publish_edit_and_archive_preserve_data(author):
++    identity, headers, cid = author; client = identity[0]
++    assert write(author, '/publish').status_code == 409
++    mid, lid = filled(author)
++    assert write(author, '/publish').json()['state'] == 'published'
++    response = write(author, f'/modules/{mid}/lessons/{lid}', title='Pelajaran diperbarui', content='Materi baru')
++    assert response.status_code == 200 and response.json()['state'] == 'draft'
++    assert write(author, '/publish').json()['state'] == 'published'
++    assert write(author, '/unpublish').json()['state'] == 'draft'
++    assert write(author, '/archive').json()['state'] == 'archived'
++    assert client.get('/courses', headers=headers).json()['courses'] == []
++    assert len(client.get('/courses?archived=true', headers=headers).json()['courses']) == 1
++    assert write(author, '/modules', title='Tidak boleh').status_code == 409
++    assert write(author, '/restore').json()['state'] == 'draft'
++    assert detail(author)['modules'][0]['lessons'][0]['title'] == 'Pelajaran diperbarui'
++    actions = [r['action'] for r in client.get('/auth/audit', headers=headers).json()]
++    assert {'course.created', 'lesson.updated', 'course.published', 'course.archived', 'course.restored'} <= set(actions)
++
++
++def test_empty_modules_and_lessons_cannot_be_published(author):
++    mid = write(author, '/modules', title='Modul kosong').json()['id']
++    assert write(author, '/publish').status_code == 409
++    lid = write(author, f'/modules/{mid}/lessons', title='Pelajaran kosong').json()['id']
++    assert write(author, '/publish').status_code == 409
++    assert write(author, f'/modules/{mid}/lessons/{lid}', title='Pelajaran', content='Materi').status_code == 200
++    assert write(author, '/publish').status_code == 200
++
++
++def test_stale_versions_and_failed_child_edits_are_atomic(author):
++    identity, headers, cid = author; client = identity[0]
++    mid, lid = filled(author)
++    stale = detail(author)['version']
++    assert write(author, '/publish').status_code == 200
++    response = client.post('/courses/' + cid, json={'title': 'Stale', 'version': stale}, headers=headers)
++    assert response.status_code == 409
++    before = detail(author)
++    assert write(author, f'/modules/{mid}/lessons/{uuid4()}', title='Salah', content='Tidak disimpan').status_code == 404
++    after = detail(author)
++    assert after['version'] == before['version'] and after['state'] == 'published' and after['title'] == before['title']
++
++
++def test_simultaneous_writers_cannot_overwrite_each_other(author):
++    identity, headers, cid = author; version = detail(author)['version']
++    def save(title):
++        with TestClient(app, base_url='https://testserver') as client:
++            client.cookies.update(identity[0].cookies)
++            return client.post('/courses/' + cid, json={'version': version, 'title': title}, headers=headers).status_code
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        outcomes = list(pool.map(save, ['Perubahan pertama', 'Perubahan kedua']))
++    assert sorted(outcomes) == [200, 409]
++    assert detail(author)['version'] == version + 1
++    with psycopg.connect(identity[1]) as db:
++        assert db.execute("SELECT count(*) FROM audit_events WHERE target_id=%s AND action='course.updated'", (cid,)).fetchone()[0] == 1
++
++
++def test_module_lesson_order_and_deletion_are_parent_scoped(author):
++    mid, lid = filled(author)
++    second = write(author, '/modules', title='Modul kedua').json()['id']
++    other = write(author, f'/modules/{mid}/lessons', title='Latihan', content='Latihan coding').json()['id']
++    assert write(author, '/reorder-modules', ids=[second, mid]).status_code == 200
++    assert detail(author)['modules'][0]['id'] == second
++    assert write(author, f'/modules/{mid}/reorder-lessons', ids=[other, lid]).status_code == 200
++    assert write(author, f'/modules/{second}/reorder-lessons', ids=[lid]).status_code == 409
++    assert write(author, '/reorder-modules', ids=[mid, mid]).status_code == 409
++    assert write(author, f'/modules/{mid}/lessons/{lid}/delete').status_code == 200
++    assert write(author, f'/modules/{mid}/delete').status_code == 200
++    assert len(detail(author)['modules']) == 1
++    assert write(author, '/modules', title='Setelah hapus').status_code == 201
++    assert [r['position'] for r in detail(author)['modules']] == [1, 2]
++
++
++def test_teacher_only_manages_assigned_courses_and_revocation_is_immediate(author):
++    identity, headers, cid = author; _, owner, _, tenant, foreign, _, password = identity
++    with psycopg.connect(owner) as db:
++        teacher = db.execute('SELECT user_id FROM memberships WHERE tenant_id=%s', (foreign,)).fetchone()[0]
++        db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'teacher')", (uuid4(), tenant, teacher))
++    second = identity[0].post('/courses', json={'title': 'Kursus lain'}, headers=headers).json()['id']
++    with TestClient(app, base_url='https://testserver') as client:
++        assert sign_in(client, f'{teacher}@example.invalid', password).status_code == 200
++        assert client.get('/courses', headers=headers).json()['courses'] == []
++        assert client.get('/courses/' + cid, headers=headers).status_code == 404
++        assert client.post('/courses', json={'title': 'Tidak boleh'}, headers=headers).status_code == 403
++        assert write(author, '/teachers', user_id=str(teacher), assigned=True).status_code == 200
++        assert [r['id'] for r in client.get('/courses', headers=headers).json()['courses']] == [cid]
++        assert client.get('/courses/' + second, headers=headers).status_code == 404
++        version = client.get('/courses/' + cid, headers=headers).json()['version']
++        assert client.post(f'/courses/{cid}/modules', json={'title': 'Modul guru', 'version': version}, headers=headers).status_code == 201
++        assert client.post(f'/courses/{cid}/archive', json={'version': detail(author)['version']}, headers=headers).status_code == 403
++        assert write(author, '/teachers', user_id=str(teacher), assigned=False).status_code == 200
++        assert client.get('/courses/' + cid, headers=headers).status_code == 404
++        assert client.get('/courses', headers=headers).json()['courses'] == []
++
++
++def test_inactive_or_foreign_members_cannot_be_assigned(author):
++    identity, _, _ = author
++    with psycopg.connect(identity[1]) as db:
++        foreign = db.execute('SELECT user_id FROM memberships WHERE tenant_id=%s', (identity[4],)).fetchone()[0]
++    assert write(author, '/teachers', user_id=str(foreign), assigned=True).status_code == 404
++    assert write(author, '/teachers', user_id=str(identity[2]), assigned=True).status_code == 404
++    with psycopg.connect(identity[1]) as db:
++        db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'teacher')", (uuid4(), identity[3], foreign))
++        db.execute("UPDATE users SET status='disabled' WHERE id=%s", (foreign,))
++    assert write(author, '/teachers', user_id=str(foreign), assigned=True).status_code == 404
++
++
++def test_students_anonymous_and_forged_tenant_headers_are_denied(identity):
++    client, _, _, tenant, foreign, email, password = identity
++    headers = {'origin': 'https://testserver', 'x-tenant-id': str(tenant)}
++    assert client.get('/courses', headers=headers).status_code == 401
++    assert sign_in(client, email, password).status_code == 200
++    assert client.get('/courses', headers=headers).status_code == 403
++    assert client.get('/courses', headers={'x-tenant-id': str(foreign)}).status_code == 403
++
++
++def test_origin_payload_ownership_and_resource_limits(author):
++    identity, headers, cid = author; client = identity[0]
++    assert client.post('/courses', json={'title': 'No origin'}).status_code == 403
++    assert client.post('/courses', json={'title': 'Foreign origin'}, headers={**headers, 'origin': 'https://evil.invalid'}).status_code == 403
++    assert client.post('/courses', json={'title': 'Forged', 'tenant_id': str(identity[4])}, headers=headers).status_code == 422
++    assert client.post('/courses', content=b'x' * 262145, headers={**headers, 'content-type': 'application/json'}).status_code == 413
++    mid, _ = filled(author)
++    assert write(author, f'/modules/{mid}/lessons', title='Too long', content='x' * 30001).status_code == 422
++    assert write(author, f'/modules/{mid}/lessons', title='Too many', resources=[{'label': 'Doc', 'url': 'https://example.org'}] * 11).status_code == 422
++    assert write(author, f'/modules/{mid}/lessons', title='Script URL', resources=[{'label': 'Doc', 'url': 'javascript:alert(1)'}]).status_code == 422
++
++
++def test_rls_uses_session_capability_and_composite_keys_not_forged_gucs(author):
++    identity, _, cid = author; client, owner, user, tenant, foreign = identity[:5]
++    with psycopg.connect(owner) as db:
++        other = db.execute('SELECT user_id FROM memberships WHERE tenant_id=%s', (foreign,)).fetchone()[0]
++        foreign_id = uuid4()
++        db.execute("INSERT INTO courses(id,tenant_id,owner_id,title) VALUES(%s,%s,%s,'Private foreign course')", (foreign_id, foreign, other))
++    with transaction() as db:
++        user_context(db, other); tenant_context(db, foreign)
++        assert db.execute('SELECT id FROM courses').fetchall() == []
++        session_context(db, token_digest(client.cookies['maaher_session']))
++        assert db.execute('SELECT id FROM courses').fetchall() == []
++        assert db.execute('SELECT course_member_role(%s,%s) AS role', (foreign, other)).fetchone()['role'] is None
++        tenant_context(db, tenant)
++        assert [str(r['id']) for r in db.execute('SELECT id FROM courses').fetchall()] == [cid]
++    with transaction() as db, pytest.raises(psycopg.errors.InsufficientPrivilege):
++        session_context(db, token_digest(client.cookies['maaher_session'])); tenant_context(db, tenant)
++        db.execute('UPDATE courses SET tenant_id=%s WHERE id=%s', (foreign, cid))
++    with psycopg.connect(owner) as db, pytest.raises(psycopg.errors.ForeignKeyViolation):
++        db.execute("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,'Wrong FK',1)", (uuid4(), foreign, cid))
++
++
++def test_published_content_cannot_be_changed_through_direct_runtime_sql(author):
++    identity, _, cid = author; mid, lid = filled(author)
++    assert write(author, '/publish').status_code == 200
++    with transaction() as db:
++        session_context(db, token_digest(identity[0].cookies['maaher_session'])); tenant_context(db, identity[3])
++        assert db.execute("UPDATE course_lessons SET content='forged' WHERE id=%s RETURNING id", (lid,)).fetchone() is None
++    with psycopg.connect(identity[1]) as db:
++        assert db.execute('SELECT relrowsecurity AND relforcerowsecurity FROM pg_class WHERE relname=%s', ('course_lessons',)).fetchone()[0] is True
++
++
++@pytest.mark.parametrize('change', ['role', 'revoked'])
++def test_membership_changes_remove_course_access_on_existing_sessions(author, change):
++    identity, headers, cid = author
++    with psycopg.connect(identity[1]) as db:
++        if change == 'role': db.execute("UPDATE memberships SET role='student' WHERE tenant_id=%s AND user_id=%s", (identity[3], identity[2]))
++        else: db.execute("UPDATE memberships SET status='revoked' WHERE tenant_id=%s AND user_id=%s", (identity[3], identity[2]))
++    assert identity[0].get('/courses/' + cid, headers=headers).status_code == 403
++    with transaction() as db:
++        session_context(db, token_digest(identity[0].cookies['maaher_session'])); tenant_context(db, identity[3])
++        assert db.execute('SELECT id FROM courses').fetchall() == []
++
++
++def test_course_module_and_lesson_caps_are_enforced(author):
++    identity, headers, cid = author
++    mid = uuid4()
++    with psycopg.connect(identity[1]) as db:
++        with db.cursor() as cursor:
++            cursor.executemany("INSERT INTO courses(id,tenant_id,owner_id,title) VALUES(%s,%s,%s,'Cap fixture')", [(uuid4(), identity[3], identity[2]) for _ in range(499)])
++            cursor.executemany("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,'Module fixture',%s)", [(mid if i == 1 else uuid4(), identity[3], cid, i) for i in range(1, 31)])
++            cursor.executemany("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,position) VALUES(%s,%s,%s,%s,'Lesson fixture',%s)", [(uuid4(), identity[3], cid, mid, i) for i in range(1, 51)])
++            teachers = [uuid4() for _ in range(51)]
++            cursor.executemany("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'unused-cap-fixture')", [(t, f'{t}@example.invalid') for t in teachers])
++            cursor.executemany("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'teacher')", [(uuid4(), identity[3], t) for t in teachers])
++            cursor.executemany("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s)", [(identity[3], cid, t) for t in teachers[:50]])
++    assert identity[0].post('/courses', json={'title': 'Over cap'}, headers=headers).status_code == 409
++    assert write(author, '/modules', title='Over cap').status_code == 409
++    assert write(author, f'/modules/{mid}/lessons', title='Over cap').status_code == 409
++    assert write(author, '/teachers', user_id=str(teachers[-1]), assigned=True).status_code == 409
++    assert write(author, '/teachers', user_id=str(teachers[0]), assigned=True).status_code == 200
++
++
++def test_course_pagination_has_no_duplicate_or_foreign_rows(author):
++    client, headers, _ = author[0][0], author[1], author[2]
++    for i in range(3): assert client.post('/courses', json={'title': f'Kursus {i}'}, headers=headers).status_code == 201
++    seen = []; after = None
++    while True:
++        response = client.get('/courses?limit=2' + (f'&after={after}' if after else ''), headers=headers).json()
++        seen.extend(r['id'] for r in response['courses']); after = response['next_cursor']
++        if not after: break
++    assert len(seen) == len(set(seen)) == 4
++
++
++@pytest.mark.parametrize('url', ['javascript:alert(1)', 'data:text/html,test', 'http://example.org', 'https://user:pass@example.org',
++    'https://127.0.0.1', 'https://localhost', 'https://example.local', 'https://example.org\\@evil.invalid', 'https://example.org\n', 'https://example.org:bad',
++    'https://127.1', 'https://localhost.', 'https://0177.0.0.1'])
++def test_resources_reject_unsafe_urls(url):
++    with pytest.raises((ValidationError, ValueError)):
++        Resource(label='Doc', url=url)
+diff --git a/maaher-lms-starter/apps/api/tests/test_review_regressions.py b/maaher-lms-starter/apps/api/tests/test_review_regressions.py
+index 560f83f..79bdac2 100644
+--- a/maaher-lms-starter/apps/api/tests/test_review_regressions.py
++++ b/maaher-lms-starter/apps/api/tests/test_review_regressions.py
+@@ -127,7 +127,9 @@ def test_m6_definers_are_nonlogin_nonsuperuser_minimum_privilege(identity):
+                     WHERE a.grantee=0 AND a.privilege_type='EXECUTE') AS public_execute
+              FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
+              WHERE n.nspname='public' AND p.prosecdef""").fetchall()
+-        assert len(rows)==9
++        assert len(rows) == 10
++        assert {row['proname'] for row in rows} == {'resolve_session','tenant_admin','list_members','change_member',
++            'reset_password','accept_invitation','authorize_mfa_request','retain_auth_data','runtime_identity','course_member_role'}
+         for row in rows:
+             assert row['rolname']=='maaher_definer'
+             assert not any(row[k] for k in ('rolsuper','rolcanlogin','rolcreaterole','public_execute'))
+diff --git a/maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts b/maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts
+new file mode 100644
+index 0000000..7218347
+--- /dev/null
++++ b/maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts
+@@ -0,0 +1,66 @@
++import { NextRequest } from 'next/server';
++import { timingSafeEqual } from 'node:crypto';
++import { isIP } from 'node:net';
++
++export const dynamic = 'force-dynamic';
++const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
++const read = new RegExp(`^(?:${uuid}(?:/modules/${uuid}/lessons/${uuid})?)?$`);
++const write = new RegExp(`^(?:${uuid}(?:/(?:publish|unpublish|archive|restore|teachers|reorder-modules|modules(?:/${uuid}(?:/(?:delete|reorder-lessons|lessons(?:/${uuid}(?:/delete)?)?))?)?))?)?$`);
++
++async function proxy(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
++  const path = (await context.params).path?.join('/') ?? '';
++  if (!(request.method === 'GET' ? read : write).test(path)) return Response.json({ detail: 'Halaman tidak tersedia' }, { status: 404 });
++  const origin = process.env.APP_ORIGIN;
++  const base = process.env.API_BASE_URL;
++  if (!origin || !base) return Response.json({ detail: 'Layanan belum dikonfigurasi' }, { status: 503 });
++  if (request.method === 'POST' && request.headers.get('origin') !== origin) return Response.json({ detail: 'Asal permintaan tidak diizinkan' }, { status: 403 });
++  const headers = new Headers({ accept: 'application/json' });
++  const bridge = process.env.BFF_API_SECRET;
++  const edge = process.env.EDGE_SHARED_SECRET;
++  const presented = request.headers.get('x-maaher-edge-key') ?? '';
++  const trusted = edge && Buffer.byteLength(edge) === Buffer.byteLength(presented) && timingSafeEqual(Buffer.from(edge), Buffer.from(presented));
++  if (!['local', 'test'].includes(process.env.APP_ENV ?? '') && (!bridge || !trusted)) return Response.json({ detail: 'Jalur ingress tepercaya belum dikonfigurasi' }, { status: 503 });
++  if (bridge && trusted) {
++    const ip = request.headers.get('cf-connecting-ip') ?? '';
++    if (!isIP(ip)) return Response.json({ detail: 'Identitas jaringan tidak valid' }, { status: 403 });
++    headers.set('x-maaher-bff-key', bridge); headers.set('x-maaher-client-ip', ip);
++  }
++  const session = request.cookies.get('maaher_session')?.value;
++  if (session) headers.set('cookie', `maaher_session=${session}`);
++  const tenant = request.headers.get('x-tenant-id');
++  if (tenant) headers.set('x-tenant-id', tenant);
++  let body: Uint8Array | undefined;
++  if (request.method === 'POST') {
++    headers.set('origin', origin); headers.set('content-type', 'application/json');
++    if (request.body) {
++      const reader = request.body.getReader(); const chunks: Uint8Array[] = []; let size = 0;
++      while (true) {
++        const { done, value } = await reader.read(); if (done) break;
++        size += value.length;
++        if (size > 262144) { await reader.cancel(); return Response.json({ detail: 'Permintaan terlalu besar' }, { status: 413 }); }
++        chunks.push(value);
++      }
++      body = new Uint8Array(size); let offset = 0;
++      for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.length; }
++    }
++  }
++  try {
++    const upstream = new URL(base);
++    if (!['http:', 'https:'].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== '/' || upstream.search || upstream.hash) throw new Error('Invalid API origin');
++    upstream.pathname = '/courses' + (path ? '/' + path : '');
++    for (const key of request.nextUrl.searchParams.keys()) {
++      const value = request.nextUrl.searchParams.get(key)!;
++      if (path || request.method !== 'GET' || !['after','archived'].includes(key) || request.nextUrl.searchParams.getAll(key).length !== 1
++          || (key === 'after' && !new RegExp(`^${uuid}$`).test(value)) || (key === 'archived' && !['true','false'].includes(value))) return Response.json({ detail: 'Parameter tidak valid' }, { status: 400 });
++      upstream.searchParams.set(key, value);
++    }
++    const result = await fetch(upstream, { method: request.method, headers, body: body as BodyInit | undefined,
++      cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15000) });
++    return new Response(await result.arrayBuffer(), { status: result.status, headers: {
++      'content-type': 'application/json', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
++    } });
++  } catch { return Response.json({ detail: 'Layanan sementara tidak tersedia' }, { status: 503 }); }
++}
++
++export const GET = proxy;
++export const POST = proxy;
+diff --git a/maaher-lms-starter/apps/web/app/auth/page.tsx b/maaher-lms-starter/apps/web/app/auth/page.tsx
+index cac084c..6ebfde2 100644
+--- a/maaher-lms-starter/apps/web/app/auth/page.tsx
++++ b/maaher-lms-starter/apps/web/app/auth/page.tsx
+@@ -105,7 +105,7 @@ export default function Authentication() {
+       <legend>Masuk dan keamanan akun</legend>
+       <section aria-labelledby="oidc-heading">
+         <h2 id="oidc-heading">Admin dan operator</h2>
+-        <p>Gunakan akun organisasi yang telah didaftarkan beserta kunci keamanan Anda.</p>
++        <p>Gunakan akun organisasi yang telah didaftarkan dan selesaikan verifikasi yang diminta.</p>
+         <button type="button" disabled={!oidcAvailable} onClick={() => void run(async () => {
+           const result = await call('oidc/login', {});
+           window.location.assign(result.authorization_url);
+@@ -142,6 +142,7 @@ export default function Authentication() {
+           const selected = await call('tenant-selection', {}); setRole(selected.role); setMessage('Organisasi dipilih');
+           const self = await call('me'); setMyUser(self.user_id);
+         })}>Gunakan organisasi</button>
++        {['admin','teacher'].includes(role) && <p><a href={`/courses?tenant=${encodeURIComponent(tenant)}`}>Kelola kursus</a></p>}
+       </section>
+       {externalLogin ? <section aria-labelledby="external-security-heading">
+         <h2 id="external-security-heading">Keamanan akun organisasi</h2>
+diff --git a/maaher-lms-starter/apps/web/app/courses/page.tsx b/maaher-lms-starter/apps/web/app/courses/page.tsx
+new file mode 100644
+index 0000000..c2d187b
+--- /dev/null
++++ b/maaher-lms-starter/apps/web/app/courses/page.tsx
+@@ -0,0 +1,182 @@
++'use client';
++
++import { FormEvent, useEffect, useState } from 'react';
++import Markdown from 'react-markdown';
++
++type Membership = { tenant_id: string; name: string; role: string };
++type Course = { id: string; title: string; description: string; state: string; version: number };
++type LessonSummary = { id: string; title: string; position: number };
++type Module = { id: string; title: string; position: number; lessons: LessonSummary[] };
++type Detail = Course & { modules: Module[]; teachers: string[] };
++type Resource = { label: string; url: string };
++type Lesson = { id: string; title: string; content: string; resources: Resource[] };
++type Member = { user_id: string; email: string; role: string; status: string };
++const blank: Lesson = { id: '', title: '', content: '', resources: [] };
++const states: Record<string, string> = { draft: 'Draft', published: 'Terbit', archived: 'Arsip' };
++
++function safeHttps(value: string | undefined) {
++  if (!value || /[\s\\\u0000-\u001f]/.test(value)) return false;
++  try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; } catch { return false; }
++}
++
++class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
++
++export default function Courses() {
++  const [memberships, setMemberships] = useState<Membership[]>([]);
++  const [tenant, setTenant] = useState(''); const [role, setRole] = useState('');
++  const [courses, setCourses] = useState<Course[]>([]); const [next, setNext] = useState<string | null>(null);
++  const [archived, setArchived] = useState(false); const [course, setCourse] = useState<Detail | null>(null);
++  const [title, setTitle] = useState(''); const [description, setDescription] = useState('');
++  const [members, setMembers] = useState<Member[]>([]); const [memberNext, setMemberNext] = useState<string | null>(null);
++  const [teacher, setTeacher] = useState(''); const [moduleId, setModuleId] = useState('');
++  const [lesson, setLesson] = useState<Lesson | null>(null); const [savedLesson, setSavedLesson] = useState('');
++  const [busy, setBusy] = useState(false); const [message, setMessage] = useState('Memuat organisasi…');
++  const metadataDirty = !!course && (title !== course.title || description !== course.description);
++  const lessonDirty = !!lesson && JSON.stringify(lesson) !== savedLesson;
++  const dirty = metadataDirty || lessonDirty;
++
++  async function run(action: () => Promise<void>) {
++    setBusy(true); setMessage('');
++    try { await action(); } catch (error) {
++      if (error instanceof RequestError && [401, 403].includes(error.status)) { setCourse(null); setLesson(null); setCourses([]); setMembers([]); setRole(''); }
++      if (error instanceof RequestError && error.status === 404) { setCourse(null); setLesson(null); }
++      setMessage(error instanceof Error ? error.message : 'Layanan sementara tidak tersedia');
++    } finally { setBusy(false); }
++  }
++
++  async function request(path: string, body?: object, selectedTenant = tenant) {
++    const response = await fetch(path, { method: body ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store',
++      headers: { 'content-type': 'application/json', ...(selectedTenant ? { 'x-tenant-id': selectedTenant } : {}) }, body: body ? JSON.stringify(body) : undefined });
++    const data = await response.json();
++    if (!response.ok) throw new RequestError(typeof data.detail === 'string' ? data.detail : 'Periksa judul, materi, dan tautan yang diisi', response.status);
++    return data;
++  }
++
++  async function list(tid = tenant, archive = archived, after?: string) {
++    const data = await request(`/api/courses?archived=${archive}${after ? `&after=${after}` : ''}`, undefined, tid);
++    setCourses(current => after ? [...current, ...data.courses] : data.courses); setNext(data.next_cursor);
++  }
++
++  async function selectTenant(tid: string, archive = false) {
++    setCourse(null); setLesson(null); setCourses([]); setMembers([]); setTeacher(''); setMemberNext(null); setNext(null); setModuleId(''); setTenant(tid); setRole(''); setArchived(archive);
++    if (!tid) return;
++    const self = await request('/api/auth/me', undefined, tid); setRole(self.role);
++    await list(tid, archive);
++    setMessage('Organisasi siap. Pilih kursus untuk mulai mengelola materi.');
++  }
++
++  useEffect(() => { void run(async () => {
++    const rows: Membership[] = await request('/api/auth/memberships'); setMemberships(rows);
++    const candidate = new URLSearchParams(window.location.search).get('tenant');
++    const tid = rows.find(row => row.tenant_id === candidate)?.tenant_id ?? rows[0]?.tenant_id;
++    if (tid) await selectTenant(tid); else setMessage('Anda belum menjadi anggota organisasi.');
++  }); }, []);
++
++  async function openCourse(cid: string) {
++    const data: Detail = await request(`/api/courses/${cid}`); setCourse(data); setTitle(data.title); setDescription(data.description);
++  }
++
++  async function mutate(path: string, body: object = {}) {
++    if (!course) throw new Error('Pilih kursus terlebih dahulu');
++    const result = await request(`/api/courses/${course.id}${path}`, { ...body, version: course.version });
++    await openCourse(course.id); await list(); return result;
++  }
++
++  async function openLesson(mid: string, lid: string) {
++    const data: Lesson = await request(`/api/courses/${course!.id}/modules/${mid}/lessons/${lid}`);
++    setModuleId(mid); setLesson(data); setSavedLesson(JSON.stringify(data));
++  }
++
++  async function loadMembers(after?: string) {
++    const data = await request(`/api/auth/tenant-members${after ? `?after=${after}` : ''}`);
++    setMembers(current => after ? [...current, ...data.members] : data.members); setMemberNext(data.next_cursor);
++  }
++
++  function form(event: FormEvent<HTMLFormElement>, action: (data: FormData) => Promise<void>) {
++    event.preventDefault(); const element = event.currentTarget; const data = new FormData(element);
++    void run(async () => { await action(data); element.reset(); });
++  }
++
++  function switchContext(action: () => Promise<void>) {
++    if (dirty && !window.confirm('Perubahan belum disimpan. Tinggalkan perubahan ini?')) return;
++    void run(action);
++  }
++
++  function newLesson(mid: string) { setModuleId(mid); setLesson({ ...blank, resources: [] }); setSavedLesson(JSON.stringify(blank)); }
++  function ordered(ids: string[], index: number, direction: number) { const next = [...ids]; [next[index], next[index + direction]] = [next[index + direction], next[index]]; return next; }
++  const editable = !!course && course.state !== 'archived';
++
++  return <main className="courses-page">
++    <header className="studio-header"><div><p className="eyebrow">MAAHER LMS / PENGELOLAAN</p><h1>Kursus &amp; materi</h1><p>Susun langkah belajar coding, satu pelajaran pada satu waktu.</p></div>
++      <nav aria-label="Navigasi utama"><a href="/">Beranda</a><a href="/auth">Akun &amp; keluar</a></nav></header>
++    <div className="studio-toolbar"><label>Organisasi <select aria-label="Organisasi kursus" value={tenant} disabled={busy} onChange={event => switchContext(() => selectTenant(event.target.value))}>
++      <option value="">Pilih organisasi</option>{memberships.map(row => <option key={row.tenant_id} value={row.tenant_id}>{row.name}</option>)}</select></label>
++      <button type="button" disabled={busy || !tenant} onClick={() => switchContext(async () => { setLesson(null); if (course) await openCourse(course.id); await list(); })}>Muat ulang kursus</button></div>
++    <p role="status" aria-live="polite" className="studio-status">{busy ? 'Memproses…' : message}</p>
++    {!role && <p><a href="/auth">Masuk atau pilih organisasi melalui halaman akun</a></p>}
++    {['admin','teacher'].includes(role) && <div className="studio-grid">
++      <aside className="studio-panel"><h2>Daftar kursus</h2><label className="check-label"><input type="checkbox" checked={archived} disabled={busy} onChange={event => switchContext(async () => { setCourse(null); setLesson(null); setArchived(event.target.checked); await list(tenant, event.target.checked); })} /> Tampilkan arsip</label>
++        <ul className="course-list">{courses.map(item => <li key={item.id}><button type="button" className={course?.id === item.id ? 'course-card selected' : 'course-card'} disabled={busy} onClick={() => switchContext(async () => { setLesson(null); setModuleId(''); await openCourse(item.id); setMessage('Kursus dimuat'); })}>
++          <span className={`badge ${item.state}`}>{states[item.state]}</span><strong>{item.title}</strong><span>{item.description || 'Belum ada deskripsi'}</span></button></li>)}</ul>
++        {!courses.length && <p className="muted">Belum ada kursus pada daftar ini.</p>}
++        {next && <button disabled={busy} onClick={() => void run(() => list(tenant, archived, next))}>Muat kursus berikutnya</button>}
++        {role === 'admin' && <form className="stack-form" onSubmit={event => form(event, async fields => {
++          if (dirty && !window.confirm('Tinggalkan perubahan yang belum disimpan?')) return;
++          const result = await request('/api/courses', { title: fields.get('title'), description: fields.get('description') });
++          setArchived(false); setLesson(null); await list(tenant, false); await openCourse(result.id); setMessage('Kursus baru dibuat');
++        })}><h3>Kursus baru</h3><label>Judul kursus baru<input name="title" required maxLength={160} disabled={busy} /></label>
++          <label>Deskripsi singkat<textarea name="description" maxLength={2000} disabled={busy} /></label><button disabled={busy}>Buat kursus</button></form>}
++      </aside>
++      <section className="studio-workspace" aria-label="Editor kursus">
++        {!course ? <div className="studio-panel empty-state"><h2>Mulai susun kelas Anda</h2><p>Pilih kursus dari daftar, atau buat kursus baru untuk menambahkan modul dan pelajaran.</p></div> : <>
++          <section className="studio-panel"><div className="panel-heading"><h2>{course.title}</h2><span className={`badge ${course.state}`}>{states[course.state]}</span></div>
++            <form className="stack-form" onSubmit={event => { event.preventDefault(); void run(async () => { await mutate('', { title, description }); setMessage('Informasi kursus disimpan sebagai draft'); }); }}>
++              <label>Judul kursus<input value={title} onChange={event => setTitle(event.target.value)} required maxLength={160} disabled={busy || !editable || lessonDirty} /></label>
++              <label htmlFor="course-description">Deskripsi kursus</label><textarea id="course-description" value={description} onChange={event => setDescription(event.target.value)} maxLength={2000} disabled={busy || !editable || lessonDirty} />
++              <button disabled={busy || !editable || !metadataDirty || lessonDirty}>Simpan informasi kursus</button></form>
++            <div className="button-row"><button disabled={busy || !editable || dirty} onClick={() => void run(async () => { await mutate(course.state === 'published' ? '/unpublish' : '/publish'); setMessage(course.state === 'published' ? 'Publikasi ditarik' : 'Kursus berhasil diterbitkan'); })}>{course.state === 'published' ? 'Tarik publikasi' : 'Terbitkan kursus'}</button>
++              {role === 'admin' && <button disabled={busy || dirty} onClick={() => void run(async () => { await mutate(course.state === 'archived' ? '/restore' : '/archive'); setCourse(null); setLesson(null); await list(); setMessage(course.state === 'archived' ? 'Kursus dipulihkan sebagai draft' : 'Kursus diarsipkan'); })}>{course.state === 'archived' ? 'Pulihkan kursus' : 'Arsipkan kursus'}</button>}
++            </div><p className="muted">Perubahan materi mengembalikan kursus ke draft. Isi setiap modul dan pelajaran sebelum menerbitkan.</p>
++          </section>
++          {role === 'admin' && editable && <section className="studio-panel"><h3>Pengajar kursus</h3><button disabled={busy || dirty} onClick={() => void run(() => loadMembers())}>Muat daftar pengajar</button>
++            {memberNext && <button disabled={busy || dirty} onClick={() => void run(() => loadMembers(memberNext))}>Muat anggota berikutnya</button>}
++            <form className="inline-form" onSubmit={event => { event.preventDefault(); void run(async () => { await mutate('/teachers', { user_id: teacher, assigned: true }); setMessage('Pengajar ditugaskan'); }); }}>
++              <label>Pengajar aktif<select value={teacher} onChange={event => setTeacher(event.target.value)} disabled={busy || dirty} required><option value="">Pilih pengajar</option>{members.filter(m => m.role === 'teacher' && m.status === 'active').map(m => <option key={m.user_id} value={m.user_id}>{m.email}</option>)}</select></label>
++              <button disabled={busy || dirty || !teacher}>Tugaskan pengajar</button></form>
++            <ul>{course.teachers.map(id => <li key={id}>{members.find(m => m.user_id === id)?.email ?? 'Pengajar terdaftar'}{' '}<button disabled={busy || dirty} onClick={() => void run(async () => { await mutate('/teachers', { user_id: id, assigned: false }); setMessage('Penugasan pengajar dicabut'); })}>Cabut penugasan</button></li>)}</ul></section>}
++          <section className="studio-panel"><h3>Struktur pembelajaran</h3>
++            <ol className="module-list">{course.modules.map((mod, index) => <li key={mod.id}><div className="module-heading"><strong>{index + 1}. {mod.title}</strong><div className="button-row">
++              <button aria-label={`Naikkan modul ${mod.title}`} disabled={busy || !editable || dirty || index === 0} onClick={() => void run(async () => { await mutate('/reorder-modules', { ids: ordered(course.modules.map(m => m.id), index, -1) }); setMessage('Urutan modul diperbarui'); })}>↑</button>
++              <button aria-label={`Turunkan modul ${mod.title}`} disabled={busy || !editable || dirty || index === course.modules.length - 1} onClick={() => void run(async () => { await mutate('/reorder-modules', { ids: ordered(course.modules.map(m => m.id), index, 1) }); setMessage('Urutan modul diperbarui'); })}>↓</button>
++              <button aria-label={`Hapus modul ${mod.title}`} disabled={busy || !editable || dirty} onClick={() => { if (window.confirm('Hapus modul beserta seluruh pelajarannya?')) void run(async () => { await mutate(`/modules/${mod.id}/delete`); setLesson(null); setModuleId(''); setMessage('Modul dihapus'); }); }}>Hapus</button></div></div>
++              {editable && <form className="inline-form" key={`${mod.id}-${mod.title}`} onSubmit={event => form(event, async fields => { await mutate(`/modules/${mod.id}`, { title: fields.get('title') }); setMessage('Judul modul diperbarui'); })}><label>Nama modul<input name="title" defaultValue={mod.title} required maxLength={160} disabled={busy || dirty} /></label><button disabled={busy || dirty}>Ubah nama modul</button></form>}
++              <ol>{mod.lessons.map((item, li) => <li key={item.id}><button className="text-button" disabled={busy} onClick={() => switchContext(() => openLesson(mod.id, item.id))}>{item.title}</button>{' '}
++                <button aria-label={`Naikkan pelajaran ${item.title}`} disabled={busy || !editable || dirty || li === 0} onClick={() => void run(async () => { await mutate(`/modules/${mod.id}/reorder-lessons`, { ids: ordered(mod.lessons.map(l => l.id), li, -1) }); setMessage('Urutan pelajaran diperbarui'); })}>↑</button>
++                <button aria-label={`Turunkan pelajaran ${item.title}`} disabled={busy || !editable || dirty || li === mod.lessons.length - 1} onClick={() => void run(async () => { await mutate(`/modules/${mod.id}/reorder-lessons`, { ids: ordered(mod.lessons.map(l => l.id), li, 1) }); setMessage('Urutan pelajaran diperbarui'); })}>↓</button></li>)}</ol>
++              <button disabled={busy || !editable || dirty} onClick={() => newLesson(mod.id)}>Tambah pelajaran ke {mod.title}</button></li>)}</ol>
++            {!course.modules.length && <p className="muted">Tambahkan modul pertama untuk menyusun materi.</p>}
++            {editable && <form className="inline-form" onSubmit={event => form(event, async fields => { await mutate('/modules', { title: fields.get('title') }); setMessage('Modul ditambahkan'); })}><label>Judul modul baru<input name="title" required maxLength={160} disabled={busy || dirty} /></label><button disabled={busy || dirty}>Tambah modul</button></form>}
++          </section>
++          {lesson && <section className="studio-panel"><h3>{lesson.id ? 'Edit pelajaran' : 'Pelajaran baru'}</h3>
++            <form className="stack-form" onSubmit={event => { event.preventDefault(); void run(async () => {
++              const result = await mutate(`/modules/${moduleId}/lessons${lesson.id ? '/' + lesson.id : ''}`, { title: lesson.title, content: lesson.content, resources: lesson.resources });
++              await openLesson(moduleId, lesson.id || result.id); setMessage('Pelajaran disimpan sebagai draft');
++            }); }}><label>Judul pelajaran<input value={lesson.title} required maxLength={160} disabled={busy || !editable || metadataDirty} onChange={event => setLesson({ ...lesson, title: event.target.value })} /></label>
++              <label htmlFor="lesson-markdown">Materi Markdown</label><textarea id="lesson-markdown" className="markdown-editor" value={lesson.content} maxLength={30000} disabled={busy || !editable || metadataDirty} onChange={event => setLesson({ ...lesson, content: event.target.value })} />
++              <p className="muted">Gunakan # untuk judul, daftar, dan blok kode dengan tiga backtick. Tautan materi memakai HTTPS.</p>
++              <fieldset disabled={busy || !editable || metadataDirty}><legend>Tautan materi tambahan</legend>{lesson.resources.map((resource, index) => <div className="resource-row" key={index}>
++                <label>Nama tautan {index + 1}<input value={resource.label} required maxLength={120} onChange={event => setLesson({ ...lesson, resources: lesson.resources.map((r, i) => i === index ? { ...r, label: event.target.value } : r) })} /></label>
++                <label>URL HTTPS {index + 1}<input value={resource.url} required type="url" maxLength={2048} onChange={event => setLesson({ ...lesson, resources: lesson.resources.map((r, i) => i === index ? { ...r, url: event.target.value } : r) })} /></label>
++                <button type="button" onClick={() => setLesson({ ...lesson, resources: lesson.resources.filter((_, i) => i !== index) })}>Hapus tautan {index + 1}</button></div>)}
++                <button type="button" disabled={lesson.resources.length >= 10} onClick={() => setLesson({ ...lesson, resources: [...lesson.resources, { label: '', url: '' }] })}>Tambah tautan materi</button></fieldset>
++              <div className="button-row"><button disabled={busy || !editable || metadataDirty}>Simpan pelajaran</button><button type="button" disabled={busy} onClick={() => { if (!lessonDirty || window.confirm('Tutup editor dan tinggalkan perubahan yang belum disimpan?')) { setLesson(null); setSavedLesson(''); } }}>Tutup editor</button>
++                {lesson.id && <button type="button" disabled={busy || !editable || metadataDirty} onClick={() => { if (window.confirm('Hapus pelajaran ini beserta materinya?')) void run(async () => { await mutate(`/modules/${moduleId}/lessons/${lesson.id}/delete`); setLesson(null); setMessage('Pelajaran dihapus'); }); }}>Hapus pelajaran</button>}</div></form>
++            <article className="lesson-preview" aria-label="Pratinjau pelajaran"><p className="eyebrow">PRATINJAU MATERI</p><h2>{lesson.title || 'Judul pelajaran'}</h2>
++              <Markdown skipHtml urlTransform={url => safeHttps(url) ? url : ''} components={{ a: ({ href, children }) => <a href={safeHttps(href) ? href : undefined} target="_blank" rel="noopener noreferrer">{children}</a>, img: ({ src, alt }) => <span>{safeHttps(typeof src === 'string' ? src : '') ? <a href={src as string} target="_blank" rel="noopener noreferrer">Gambar: {alt || 'Buka materi gambar'}</a> : alt}</span> }}>{lesson.content}</Markdown>
++              {lesson.resources.length > 0 && <><h3>Materi tambahan</h3><ul>{lesson.resources.map((r, i) => <li key={i}>{safeHttps(r.url) ? <a href={r.url} target="_blank" rel="noopener noreferrer">{r.label}</a> : r.label}</li>)}</ul></>}
++            </article></section>}
++        </>}
++      </section>
++    </div>}
++  </main>;
++}
+diff --git a/maaher-lms-starter/apps/web/app/globals.css b/maaher-lms-starter/apps/web/app/globals.css
+index 7ac04f7..db498db 100644
+--- a/maaher-lms-starter/apps/web/app/globals.css
++++ b/maaher-lms-starter/apps/web/app/globals.css
+@@ -1,4 +1,4 @@
+-body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 760px; padding: 0 1rem; }
++body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 1100px; padding: 0 1rem; color: #172b3a; background: #f6f8fb; }
+ fieldset { border: 0; padding: 0; }
+ input, select, button { max-width: 100%; padding: .45rem; }
+ input[readonly] { width: 90%; }
+@@ -6,3 +6,50 @@ section { margin-block: 1.5rem; }
+ table { border-collapse: collapse; width: 100%; }
+ th, td { padding: .4rem; text-align: left; border-bottom: 1px solid #888; overflow-wrap: anywhere; }
+ :focus-visible { outline: 3px solid #2458a6; outline-offset: 2px; }
++.eyebrow { font-size: .75rem; letter-spacing: .12em; color: #526b80; font-weight: 700; }
++.studio-header { display: flex; justify-content: space-between; gap: 1rem; align-items: start; margin-bottom: 2rem; }
++.studio-header h1 { font-size: 2.2rem; margin: .3rem 0; }
++.studio-header nav, .button-row, .studio-toolbar, .inline-form { display: flex; gap: .65rem; flex-wrap: wrap; align-items: end; }
++.studio-header nav { padding-top: 1rem; }
++.courses-page button { border: 1px solid #c1cddb; background: white; color: #173c64; border-radius: .45rem; cursor: pointer; }
++.courses-page button:disabled { cursor: default; opacity: .5; }
++.courses-page input, .courses-page textarea, .courses-page select { box-sizing: border-box; border: 1px solid #b9c7d6; border-radius: .4rem; padding: .6rem; background: #fff; color: inherit; }
++.courses-page label { display: grid; gap: .35rem; font-size: .9rem; }
++.courses-page input[type=checkbox] { width: auto; }
++.studio-status { min-height: 1.5rem; padding: .8rem 0; color: #254e78; }
++.studio-grid { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0,1fr); gap: 1.5rem; align-items: start; }
++.studio-workspace { margin: 0; }
++.courses-page .check-label { display: flex; align-items: center; gap: .5rem; }
++.studio-panel { padding: 1.3rem; border: 1px solid #dce3ed; background: white; border-radius: .8rem; margin: 0 0 1.2rem; }
++.studio-panel h2, .studio-panel h3 { margin-top: 0; }
++.panel-heading, .module-heading { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
++.stack-form { display: grid; gap: .9rem; margin-top: 1rem; }
++.stack-form > button, .stack-form > .button-row { justify-self: start; }
++.stack-form textarea { min-height: 90px; resize: vertical; }
++.inline-form { margin-block: 1rem; }
++.inline-form label { flex: 1; }
++.course-list, .module-list { list-style: none; margin: 1rem 0; padding: 0; }
++.course-list li { margin-bottom: .6rem; }
++.courses-page .course-card { text-align: left; width: 100%; display: grid; gap: .5rem; padding: .9rem; }
++.course-card strong { font-size: 1rem; }
++.course-card > span:last-child { font-size: .8rem; color: #5e7080; overflow-wrap: anywhere; }
++.courses-page .course-card.selected { border-color: #2863a3; background: #edf5ff; }
++.badge { font-size: .7rem; border-radius: 2rem; padding: .25rem .55rem; background: #edf0f5; width: fit-content; }
++.badge.published { background: #e1f3e9; color: #176540; }
++.badge.draft { background: #fff2d9; color: #795612; }
++.module-list > li { border-top: 1px solid #e0e6ef; padding-block: 1rem; }
++.module-list ol { padding-left: 1.3rem; }
++.module-list ol li { margin-block: .6rem; }
++.courses-page .text-button { border: none; color: #1d5d9c; text-align: left; }
++.muted { font-size: .85rem; color: #627385; }
++.resource-row { display: grid; gap: .5rem; padding-bottom: 1rem; }
++.courses-page .markdown-editor { min-height: 260px; font-family: ui-monospace, monospace; line-height: 1.6; }
++.lesson-preview { border-top: 1px solid #dce3ed; margin-top: 1.5rem; padding-top: 1rem; overflow-wrap: anywhere; }
++.lesson-preview pre { overflow-x: auto; padding: 1rem; background: #152d40; color: #f5f8fc; border-radius: .5rem; }
++.home-page { padding-block: 3rem; }
++.home-page h1 { font-size: 3rem; margin: .5rem 0; }
++.home-intro { max-width: 620px; font-size: 1.2rem; line-height: 1.7; color: #506b80; }
++.home-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-top: 2rem; }
++.home-cards > a { border: 1px solid #dce3ed; border-radius: .8rem; padding: 1.5rem; color: #173c64; background: white; text-decoration: none; }
++.home-cards > a:hover { border-color: #2863a3; }
++@media(max-width: 740px) { .studio-grid, .home-cards { grid-template-columns: 1fr; } .studio-header { display: block; } .studio-panel { padding: 1rem; } }
+diff --git a/maaher-lms-starter/apps/web/app/layout.tsx b/maaher-lms-starter/apps/web/app/layout.tsx
+index 21daa10..6aeeed0 100644
+--- a/maaher-lms-starter/apps/web/app/layout.tsx
++++ b/maaher-lms-starter/apps/web/app/layout.tsx
+@@ -1,7 +1,7 @@
+ import type { ReactNode } from 'react';
+ import './globals.css';
+ export const dynamic = 'force-dynamic';
+-export const metadata = { title: 'Maaher LMS — Engineering Starter', description: 'Scaffold LMS pembelajaran coding' };
++export const metadata = { title: 'Maaher LMS — Pembelajaran coding', description: 'Kelola kursus dan materi pembelajaran coding bersama organisasi Anda' };
+ export default function RootLayout({ children }: { children: ReactNode }) {
+   return <html lang="id"><body>{children}</body></html>;
+ }
+diff --git a/maaher-lms-starter/apps/web/app/page.tsx b/maaher-lms-starter/apps/web/app/page.tsx
+index c1a3899..dcdb112 100644
+--- a/maaher-lms-starter/apps/web/app/page.tsx
++++ b/maaher-lms-starter/apps/web/app/page.tsx
+@@ -1,6 +1,5 @@
+ export default function Home() {
+- return <main><h1>Maaher LMS</h1><p>Fondasi pengembangan LMS berbahasa Indonesia.</p>
+- <p><a href="/auth">Masuk, undangan, dan keamanan akun</a></p>
+- <p><strong>Belum siap untuk siswa:</strong> integrasi email, konfigurasi keamanan operator dan review independen masih diperlukan. Kelas, coding lab dan auto-grader masih dalam backlog.</p>
+- <p>Mulai dari <code>docs/PROJECT-SPEC.md</code> dan lakukan review sebelum implementasi.</p></main>;
++ return <main className="home-page"><p className="eyebrow">RUANG BELAJAR CODING</p><h1>Maaher LMS</h1><p className="home-intro">Susun materi, kelola kelas, dan bangun perjalanan belajar coding yang terarah.</p>
++ <nav className="home-cards" aria-label="Mulai menggunakan Maaher"><a href="/courses"><h2>Kursus &amp; materi</h2><p>Kelola modul, tulis pelajaran, dan siapkan materi bersama pengajar.</p></a>
++ <a href="/auth"><h2>Akun &amp; organisasi</h2><p>Masuk, pilih organisasi, dan kelola keamanan akun Anda.</p></a></nav></main>;
+ }
+diff --git a/maaher-lms-starter/apps/web/package-lock.json b/maaher-lms-starter/apps/web/package-lock.json
+index 3855fc3..03b6649 100644
+--- a/maaher-lms-starter/apps/web/package-lock.json
++++ b/maaher-lms-starter/apps/web/package-lock.json
+@@ -10,7 +10,8 @@
+       "dependencies": {
+         "next": "^16.0.0",
+         "react": "^19.0.0",
+-        "react-dom": "^19.0.0"
++        "react-dom": "^19.0.0",
++        "react-markdown": "10.1.0"
+       },
+       "devDependencies": {
+         "@playwright/test": "1.65.0",
+@@ -690,6 +691,54 @@
+         "tslib": "^2.8.0"
+       }
+     },
++    "node_modules/@types/debug": {
++      "version": "4.1.13",
++      "resolved": "https://registry.npmjs.org/@types/debug/-/debug-4.1.13.tgz",
++      "integrity": "sha512-KSVgmQmzMwPlmtljOomayoR89W4FynCAi3E8PPs7vmDVPe84hT+vGPKkJfThkmXs0x0jAaa9U8uW8bbfyS2fWw==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/ms": "*"
++      }
++    },
++    "node_modules/@types/estree": {
++      "version": "1.0.10",
++      "resolved": "https://registry.npmjs.org/@types/estree/-/estree-1.0.10.tgz",
++      "integrity": "sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==",
++      "license": "MIT"
++    },
++    "node_modules/@types/estree-jsx": {
++      "version": "1.0.5",
++      "resolved": "https://registry.npmjs.org/@types/estree-jsx/-/estree-jsx-1.0.5.tgz",
++      "integrity": "sha512-52CcUVNFyfb1A2ALocQw/Dd1BQFNmSdkuC3BkZ6iqhdMfQz7JWOFRuJFloOzjk+6WijU56m9oKXFAXc7o3Towg==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/estree": "*"
++      }
++    },
++    "node_modules/@types/hast": {
++      "version": "3.0.5",
++      "resolved": "https://registry.npmjs.org/@types/hast/-/hast-3.0.5.tgz",
++      "integrity": "sha512-rp/ezSWaD1m44dPKICGhiskI13nVr7qTloFwDa/IYkhhf5nzwP+zIQcIJh3WIFSBOy/H1PzB40jPjMDksN4F+g==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "*"
++      }
++    },
++    "node_modules/@types/mdast": {
++      "version": "4.0.4",
++      "resolved": "https://registry.npmjs.org/@types/mdast/-/mdast-4.0.4.tgz",
++      "integrity": "sha512-kGaNbPh1k7AFzgpud/gMdvIm5xuECykRR+JnWKQno9TAXVa6WIVCGTPvYGekIDL4uwCZQSYbUxNBSb1aUo79oA==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "*"
++      }
++    },
++    "node_modules/@types/ms": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/@types/ms/-/ms-2.1.0.tgz",
++      "integrity": "sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==",
++      "license": "MIT"
++    },
+     "node_modules/@types/node": {
+       "version": "22.20.5",
+       "resolved": "https://registry.npmjs.org/@types/node/-/node-22.20.5.tgz",
+@@ -704,7 +753,6 @@
+       "version": "19.3.0",
+       "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
+       "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
+-      "dev": true,
+       "license": "MIT",
+       "dependencies": {
+         "csstype": "^3.2.2"
+@@ -720,6 +768,28 @@
+         "@types/react": "^19.3.0"
+       }
+     },
++    "node_modules/@types/unist": {
++      "version": "3.0.3",
++      "resolved": "https://registry.npmjs.org/@types/unist/-/unist-3.0.3.tgz",
++      "integrity": "sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==",
++      "license": "MIT"
++    },
++    "node_modules/@ungap/structured-clone": {
++      "version": "1.4.0",
++      "resolved": "https://registry.npmjs.org/@ungap/structured-clone/-/structured-clone-1.4.0.tgz",
++      "integrity": "sha512-1mEZtMKPM09vDmQt5y7YvmN2+DFTP7Tg0EWXdic8/C6VRnpb33e4ghisCIE3WZjsE2N8mf+QV1Zqh7ZFYLWInQ==",
++      "license": "ISC"
++    },
++    "node_modules/bail": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/bail/-/bail-2.0.2.tgz",
++      "integrity": "sha512-0xO6mYd7JB2YesxDKplafRpsiOzPt9V02ddPCLbY1xYGPOX24NTyN50qnUxgCPcSoYMhKpAuBTjQoRZCAkUDRw==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
+     "node_modules/baseline-browser-mapping": {
+       "version": "2.11.35",
+       "resolved": "https://registry.npmjs.org/baseline-browser-mapping/-/baseline-browser-mapping-2.11.35.tgz",
+@@ -752,19 +822,117 @@
+       ],
+       "license": "CC-BY-4.0"
+     },
++    "node_modules/ccount": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/ccount/-/ccount-2.0.1.tgz",
++      "integrity": "sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/character-entities": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/character-entities/-/character-entities-2.0.2.tgz",
++      "integrity": "sha512-shx7oQ0Awen/BRIdkjkvz54PnEEI/EjwXDSIZp86/KKdbafHh1Df/RYGBhn4hbe2+uKC9FnT5UCEdyPz3ai9hQ==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/character-entities-html4": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/character-entities-html4/-/character-entities-html4-2.1.0.tgz",
++      "integrity": "sha512-1v7fgQRj6hnSwFpq1Eu0ynr/CDEw0rXo2B61qXrLNdHZmPKgb7fqS1a2JwF0rISo9q77jDI8VMEHoApn8qDoZA==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/character-entities-legacy": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/character-entities-legacy/-/character-entities-legacy-3.0.0.tgz",
++      "integrity": "sha512-RpPp0asT/6ufRm//AJVwpViZbGM/MkjQFxJccQRHmISF/22NBtsHqAWmL+/pmkPWoIUJdWyeVleTl1wydHATVQ==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/character-reference-invalid": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/character-reference-invalid/-/character-reference-invalid-2.0.1.tgz",
++      "integrity": "sha512-iBZ4F4wRbyORVsu0jPV7gXkOsGYjGHPmAyv+HiHG8gi5PtC9KI2j1+v8/tlibRvjoWX027ypmG/n0HtO5t7unw==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
+     "node_modules/client-only": {
+       "version": "0.0.1",
+       "resolved": "https://registry.npmjs.org/client-only/-/client-only-0.0.1.tgz",
+       "integrity": "sha512-IV3Ou0jSMzZrd3pZ48nLkT9DA7Ag1pnPzaiQhpW7c3RbcqqzvzzVu+L8gfqMp/8IM2MQtSiqaCxrrcfu8I8rMA==",
+       "license": "MIT"
+     },
++    "node_modules/comma-separated-tokens": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/comma-separated-tokens/-/comma-separated-tokens-2.0.3.tgz",
++      "integrity": "sha512-Fu4hJdvzeylCfQPp9SGWidpzrMs7tTrlu6Vb8XGaRGck8QSNZJJp538Wrb60Lax4fPwR64ViY468OIUTbRlGZg==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
+     "node_modules/csstype": {
+       "version": "3.2.3",
+       "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
+       "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
+-      "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/debug": {
++      "version": "4.4.3",
++      "resolved": "https://registry.npmjs.org/debug/-/debug-4.4.3.tgz",
++      "integrity": "sha512-RGwwWnwQvkVfavKVt22FGLw+xYSdzARwm0ru6DhTVA3umU5hZc28V3kO4stgYryrTlLpuvgI9GiijltAjNbcqA==",
++      "license": "MIT",
++      "dependencies": {
++        "ms": "^2.1.3"
++      },
++      "engines": {
++        "node": ">=6.0"
++      },
++      "peerDependenciesMeta": {
++        "supports-color": {
++          "optional": true
++        }
++      }
++    },
++    "node_modules/decode-named-character-reference": {
++      "version": "1.3.0",
++      "resolved": "https://registry.npmjs.org/decode-named-character-reference/-/decode-named-character-reference-1.3.0.tgz",
++      "integrity": "sha512-GtpQYB283KrPp6nRw50q3U9/VfOutZOe103qlN7BPP6Ad27xYnOIWv4lPzo8HCAL+mMZofJ9KEy30fq6MfaK6Q==",
++      "license": "MIT",
++      "dependencies": {
++        "character-entities": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/dequal": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/dequal/-/dequal-2.0.3.tgz",
++      "integrity": "sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=6"
++      }
++    },
+     "node_modules/detect-libc": {
+       "version": "2.1.2",
+       "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+@@ -775,6 +943,781 @@
+         "node": ">=8"
+       }
+     },
++    "node_modules/devlop": {
++      "version": "1.1.0",
++      "resolved": "https://registry.npmjs.org/devlop/-/devlop-1.1.0.tgz",
++      "integrity": "sha512-RWmIqhcFf1lRYBvNmr7qTNuyCt/7/ns2jbpp1+PalgE/rDQcBT0fioSMUpJ93irlUhC5hrg4cYqe6U+0ImW0rA==",
++      "license": "MIT",
++      "dependencies": {
++        "dequal": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/estree-util-is-identifier-name": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/estree-util-is-identifier-name/-/estree-util-is-identifier-name-3.0.0.tgz",
++      "integrity": "sha512-hFtqIDZTIUZ9BXLb8y4pYGyk6+wekIivNVTcmvk8NoOh+VeRn5y6cEHzbURrWbfp1fIqdVipilzj+lfaadNZmg==",
++      "license": "MIT",
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/extend": {
++      "version": "3.0.2",
++      "resolved": "https://registry.npmjs.org/extend/-/extend-3.0.2.tgz",
++      "integrity": "sha512-fjquC59cD7CyW6urNXK0FBufkZcoiGG80wTuPujX590cB5Ttln20E2UB4S/WARVqhXffZl2LNgS+gQdPIIim/g==",
++      "license": "MIT"
++    },
++    "node_modules/hast-util-to-jsx-runtime": {
++      "version": "2.3.7",
++      "resolved": "https://registry.npmjs.org/hast-util-to-jsx-runtime/-/hast-util-to-jsx-runtime-2.3.7.tgz",
++      "integrity": "sha512-F7DNV2NMcTxA4GqPVHnXzX+mpoPHAIY9rJAVH3CZ1FdBZOcBUEjUuvMkMpHVs/sicEtznh9tMGj5WUR9S4E2rg==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/estree": "^1.0.0",
++        "@types/hast": "^3.0.0",
++        "@types/unist": "^3.0.0",
++        "comma-separated-tokens": "^2.0.0",
++        "devlop": "^1.0.0",
++        "estree-util-is-identifier-name": "^3.0.0",
++        "hast-util-whitespace": "^3.0.0",
++        "mdast-util-mdx-expression": "^2.0.0",
++        "mdast-util-mdx-jsx": "^3.0.0",
++        "mdast-util-mdxjs-esm": "^2.0.0",
++        "property-information": "^7.0.0",
++        "space-separated-tokens": "^2.0.0",
++        "style-to-object": "^2.0.0",
++        "unist-util-position": "^5.0.0",
++        "vfile-message": "^4.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/hast-util-whitespace": {
++      "version": "3.0.0",
++      "resolved": "https://registry.npmjs.org/hast-util-whitespace/-/hast-util-whitespace-3.0.0.tgz",
++      "integrity": "sha512-88JUN06ipLwsnv+dVn+OIYOvAuvBMy/Qoi6O7mQHxdPXpjy+Cd6xRkWwux7DKO+4sYILtLBRIKgsdpS2gQc7qw==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/hast": "^3.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/html-url-attributes": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/html-url-attributes/-/html-url-attributes-3.0.1.tgz",
++      "integrity": "sha512-ol6UPyBWqsrO6EJySPz2O7ZSr856WDrEzM5zMqp+FJJLGMW35cLYmmZnl0vztAZxRUoNZJFTCohfjuIJ8I4QBQ==",
++      "license": "MIT",
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/inline-style-parser": {
++      "version": "0.2.9",
++      "resolved": "https://registry.npmjs.org/inline-style-parser/-/inline-style-parser-0.2.9.tgz",
++      "integrity": "sha512-IttN8BqKLxzUrnTqHI+/hwAJQItBAUjdoHERCDv+oOuX48VP6bzW8+QjOXSfoevzq3YrYAwX1uLHp8TqO9yIeg==",
++      "license": "MIT"
++    },
++    "node_modules/is-alphabetical": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-alphabetical/-/is-alphabetical-2.0.1.tgz",
++      "integrity": "sha512-FWyyY60MeTNyeSRpkM2Iry0G9hpr7/9kD40mD/cGQEuilcZYS4okz8SN2Q6rLCJ8gbCt6fN+rC+6tMGS99LaxQ==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-alphanumerical": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-alphanumerical/-/is-alphanumerical-2.0.1.tgz",
++      "integrity": "sha512-hmbYhX/9MUMF5uh7tOXyK/n0ZvWpad5caBA17GsC6vyuCqaWliRG5K1qS9inmUhEMaOBIW7/whAnSwveW/LtZw==",
++      "license": "MIT",
++      "dependencies": {
++        "is-alphabetical": "^2.0.0",
++        "is-decimal": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-decimal": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-decimal/-/is-decimal-2.0.1.tgz",
++      "integrity": "sha512-AAB9hiomQs5DXWcRB1rqsxGUstbRroFOPPVAomNk/3XHR5JyEZChOyTWe2oayKnsSsr/kcGqF+z6yuH6HHpN0A==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-hexadecimal": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/is-hexadecimal/-/is-hexadecimal-2.0.1.tgz",
++      "integrity": "sha512-DgZQp241c8oO6cA1SbTEWiXeoxV42vlcJxgH+B3hi1AiqqKruZR3ZGF8In3fj4+/y/7rHvlOZLZtgJ/4ttYGZg==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/is-plain-obj": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/is-plain-obj/-/is-plain-obj-4.1.0.tgz",
++      "integrity": "sha512-+Pgi+vMuUNkJyExiMBt5IlFoMyKnr5zhJ4Uspz58WOhBF5QoIZkFyNHIbBAtHwzVAgk5RtndVNsDRN61/mmDqg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">=12"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/sindresorhus"
++      }
++    },
++    "node_modules/longest-streak": {
++      "version": "3.1.0",
++      "resolved": "https://registry.npmjs.org/longest-streak/-/longest-streak-3.1.0.tgz",
++      "integrity": "sha512-9Ri+o0JYgehTaVBBDoMqIl8GXtbWg711O3srftcHhZ0dqnETqLaoIK0x17fUw9rFSlK/0NlsKe0Ahhyl5pXE2g==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/mdast-util-from-markdown": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/mdast-util-from-markdown/-/mdast-util-from-markdown-2.1.0.tgz",
++      "integrity": "sha512-KRLgmPaP2H1ul2bpoJkOS+9pAcDAAj9Nu1mqLnh8NLeJG5tlvj42TH80PIGBpROWlRXLk0lDrWNuZCFy/tsB4A==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/mdast": "^4.0.0",
++        "@types/unist": "^3.0.0",
++        "decode-named-character-reference": "^1.0.0",
++        "devlop": "^1.0.0",
++        "mdast-util-to-string": "^4.0.0",
++        "micromark": "^4.0.0",
++        "micromark-util-decode-numeric-character-reference": "^2.0.0",
++        "micromark-util-decode-string": "^2.0.0",
++        "micromark-util-normalize-identifier": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0",
++        "unist-util-stringify-position": "^4.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/mdast-util-mdx-expression": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/mdast-util-mdx-expression/-/mdast-util-mdx-expression-2.0.1.tgz",
++      "integrity": "sha512-J6f+9hUp+ldTZqKRSg7Vw5V6MqjATc+3E4gf3CFNcuZNWD8XdyI6zQ8GqH7f8169MM6P7hMBRDVGnn7oHB9kXQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/estree-jsx": "^1.0.0",
++        "@types/hast": "^3.0.0",
++        "@types/mdast": "^4.0.0",
++        "devlop": "^1.0.0",
++        "mdast-util-from-markdown": "^2.0.0",
++        "mdast-util-to-markdown": "^2.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/mdast-util-mdx-jsx": {
++      "version": "3.2.1",
++      "resolved": "https://registry.npmjs.org/mdast-util-mdx-jsx/-/mdast-util-mdx-jsx-3.2.1.tgz",
++      "integrity": "sha512-oXp1GIa+E9IwIs3a106+tr3Bz2MlTTBvlXjOZMoIat11kk7vjqgmBnksB9WHmWv+gZh7k3IUgpAHlwHB7DH4GQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/estree-jsx": "^1.0.0",
++        "@types/hast": "^3.0.0",
++        "@types/mdast": "^4.0.0",
++        "@types/unist": "^3.0.0",
++        "ccount": "^2.0.0",
++        "devlop": "^1.1.0",
++        "mdast-util-from-markdown": "^2.0.0",
++        "mdast-util-to-markdown": "^2.0.0",
++        "parse-entities": "^4.0.0",
++        "stringify-entities": "^4.0.0",
++        "unist-util-stringify-position": "^4.0.0",
++        "vfile-message": "^4.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/mdast-util-mdxjs-esm": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/mdast-util-mdxjs-esm/-/mdast-util-mdxjs-esm-2.0.1.tgz",
++      "integrity": "sha512-EcmOpxsZ96CvlP03NghtH1EsLtr0n9Tm4lPUJUBccV9RwUOneqSycg19n5HGzCf+10LozMRSObtVr3ee1WoHtg==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/estree-jsx": "^1.0.0",
++        "@types/hast": "^3.0.0",
++        "@types/mdast": "^4.0.0",
++        "devlop": "^1.0.0",
++        "mdast-util-from-markdown": "^2.0.0",
++        "mdast-util-to-markdown": "^2.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/mdast-util-phrasing": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/mdast-util-phrasing/-/mdast-util-phrasing-4.1.0.tgz",
++      "integrity": "sha512-TqICwyvJJpBwvGAMZjj4J2n0X8QWp21b9l0o7eXyVJ25YNWYbJDVIyD1bZXE6WtV6RmKJVYmQAKWa0zWOABz2w==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/mdast": "^4.0.0",
++        "unist-util-is": "^6.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/mdast-util-to-hast": {
++      "version": "13.2.1",
++      "resolved": "https://registry.npmjs.org/mdast-util-to-hast/-/mdast-util-to-hast-13.2.1.tgz",
++      "integrity": "sha512-cctsq2wp5vTsLIcaymblUriiTcZd0CwWtCbLvrOzYCDZoWyMNV8sZ7krj09FSnsiJi3WVsHLM4k6Dq/yaPyCXA==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/hast": "^3.0.0",
++        "@types/mdast": "^4.0.0",
++        "@ungap/structured-clone": "^1.0.0",
++        "devlop": "^1.0.0",
++        "micromark-util-sanitize-uri": "^2.0.0",
++        "trim-lines": "^3.0.0",
++        "unist-util-position": "^5.0.0",
++        "unist-util-visit": "^5.0.0",
++        "vfile": "^6.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/mdast-util-to-markdown": {
++      "version": "2.2.3",
++      "resolved": "https://registry.npmjs.org/mdast-util-to-markdown/-/mdast-util-to-markdown-2.2.3.tgz",
++      "integrity": "sha512-dImdB6VZRMRac1SwAW6o1c0ESk/7pFFAMCMuKM+9v7LpTSthMM5nzXpqKw4Mjo66aXVKhNkyrP4bMB9MurPyWg==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/mdast": "^4.0.0",
++        "@types/unist": "^3.0.0",
++        "longest-streak": "^3.0.0",
++        "mdast-util-phrasing": "^4.0.0",
++        "mdast-util-to-string": "^4.0.0",
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-classify-character": "^2.0.0",
++        "micromark-util-decode-string": "^2.0.0",
++        "micromark-util-html-tag-name": "^2.0.0",
++        "unist-util-visit": "^5.0.0",
++        "zwitch": "^2.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/mdast-util-to-string": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/mdast-util-to-string/-/mdast-util-to-string-4.0.0.tgz",
++      "integrity": "sha512-0H44vDimn51F0YwvxSJSm0eCDOJTRlmN0R1yBh4HLj9wiV1Dn0QoXGbvFAWj2hSItVTlCmBF1hqKlIyUBVFLPg==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/mdast": "^4.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/micromark": {
++      "version": "4.0.3",
++      "resolved": "https://registry.npmjs.org/micromark/-/micromark-4.0.3.tgz",
++      "integrity": "sha512-oGYfQzHSG5dOMovQcJ3fyTmZlWAWpi0XA0sJwJs+i6OT88o1+Jtw/8z0CmdowSLxGhhFK89rQ/oXph/wN02PNw==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@types/debug": "^4.0.0",
++        "debug": "^4.0.0",
++        "decode-named-character-reference": "^1.0.0",
++        "devlop": "^1.0.0",
++        "micromark-core-commonmark": "^2.0.0",
++        "micromark-factory-space": "^2.0.0",
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-chunked": "^2.0.0",
++        "micromark-util-combine-extensions": "^2.0.0",
++        "micromark-util-decode-numeric-character-reference": "^2.0.0",
++        "micromark-util-edit-map": "^1.0.0",
++        "micromark-util-encode": "^2.0.0",
++        "micromark-util-normalize-identifier": "^2.0.0",
++        "micromark-util-resolve-all": "^2.0.0",
++        "micromark-util-sanitize-uri": "^2.0.0",
++        "micromark-util-subtokenize": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-core-commonmark": {
++      "version": "2.0.4",
++      "resolved": "https://registry.npmjs.org/micromark-core-commonmark/-/micromark-core-commonmark-2.0.4.tgz",
++      "integrity": "sha512-wxEeE8v8XVvOrxn1TZj74qYhAtTQsSqufHVS3uNVyT1MupXxhyaHk8/9xDNPh9BmL77QNDgWTkZ3RsYHB2ry7w==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "decode-named-character-reference": "^1.0.0",
++        "devlop": "^1.0.0",
++        "micromark-factory-destination": "^2.0.0",
++        "micromark-factory-label": "^2.0.0",
++        "micromark-factory-space": "^2.1.0",
++        "micromark-factory-title": "^2.0.0",
++        "micromark-factory-whitespace": "^2.0.0",
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-chunked": "^2.0.0",
++        "micromark-util-classify-character": "^2.0.0",
++        "micromark-util-edit-map": "^1.0.0",
++        "micromark-util-html-tag-name": "^2.0.0",
++        "micromark-util-normalize-identifier": "^2.0.0",
++        "micromark-util-resolve-all": "^2.0.0",
++        "micromark-util-subtokenize": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.3"
++      }
++    },
++    "node_modules/micromark-factory-destination": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-factory-destination/-/micromark-factory-destination-2.0.1.tgz",
++      "integrity": "sha512-Xe6rDdJlkmbFRExpTOmRj9N3MaWmbAgdpSrBQvCFqhezUn4AHqJHbaEnfbVYYiexVSs//tqOdY/DxhjdCiJnIA==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-factory-label": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-factory-label/-/micromark-factory-label-2.0.1.tgz",
++      "integrity": "sha512-VFMekyQExqIW7xIChcXn4ok29YE3rnuyveW3wZQWWqF4Nv9Wk5rgJ99KzPvHjkmPXF93FXIbBp6YdW3t71/7Vg==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "devlop": "^1.0.0",
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-factory-space": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/micromark-factory-space/-/micromark-factory-space-2.1.0.tgz",
++      "integrity": "sha512-fS8hnLIjnjvdQIj39Geug8wWsR0HrYZ43KShKxNfwT7t2LOHo/LbWZEzEaSOjwtjdCsjoE6syHhonEzW0zv0+Q==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-factory-title": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-factory-title/-/micromark-factory-title-2.0.1.tgz",
++      "integrity": "sha512-5bZ+3CjhAd9eChYTHsjy6TGxpOFSKgKKJPJxr293jTbfry2KDoWkhBb6TcPVB4NmzaPhMs1Frm9AZH7OD4Cjzw==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-factory-space": "^2.0.0",
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-factory-whitespace": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-factory-whitespace/-/micromark-factory-whitespace-2.0.1.tgz",
++      "integrity": "sha512-Ob0nuZ3PKt/n0hORHyvoD9uZhr+Za8sFoP+OnMcnWK5lngSzALgQYKMr9RJVOWLqQYuyn6ulqGWSXdwf6F80lQ==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-factory-space": "^2.0.0",
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-character": {
++      "version": "2.1.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-character/-/micromark-util-character-2.1.1.tgz",
++      "integrity": "sha512-wv8tdUTJ3thSFFFJKtpYKOYiGP2+v96Hvk4Tu8KpCAsTMs6yi+nVmGh1syvSCsaxz45J6Jbw+9DD6g97+NV67Q==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-chunked": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-chunked/-/micromark-util-chunked-2.0.1.tgz",
++      "integrity": "sha512-QUNFEOPELfmvv+4xiNg2sRYeS/P84pTW0TCgP5zc9FpXetHY0ab7SxKyAQCNCc1eK0459uoLI1y5oO5Vc1dbhA==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-symbol": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-classify-character": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-classify-character/-/micromark-util-classify-character-2.0.1.tgz",
++      "integrity": "sha512-K0kHzM6afW/MbeWYWLjoHQv1sgg2Q9EccHEDzSkxiP/EaagNzCm7T/WMKZ3rjMbvIpvBiZgwR3dKMygtA4mG1Q==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-combine-extensions": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-combine-extensions/-/micromark-util-combine-extensions-2.0.1.tgz",
++      "integrity": "sha512-OnAnH8Ujmy59JcyZw8JSbK9cGpdVY44NKgSM7E9Eh7DiLS2E9RNQf0dONaGDzEG9yjEl5hcqeIsj4hfRkLH/Bg==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-chunked": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-decode-numeric-character-reference": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/micromark-util-decode-numeric-character-reference/-/micromark-util-decode-numeric-character-reference-2.0.2.tgz",
++      "integrity": "sha512-ccUbYk6CwVdkmCQMyr64dXz42EfHGkPQlBj5p7YVGzq8I7CtjXZJrubAYezf7Rp+bjPseiROqe7G6foFd+lEuw==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-symbol": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-decode-string": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-decode-string/-/micromark-util-decode-string-2.0.1.tgz",
++      "integrity": "sha512-nDV/77Fj6eH1ynwscYTOsbK7rR//Uj0bZXBwJZRfaLEJ1iGBR6kIfNmlNqaqJf649EP0F3NWNdeJi03elllNUQ==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "decode-named-character-reference": "^1.0.0",
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-decode-numeric-character-reference": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-edit-map": {
++      "version": "1.0.0",
++      "resolved": "https://registry.npmjs.org/micromark-util-edit-map/-/micromark-util-edit-map-1.0.0.tgz",
++      "integrity": "sha512-Pa2ljlsEL6sVwFaYeyrOLSYbQt73JvGbPOYFq+9AElXiSnfI5Q4465RRZ1sHv7lDjDOnGRDDaqPXqClqWK/q1Q==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-encode": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-encode/-/micromark-util-encode-2.0.1.tgz",
++      "integrity": "sha512-c3cVx2y4KqUnwopcO9b/SCdo2O67LwJJ/UyqGfbigahfegL9myoEFoDYZgkT7f36T0bLrM9hZTAaAyH+PCAXjw==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/micromark-util-html-tag-name": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-html-tag-name/-/micromark-util-html-tag-name-2.0.1.tgz",
++      "integrity": "sha512-2cNEiYDhCWKI+Gs9T0Tiysk136SnR13hhO8yW6BGNyhOC4qYFnwF1nKfD3HFAIXA5c45RrIG1ub11GiXeYd1xA==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/micromark-util-normalize-identifier": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-normalize-identifier/-/micromark-util-normalize-identifier-2.0.1.tgz",
++      "integrity": "sha512-sxPqmo70LyARJs0w2UclACPUUEqltCkJ6PhKdMIDuJ3gSf/Q+/GIe3WKl0Ijb/GyH9lOpUkRAO2wp0GVkLvS9Q==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-symbol": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-resolve-all": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-resolve-all/-/micromark-util-resolve-all-2.0.1.tgz",
++      "integrity": "sha512-VdQyxFWFT2/FGJgwQnJYbe1jjQoNTS4RjglmSjTUlpUMa95Htx9NHeYW4rGDJzbjvCsl9eLjMQwGeElsqmzcHg==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-sanitize-uri": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-sanitize-uri/-/micromark-util-sanitize-uri-2.0.1.tgz",
++      "integrity": "sha512-9N9IomZ/YuGGZZmQec1MbgxtlgougxTodVwDzzEouPKo3qFWvymFHWcnDi2vzV1ff6kas9ucW+o3yzJK9YB1AQ==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "micromark-util-character": "^2.0.0",
++        "micromark-util-encode": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-subtokenize": {
++      "version": "2.1.0",
++      "resolved": "https://registry.npmjs.org/micromark-util-subtokenize/-/micromark-util-subtokenize-2.1.0.tgz",
++      "integrity": "sha512-XQLu552iSctvnEcgXw6+Sx75GflAPNED1qx7eBJ+wydBb2KCbRZe+NwvIEEMM83uml1+2WSXpBAcp9IUCgCYWA==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "devlop": "^1.0.0",
++        "micromark-util-chunked": "^2.0.0",
++        "micromark-util-symbol": "^2.0.0",
++        "micromark-util-types": "^2.0.0"
++      }
++    },
++    "node_modules/micromark-util-symbol": {
++      "version": "2.0.1",
++      "resolved": "https://registry.npmjs.org/micromark-util-symbol/-/micromark-util-symbol-2.0.1.tgz",
++      "integrity": "sha512-vs5t8Apaud9N28kgCrRUdEed4UJ+wWNvicHLPxCa9ENlYuAY31M0ETy5y1vA33YoNPDFTghEbnh6efaE8h4x0Q==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/micromark-util-types": {
++      "version": "2.0.3",
++      "resolved": "https://registry.npmjs.org/micromark-util-types/-/micromark-util-types-2.0.3.tgz",
++      "integrity": "sha512-oxB2Ik03hI0gv+VNn9tnh1t1YEe9MDPptViAEgfdf3YQHsn0pzGTgCdlSCJXcwhqm8phaEuM7zeEu3QQzVBrPg==",
++      "funding": [
++        {
++          "type": "GitHub Sponsors",
++          "url": "https://github.com/sponsors/unifiedjs"
++        },
++        {
++          "type": "OpenCollective",
++          "url": "https://opencollective.com/unified"
++        }
++      ],
++      "license": "MIT"
++    },
++    "node_modules/ms": {
++      "version": "2.1.3",
++      "resolved": "https://registry.npmjs.org/ms/-/ms-2.1.3.tgz",
++      "integrity": "sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==",
++      "license": "MIT"
++    },
+     "node_modules/nanoid": {
+       "version": "3.3.20",
+       "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+@@ -846,6 +1789,31 @@
+         }
+       }
+     },
++    "node_modules/parse-entities": {
++      "version": "4.0.2",
++      "resolved": "https://registry.npmjs.org/parse-entities/-/parse-entities-4.0.2.tgz",
++      "integrity": "sha512-GG2AQYWoLgL877gQIKeRPGO1xF9+eG1ujIb5soS5gPvLQ1y2o8FL90w2QWNdf9I361Mpp7726c+lj3U0qK1uGw==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^2.0.0",
++        "character-entities-legacy": "^3.0.0",
++        "character-reference-invalid": "^2.0.0",
++        "decode-named-character-reference": "^1.0.0",
++        "is-alphanumerical": "^2.0.0",
++        "is-decimal": "^2.0.0",
++        "is-hexadecimal": "^2.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/parse-entities/node_modules/@types/unist": {
++      "version": "2.0.11",
++      "resolved": "https://registry.npmjs.org/@types/unist/-/unist-2.0.11.tgz",
++      "integrity": "sha512-CmBKiL6NNo/OqgmMn95Fk9Whlp2mtvIv+KNpQKN2F4SjvrEesubTRWGYSg+BnWZOnlCaSTU1sMpsBOzgbYhnsA==",
++      "license": "MIT"
++    },
+     "node_modules/picocolors": {
+       "version": "1.1.1",
+       "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+@@ -909,6 +1877,16 @@
+         "node": "^10 || ^12 || >=14"
+       }
+     },
++    "node_modules/property-information": {
++      "version": "7.2.0",
++      "resolved": "https://registry.npmjs.org/property-information/-/property-information-7.2.0.tgz",
++      "integrity": "sha512-IAtzIB6sUiWaJYrX9smp3V46pBGbBeLFRGdh25kg1334VcBlD8HzhPeNIWQH9zhGmo2itIe25EHt9dQP7G5hmg==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
+     "node_modules/react": {
+       "version": "19.3.1",
+       "resolved": "https://registry.npmjs.org/react/-/react-19.3.1.tgz",
+@@ -930,6 +1908,66 @@
+         "react": "^19.3.1"
+       }
+     },
++    "node_modules/react-markdown": {
++      "version": "10.1.0",
++      "resolved": "https://registry.npmjs.org/react-markdown/-/react-markdown-10.1.0.tgz",
++      "integrity": "sha512-qKxVopLT/TyA6BX3Ue5NwabOsAzm0Q7kAPwq6L+wWDwisYs7R8vZ0nRXqq6rkueboxpkjvLGU9fWifiX/ZZFxQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/hast": "^3.0.0",
++        "@types/mdast": "^4.0.0",
++        "devlop": "^1.0.0",
++        "hast-util-to-jsx-runtime": "^2.0.0",
++        "html-url-attributes": "^3.0.0",
++        "mdast-util-to-hast": "^13.0.0",
++        "remark-parse": "^11.0.0",
++        "remark-rehype": "^11.0.0",
++        "unified": "^11.0.0",
++        "unist-util-visit": "^5.0.0",
++        "vfile": "^6.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      },
++      "peerDependencies": {
++        "@types/react": ">=18",
++        "react": ">=18"
++      }
++    },
++    "node_modules/remark-parse": {
++      "version": "11.0.0",
++      "resolved": "https://registry.npmjs.org/remark-parse/-/remark-parse-11.0.0.tgz",
++      "integrity": "sha512-FCxlKLNGknS5ba/1lmpYijMUzX2esxW5xQqjWxw2eHFfS2MSdaHVINFmhjo+qN1WhZhNimq0dZATN9pH0IDrpA==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/mdast": "^4.0.0",
++        "mdast-util-from-markdown": "^2.0.0",
++        "micromark-util-types": "^2.0.0",
++        "unified": "^11.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/remark-rehype": {
++      "version": "11.1.2",
++      "resolved": "https://registry.npmjs.org/remark-rehype/-/remark-rehype-11.1.2.tgz",
++      "integrity": "sha512-Dh7l57ianaEoIpzbp0PC9UKAdCSVklD8E5Rpw7ETfbTl3FqcOOgq5q2LVDhgGCkaBv7p24JXikPdvhhmHvKMsw==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/hast": "^3.0.0",
++        "@types/mdast": "^4.0.0",
++        "mdast-util-to-hast": "^13.0.0",
++        "unified": "^11.0.0",
++        "vfile": "^6.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
+     "node_modules/scheduler": {
+       "version": "0.28.0",
+       "resolved": "https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz",
+@@ -1008,6 +2046,39 @@
+         "node": ">=0.10.0"
+       }
+     },
++    "node_modules/space-separated-tokens": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/space-separated-tokens/-/space-separated-tokens-2.0.2.tgz",
++      "integrity": "sha512-PEGlAwrG8yXGXRjW32fGbg66JAlOAwbObuqVoJpv/mRgoWDQfgH1wDPvtzWyUSNAXBGSk8h755YDbbcEy3SH2Q==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/stringify-entities": {
++      "version": "4.0.4",
++      "resolved": "https://registry.npmjs.org/stringify-entities/-/stringify-entities-4.0.4.tgz",
++      "integrity": "sha512-IwfBptatlO+QCJUo19AqvrPNqlVMpW9YEL2LIVY+Rpv2qsjCGxaDLNRgeGsQWJhfItebuJhsGSLjaBbNSQ+ieg==",
++      "license": "MIT",
++      "dependencies": {
++        "character-entities-html4": "^2.0.0",
++        "character-entities-legacy": "^3.0.0"
++      },
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/style-to-object": {
++      "version": "2.0.2",
++      "resolved": "https://registry.npmjs.org/style-to-object/-/style-to-object-2.0.2.tgz",
++      "integrity": "sha512-QmbXPUylqU80HAgTOJeEOdbA40W9KtxmjMhQy+tq+b8F2aoh3aQLuy82hh2jm2qsC9hR9eI0+eQidTMydKcqRA==",
++      "license": "MIT",
++      "dependencies": {
++        "inline-style-parser": "0.2.9"
++      }
++    },
+     "node_modules/styled-jsx": {
+       "version": "5.1.6",
+       "resolved": "https://registry.npmjs.org/styled-jsx/-/styled-jsx-5.1.6.tgz",
+@@ -1031,6 +2102,26 @@
+         }
+       }
+     },
++    "node_modules/trim-lines": {
++      "version": "3.0.1",
++      "resolved": "https://registry.npmjs.org/trim-lines/-/trim-lines-3.0.1.tgz",
++      "integrity": "sha512-kRj8B+YHZCc9kQYdWfJB2/oUl9rA99qbowYYBtr4ui4mZyAQ2JpvVBd/6U2YloATfqBhBTSMhTpgBHtU0Mf3Rg==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
++    "node_modules/trough": {
++      "version": "2.2.0",
++      "resolved": "https://registry.npmjs.org/trough/-/trough-2.2.0.tgz",
++      "integrity": "sha512-tmMpK00BjZiUyVyvrBK7knerNgmgvcV/KLVyuma/SC+TQN167GrMRciANTz09+k3zW8L8t60jWO1GpfkZdjTaw==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
++    },
+     "node_modules/tslib": {
+       "version": "2.9.1",
+       "resolved": "https://registry.npmjs.org/tslib/-/tslib-2.9.1.tgz",
+@@ -1057,6 +2148,131 @@
+       "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==",
+       "dev": true,
+       "license": "MIT"
++    },
++    "node_modules/unified": {
++      "version": "11.0.5",
++      "resolved": "https://registry.npmjs.org/unified/-/unified-11.0.5.tgz",
++      "integrity": "sha512-xKvGhPWw3k84Qjh8bI3ZeJjqnyadK+GEFtazSfZv/rKeTkTjOJho6mFqh2SM96iIcZokxiOpg78GazTSg8+KHA==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0",
++        "bail": "^2.0.0",
++        "devlop": "^1.0.0",
++        "extend": "^3.0.0",
++        "is-plain-obj": "^4.0.0",
++        "trough": "^2.0.0",
++        "vfile": "^6.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/unist-util-is": {
++      "version": "6.0.1",
++      "resolved": "https://registry.npmjs.org/unist-util-is/-/unist-util-is-6.0.1.tgz",
++      "integrity": "sha512-LsiILbtBETkDz8I9p1dQ0uyRUWuaQzd/cuEeS1hoRSyW5E5XGmTzlwY1OrNzzakGowI9Dr/I8HVaw4hTtnxy8g==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/unist-util-position": {
++      "version": "5.0.0",
++      "resolved": "https://registry.npmjs.org/unist-util-position/-/unist-util-position-5.0.0.tgz",
++      "integrity": "sha512-fucsC7HjXvkB5R3kTCO7kUjRdrS0BJt3M/FPxmHMBOm8JQi2BsHAHFsy27E0EolP8rp0NzXsJ+jNPyDWvOJZPA==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/unist-util-stringify-position": {
++      "version": "4.0.0",
++      "resolved": "https://registry.npmjs.org/unist-util-stringify-position/-/unist-util-stringify-position-4.0.0.tgz",
++      "integrity": "sha512-0ASV06AAoKCDkS2+xw5RXJywruurpbC4JZSm7nr7MOt1ojAzvyyaO+UxZf18j8FCF6kmzCZKcAgN/yu2gm2XgQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/unist-util-visit": {
++      "version": "5.2.0",
++      "resolved": "https://registry.npmjs.org/unist-util-visit/-/unist-util-visit-5.2.0.tgz",
++      "integrity": "sha512-fpsYs/VVoZxfGY9/j3FQpZmN8wdLJaV1Pt38AaJNZu9uKIHcFU3halCdBveEq1HGKO1OEfJY65w1zvoFV1b3qQ==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0",
++        "unist-util-is": "^6.0.0",
++        "unist-util-visit-parents": "^6.1.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/unist-util-visit-parents": {
++      "version": "6.1.0",
++      "resolved": "https://registry.npmjs.org/unist-util-visit-parents/-/unist-util-visit-parents-6.1.0.tgz",
++      "integrity": "sha512-vKXxz6O38sKDj1mtx/k2cWvkkFBuYGx6uGrlzBkVeWCRF/F8sdI0j3Wbkz/5rVNRRuVc8UrgRdbCxNhmYXgP3w==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0",
++        "unist-util-is": "^6.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/vfile": {
++      "version": "6.0.3",
++      "resolved": "https://registry.npmjs.org/vfile/-/vfile-6.0.3.tgz",
++      "integrity": "sha512-KzIbH/9tXat2u30jf+smMwFCsno4wHVdNmzFyL+T/L3UGqqk6JKfVqOFOZEpZSHADH1k40ab6NUIXZq422ov3Q==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0",
++        "vfile-message": "^4.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/vfile-message": {
++      "version": "4.0.4",
++      "resolved": "https://registry.npmjs.org/vfile-message/-/vfile-message-4.0.4.tgz",
++      "integrity": "sha512-66ycRswIkNmHH9PHku7ADtv5RVwgIrOcuv3J8Svz6h4qgGRrKVa+9/neuKyJZUXyOpYwLTvS+whZ4R2urHHgQg==",
++      "license": "MIT",
++      "dependencies": {
++        "@types/unist": "^3.0.0",
++        "unist-util-stringify-position": "^4.0.0"
++      },
++      "funding": {
++        "type": "opencollective",
++        "url": "https://opencollective.com/unified"
++      }
++    },
++    "node_modules/zwitch": {
++      "version": "2.0.4",
++      "resolved": "https://registry.npmjs.org/zwitch/-/zwitch-2.0.4.tgz",
++      "integrity": "sha512-bXE4cR/kVZhKZX/RjPEflHaKVhUVl85noU3v6b8apfQEc1x4A+zBxjZ4lN8LqGd6WZ3dl98pY4o717VFmoPp+A==",
++      "license": "MIT",
++      "funding": {
++        "type": "github",
++        "url": "https://github.com/sponsors/wooorm"
++      }
+     }
+   }
+ }
+diff --git a/maaher-lms-starter/apps/web/package.json b/maaher-lms-starter/apps/web/package.json
+index 054ea98..6dce80e 100644
+--- a/maaher-lms-starter/apps/web/package.json
++++ b/maaher-lms-starter/apps/web/package.json
+@@ -11,7 +11,8 @@
+   "dependencies": {
+     "next": "^16.0.0",
+     "react": "^19.0.0",
+-    "react-dom": "^19.0.0"
++    "react-dom": "^19.0.0",
++    "react-markdown": "10.1.0"
+   },
+   "devDependencies": {
+     "@playwright/test": "1.65.0",
+diff --git a/maaher-lms-starter/apps/web/tests/courses.spec.ts b/maaher-lms-starter/apps/web/tests/courses.spec.ts
+new file mode 100644
+index 0000000..472e4eb
+--- /dev/null
++++ b/maaher-lms-starter/apps/web/tests/courses.spec.ts
+@@ -0,0 +1,79 @@
++import { execFileSync } from 'node:child_process';
++import { test, expect } from '@playwright/test';
++
++test('admin authors real persisted course content after OIDC; Markdown is inert; publish, archive and logout work', async ({ page, context }) => {
++  const account = JSON.parse(execFileSync(process.env.LMS_TEST_PYTHON!,
++    [`${process.env.LMS_TEST_ROOT}/scripts/lms01-browser-fixtures.py`, 'oidc-seed'], { input: '{}', encoding: 'utf8' }));
++  await page.route('https://browser-tests.us.auth0.com/authorize*', async route => {
++    const authorize = new URL(route.request().url()); const state = authorize.searchParams.get('state')!;
++    const callback = new URL(authorize.searchParams.get('redirect_uri')!);
++    callback.searchParams.set('state', state); callback.searchParams.set('code', state);
++    await route.fulfill({ status: 302, headers: { location: callback.toString() } });
++  });
++  const externalLoads: string[] = [];
++  page.on('request', request => { if (request.url().includes('assets.example.invalid')) externalLoads.push(request.url()); });
++  await page.goto('/auth');
++  await page.getByRole('button', { name: 'Masuk dengan Auth0', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Berhasil masuk melalui Auth0');
++  await page.getByRole('button', { name: 'Gunakan organisasi', exact: true }).click();
++  await page.getByRole('link', { name: 'Kelola kursus', exact: true }).click();
++  await expect(page.getByRole('heading', { name: 'Kursus & materi', exact: true })).toBeVisible();
++  await page.getByLabel('Judul kursus baru', { exact: true }).fill('Python praktis');
++  await page.getByLabel('Deskripsi singkat', { exact: true }).fill('Kursus coding pertama');
++  await page.getByRole('button', { name: 'Buat kursus', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Kursus baru dibuat');
++  await page.getByRole('button', { name: 'Terbitkan kursus', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Isi setiap modul');
++  await page.getByLabel('Judul modul baru', { exact: true }).fill('Dasar Python');
++  await page.getByRole('button', { name: 'Tambah modul', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Modul ditambahkan');
++  await page.getByRole('button', { name: 'Tambah pelajaran ke Dasar Python', exact: true }).click();
++  await page.getByLabel('Judul pelajaran', { exact: true }).fill('Halo Python');
++  await page.getByLabel('Materi Markdown', { exact: true }).fill('# Mulai coding\n\n```python\nprint("Halo")\n```\n\n<script>window.__courseXss=1</script>\n\n[Berbahaya](javascript:alert(1))\n\n![Diagram](https://assets.example.invalid/probe.png)');
++  await page.getByRole('button', { name: 'Tambah tautan materi', exact: true }).click();
++  await page.getByLabel('Nama tautan 1', { exact: true }).fill('Dokumentasi Python');
++  await page.getByLabel('URL HTTPS 1', { exact: true }).fill('https://docs.python.org/3/');
++  const preview = page.getByRole('article', { name: 'Pratinjau pelajaran' });
++  await expect(preview.locator('script,img,a[href^="javascript:"]')).toHaveCount(0);
++  await expect(preview.locator('pre')).toContainText('print("Halo")');
++  expect(await page.evaluate(() => (window as unknown as { __courseXss?: number }).__courseXss)).toBeUndefined();
++  expect(externalLoads).toEqual([]);
++  await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Pelajaran disimpan');
++  if (process.env.LMS_COURSE_SCREENSHOT) await page.screenshot({ path: process.env.LMS_COURSE_SCREENSHOT, fullPage: true });
++  await page.getByRole('button', { name: 'Terbitkan kursus', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Kursus berhasil diterbitkan');
++  await page.reload();
++  await page.getByRole('button', { name: /Python praktis/ }).click();
++  await page.getByRole('button', { name: 'Halo Python', exact: true }).click();
++  await expect(page.getByLabel('Materi Markdown', { exact: true })).toHaveValue(/print\("Halo"\)/);
++  await expect(preview.getByRole('link', { name: 'Dokumentasi Python', exact: true })).toHaveAttribute('href', 'https://docs.python.org/3/');
++  await page.getByLabel('Materi Markdown', { exact: true }).fill('Materi revisi');
++  await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Pelajaran disimpan');
++  await expect(page.getByRole('button', { name: 'Terbitkan kursus', exact: true })).toBeEnabled();
++  await page.getByRole('button', { name: 'Arsipkan kursus', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Kursus diarsipkan');
++  await page.getByLabel('Tampilkan arsip').check();
++  await page.getByRole('button', { name: /Python praktis/ }).click();
++  await page.getByRole('button', { name: 'Pulihkan kursus', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Kursus dipulihkan');
++  await page.getByLabel('Tampilkan arsip').uncheck();
++  await expect(page.getByRole('button', { name: /Python praktis/ })).toBeVisible();
++  const forbidden = await context.request.get('/api/courses', { headers: { 'x-tenant-id': '00000000-0000-0000-0000-000000000000' } });
++  expect(forbidden.status()).toBe(403);
++  await page.getByRole('link', { name: 'Akun & keluar', exact: true }).click();
++  await page.getByRole('button', { name: 'Keluar', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Berhasil keluar');
++  expect((await context.request.get('/api/courses', { headers: { 'x-tenant-id': account.tenant } })).status()).toBe(401);
++});
++
++test('course BFF rejects missing/foreign Origin, arbitrary paths, duplicate queries and oversized bodies', async ({ request }) => {
++  expect((await request.get('/api/courses')).status()).toBe(401);
++  expect((await request.post('/api/courses', { data: { title: 'No origin' } })).status()).toBe(403);
++  expect((await request.post('/api/courses', { data: { title: 'Foreign origin' }, headers: { origin: 'https://evil.invalid' } })).status()).toBe(403);
++  expect((await request.get('/api/courses/oidc/callback')).status()).toBe(404);
++  expect((await request.get('/api/courses?after=bad')).status()).toBe(400);
++  expect((await request.get('/api/courses?archived=true&archived=false')).status()).toBe(400);
++  expect((await request.post('/api/courses', { data: 'x'.repeat(262145), headers: { origin: process.env.APP_ORIGIN! } })).status()).toBe(413);
++});
+diff --git a/maaher-lms-starter/docs/ARCHITECTURE.md b/maaher-lms-starter/docs/ARCHITECTURE.md
+index 92c442c..ef0fc94 100644
+--- a/maaher-lms-starter/docs/ARCHITECTURE.md
++++ b/maaher-lms-starter/docs/ARCHITECTURE.md
+@@ -30,6 +30,11 @@ All tenant-owned relations carry tenant_id; enforce composite FK where possible
+ 5. Integration tests: cross-tenant reads/writes/downloads denied with direct identifiers; membership revocation stops access; teacher cannot grade unassigned course.
+ 
+ ## Auth implementation and external decisions
++
++LMS-02 development menambah schema 0006 untuk authoring course/module/lesson dan
++assignment guru. Contract permission, RLS, version/publish, safe Markdown dan
++rollback dijelaskan pada [ADR-006](adr/006-course-authoring.md). Pembacaan materi
++siswa tetap menunggu enrollment; belum ada runner atau upload service.
+ Pemilik menyetujui Auth0/OIDC untuk admin/operator pada 10 November 2026.
+ Implementasi development tahap 1 dan batas produksinya dijelaskan pada
+ [ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada
+diff --git a/maaher-lms-starter/docs/LMS-02-HANDOFF.md b/maaher-lms-starter/docs/LMS-02-HANDOFF.md
+new file mode 100644
+index 0000000..18fadc2
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-02-HANDOFF.md
+@@ -0,0 +1,125 @@
++# LMS-02 — manajemen kursus siap review development
++
++10 November 2026. Branch `feat/LMS-02-course-management`, parent `4733526`
++(catatan UAT Auth0 yang dilaporkan pemilik). Branch auth/main tidak digabungkan.
++Pemilik mengizinkan kelanjutan setelah login→organisasi→logout Mac berhasil.
++Hasil itu tercatat di LMS-01-DEV-UAT-20261110.md sebagai laporan Mac, bukan
++pengujian live cloud. Implementasi LMS-02 memakai spesifikasi Maaher asli;
++perilaku Timedoor yang belum diamati tetap UNKNOWN.
++
++## Perilaku yang tersedia
++
++- Admin tenant: buat/edit kursus, assign/cabut pengajar aktif, arsip/pulihkan.
++- Admin dan guru yang ditugaskan: modul/pelajaran berurutan, edit judul/materi,
++  pratinjau Markdown, tautan HTTPS, publish/unpublish dan hapus child eksplisit.
++- Edit mengembalikan kursus ke draft. Publikasi menolak struktur/pelajaran kosong.
++  Dua writer dengan versi sama tidak saling menimpa: satu sukses, satu 409.
++- Data tersimpan pada PostgreSQL, bertahan setelah reload. Session Auth0 yang
++  sudah tersedia dipakai lewat BFF; Origin, membership/MFA, role dan RLS wajib.
++- /courses, navigasi dari /auth dan beranda baru berbahasa Indonesia. Akun yang
++  tidak berhak tidak memperoleh materi lewat API. Kursus terbit belum menjadi
++  katalog publik/siswa; enrollment berikutnya menentukan akses belajar.
++
++File inti: apps/api/app/courses.py; migration 0006_courses.py/courses.sql;
++apps/web/app/courses/page.tsx dan api/courses/[[...path]]/route.ts; auth/home/
++layout/globals.css; react-markdown 10.1.0 + package-lock; tests, browser wrapper,
++checker kompatibilitas head 0006, workflow CI dan dokumentasi.
++Detail contract ada pada ADR-006 dan ticket LMS-02.
++
++## Validasi cloud
++
++| Pemeriksaan | Hasil |
++|---|---|
++| `PYTHONPATH=apps/api python -m pytest -q -x --tb=short apps/api/tests` | **198 passed**, 0 skip, 92.64s pada source final |
++| `python -m pytest -q scripts/tests` | **12 passed**, 0 skip |
++| `node --test infra/auth0/*.test.cjs` | **16 passed**, 0 skip |
++| Browser LMS-02 `test-lms01-browser.py --oidc --dev-totp --courses` | **2 passed**, real Chromium + signed synthetic IdP |
++| Browser auth baseline | **7 passed** |
++| Browser OIDC FIDO2 sintetis / dev-TOTP sintetis | **1 + 1 passed** |
++| `npm run typecheck`, `npm run build` | **PASS** |
++| `npm audit --omit=dev` | **0 vulnerabilities** |
++| compileall API/migrations, git diff whitespace, reviewer artifact baseline | **PASS** |
++
++Total browser yang dijalankan: **11**, tanpa skip. API menambah 28 kasus LMS-02:
++13 URL berbahaya dan 15 flow/permission/database/concurrency/resource cases,
++di samping 170 kasus auth/unit sebelumnya. Termasuk actor/session GUC palsu,
++tenant asing, role siswa/guru tanpa assignment, assignment/membership dicabut,
++FK tenant, immutable tenant/owner grants, runtime child write pada published
++course, rollback error child, pagination, caps, urutan dan audit. Definer baru
++memiliki role/ACL/search_path minimum dan jumlah tepat sepuluh fungsi definer
++di schema final; function course_can_manage tetap INVOKER.
++
++Browser menjalankan login OIDC→pilih organisasi→buat course/module/lesson→
++save→reload→publish→edit draft→arsip/restore→logout. Konten script/javascript
++tidak dieksekusi, elemen script/img berbahaya tidak dibuat, gambar eksternal
++tidak di-request, dan resource HTTPS tersimpan. BFF diuji Origin, route asing,
++query ganda/invalid serta payload berlebih. HTTPS IdP pada browser/API memakai
++transport sintetis dengan JWT RSA; ini bukan UAT tenant Auth0 nyata untuk LMS-02.
++
++Browser awal menemukan label textarea setelah reload tidak stabil karena
++label membungkus content textarea. Label Markdown/deskripsi diubah menjadi
++htmlFor/id eksplisit; run final seluruh browser lulus. Review batas resource
++juga menambah cap 50 pengajar/course dan menolak bentuk host localhost/IPv4
++pendek. Full API dijalankan ulang setelah perbaikan terakhir. Tidak ada skip
++untuk menutupi failure. Dua deprecation httpx/Authlib tetap ada.
++
++Node dependency baru diaudit. Python lockfile tidak berubah; audit Python
++tidak diulang pada delta ini. Remote GitHub CI disiapkan untuk branch dan
++browser baru tetapi hasil remote **belum diverifikasi**. Build/image Docker
++aplikasi dan UAT Mac LMS-02 belum dilakukan cloud; browser memakai Next build
++production lokal, API uvicorn dan PostgreSQL 16.15 pada container milik sesi.
++
++DB final API `maaher_test_courses_release_20261110` (namanya tetap DB test),
++browser `maaher_test_courses_browser_final_20261110`, baseline auth
++`maaher_test_courses_auth_browser_20261110`, OIDC
++`maaher_test_courses_fido_browser_20261110` dan
++`maaher_test_courses_dev_browser_20261110`. DB percobaan courses/full/final dan
++browser awal juga dipertahankan. Container maaher-cloud-review-20261109, port
++tes 127.0.0.1:32772, dihentikan setelah validasi; tidak dihapus. Tidak ada
++akses atau perubahan database/container/.env Mac oleh sesi cloud.
++
++## Migrasi, batas dan langkah lokal
++
++Head **0006_courses**, upgrade dari 0005 menambah empat tabel/fungsi/policy dan
++tidak mengubah akun, keyring, session atau binding Auth0. Fixture memeriksa
++head→0005→head, serta seluruh rollback auth lama/base; data identity fixture
++dipertahankan. Downgrade ke 0005 menghapus **semua data kursus**; backup dan
++review dahulu. Tidak ada downgrade/migrasi data pengguna dijalankan cloud.
++
++Asset hanya link HTTPS; belum upload/video hosting. Siswa/enrollment/cohort,
++submission/grading dan eksekusi kode tidak diimplementasikan pada tiket ini.
++Caps development terdokumentasi: 500 course/tenant, 30 module/course,
++50 lesson/module, 50 teacher/course, 10 link/lesson dan body 256 KiB. Hapus
++module/lesson permanen setelah konfirmasi; arsip course menjaga data child.
++Teacher Auth0 enrollment/binding tidak diperluas; gunakan identity yang sudah
++diotorisasi dan jangan memakai marker operator sebagai pengganti role tenant.
++
++Pemilik/Codex Mac mengikuti [LMS-02-MAC-SETUP](LMS-02-MAC-SETUP.md): source baru,
++backup DB sintetis yang benar, upgrade 0006 dengan role migrasi, pertahankan
++seluruh konfigurasi Auth0 yang sudah berhasil, install lockfile dan rebuild
++API/web development. Owner login sendiri lalu UAT /courses. Matikan diagnostic
++lokal setelah selesai. Tidak ada merge/deploy atau promosi dev trust produksi.
++
++## Review independen
++
++Laporan Claude awal tetap utuh (SHA256
++004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce).
++Patch/manifest historis auth tidak ditulis ulang. Snapshot LMS-02 dibuat untuk
++delta ini, tetapi diff Git tetap sumber review utama. Auth parent sendiri masih
++memerlukan review atas update Auth0/dev-TOTP/diagnostics; UAT Mac bukan signoff
++produksi. FIDO2/root trust/recovery, SMTP/inbox, TLS/ingress, backup/restore dan
++persetujuan manusia tetap gate release terpisah.
++
++```text
++Review READ-ONLY branch feat/LMS-02-course-management di mashudizaini/maaher-lms.
++Root aplikasi maaher-lms-starter/. Baca CLAUDE.md/AGENTS.md, skill security review,
++ticket LMS-02, ADR-006 dan handoff ini. Periksa delta 4733526..HEAD untuk kursus;
++periksa main...HEAD untuk seluruh auth yang belum direview/merge.
++Uji pada DB kosong baru maaher_test_* dengan role terpisah milik review sendiri.
++Fokus RLS/tenant/FK, session capability/MFA, definer ACL, teacher assignment/
++revoke, optimistic version dan publication atomicity, XSS/HTTPS/asset handling,
++BFF Origin/body/query ingress, dan migration rollback data loss.
++Bedakan signed synthetic IdP dari UAT Auth0 nyata. Jangan ubah source/Auth0/
++data pemilik. Simpan temuan di reviews/LMS-02-claude.md, pertahankan laporan lama.
++Jangan merge/deploy. Catat setiap tes yang tidak dijalankan.
++```
+diff --git a/maaher-lms-starter/docs/LMS-02-MAC-SETUP.md b/maaher-lms-starter/docs/LMS-02-MAC-SETUP.md
+new file mode 100644
+index 0000000..a306c59
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-02-MAC-SETUP.md
+@@ -0,0 +1,75 @@
++# Menjalankan manajemen kursus di Mac
++
++Branch: `feat/LMS-02-course-management`. Root aplikasi pada repository GitHub
++adalah `maaher-lms-starter/`. Branch bertumpu pada source Auth0 yang sama dengan
++UAT sebelumnya. Tidak perlu membuat ulang tenant/user/Action/binding Auth0.
++
++1. Periksa status source lokal dan ambil branch ke checkout/worktree baru bila
++   ada perubahan yang bertabrakan atau folder lama bukan repo Git. Pertahankan
++   folder lama `/Users/mashudi/Downloads/AiMZ-Corp Project/maaher-lms-starter`.
++   Tidak reset/overwrite/stash otomatis. Gunakan parser dotenv untuk konfigurasi
++   LMS lokal tanpa mencetak atau mengeksekusi secret; jangan commit `.env`.
++2. Pertahankan profile dev-totp, domain/client ID, binding, keyring dan credential
++   yang sudah berhasil. Periksa API `/api/auth/oidc/config` tetap enabled=true dan
++   assurance=maaher-dev-totp-v1. Sesudah diagnosis login selesai, set
++   AUTH0_LOCAL_DIAGNOSTICS=false pada development dan restart API.
++3. Backup DB Auth0 development yang sudah dipastikan sintetis maaher_test_*.
++   Periksa migration/auth/runtime menuju DB yang benar dan role terpisah.
++   Dengan credential migrasi, upgrade dari **0005_dev_totp ke 0006_courses**.
++   Jangan menargetkan DB pengguna, DB tes lama, atau mengubah role menjadi owner.
++   Tidak perlu downgrade/reset. Upgrade ini tidak mengubah akun/binding auth.
++4. Install dependency sesuai lockfile, termasuk `npm ci` pada apps/web. Rebuild/
++   restart hanya layanan API/web development sesuai workflow yang sudah digunakan;
++   pertahankan volume dan database. Jangan memakai service lama dengan schema
++   baru atau web lama tanpa route /api/courses. Checker Auth0 kini mengenali
++   schema 0005 maupun 0006.
++5. Login Auth0 → pilih organisasi yang sah → **Kelola kursus**, atau buka
++   `http://127.0.0.1:3000/courses`. Halaman memuat membership session, tidak
++   menggunakan role/tenant dari query sebagai authority.
++
++## UAT yang perlu dilakukan
++
++- Dengan admin tenant yang sudah ada: buat kursus, tambah modul/pelajaran,
++  simpan Markdown + link HTTPS, reload dan pastikan data tetap ada.
++- Kursus kosong tidak dapat diterbitkan. Isi seluruh modul/pelajaran lalu
++  terbitkan; edit materi harus kembali draft. Ubah urutan, tarik publikasi,
++  arsip/pulihkan, dan pastikan materi tetap ada setelah pemulihan.
++- Assignment guru memakai anggota tenant dengan role teacher yang aktif. Admin
++  dapat memuat daftar anggota/pagination dan assign/revoke; guru hanya melihat
++  kursus tugasnya. Teacher memakai alur identitas yang memang sudah disiapkan
++  untuknya; jangan menambahkan is_operator atau auto-link email untuk login.
++- Akun operator tanpa membership admin tenant tidak mendapat hak membuat kursus.
++  Bila role bukan admin/teacher, jangan promosi otomatis berdasar email/Auth0
++  metadata; periksa provisioning sintetis dan membership yang telah diotorisasi.
++- Konflik dua tab mendapat pesan muat ulang, tidak menimpa perubahan. Simpan
++  perubahan sebelum berpindah kursus/organisasi. Hapus modul/pelajaran adalah
++  permanen dan memerlukan konfirmasi; gunakan data uji.
++- Logout mencabut session; request kursus setelah logout ditolak. Jangan
++  membagikan password/OTP, raw token, cookie, callback URL atau `.env`.
++
++Ini pengelolaan materi. Enrollment/cohort LMS-03 dan tampilan belajar siswa
++LMS-04 belum tersedia; status Terbit tidak membuka katalog anonim. Asset berupa
++tautan HTTPS, belum upload file/video. Eksekusi kode learner tetap dinonaktifkan.
++
++## Prompt Codex CLI
++
++```text
++Lanjutkan UAT LMS-02 dari branch feat/LMS-02-course-management di
++mashudizaini/maaher-lms. Root aplikasi GitHub: maaher-lms-starter/.
++Baca AGENTS.md dan docs/LMS-02-MAC-SETUP.md. Periksa Git status; ambil source
++ke checkout/worktree baru jika perlu tanpa menimpa perubahan lokal saya.
++Pertahankan konfigurasi Auth0 dev-TOTP, binding, .env, keyring dan seluruh DB
++lama yang sudah berhasil. Jangan mencetak nilai secret atau membuat ulang IdP.
++Pastikan flag diagnosis lokal sudah false. Backup lalu upgrade hanya DB Auth0
++development yang sudah terbukti sintetis dari 0005 ke 0006_courses memakai
++credential migrasi terpisah; jangan reset/downgrade/migrasi database lain.
++Install lockfile dan rebuild/restart API/web development sesuai workflow lokal.
++Jalankan checker Auth0 dan buka /courses. Saya menyelesaikan login Auth0 sendiri.
++Verifikasi admin tenant existing, lalu uji create course→module→lesson→save→
++reload→publish→edit kembali draft→archive/restore→logout pada data sintetis.
++Catat hasil nyata, code/schema SHA dan FAIL/SKIP, serta bukti tanpa PII/secret.
++Jangan menambah role dari email atau menonaktifkan MFA/RLS. Jangan merge/deploy.
++```
++
++Review read-only Claude atas auth terbaru dan delta LMS-02 tetap diperlukan.
++Panduan bukti/perintah/rollback ada pada LMS-02-HANDOFF.md.
+diff --git a/maaher-lms-starter/docs/LMS-02-PR.md b/maaher-lms-starter/docs/LMS-02-PR.md
+new file mode 100644
+index 0000000..4fe3f87
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-02-PR.md
+@@ -0,0 +1,22 @@
++# Add tenant-isolated course authoring
++
++Staff who could sign in previously had no course management screen. Admins can
++now create courses, assign active tenant teachers and manage ordered modules and
++Markdown lessons through /courses. Assigned teachers can edit their courses;
++students and unrelated tenants cannot use the management API. Edits return a
++published course to draft, and concurrent changes use version checks.
++
++Migration 0006 adds four FORCE-RLS tables with composite tenant keys and one
++restricted role-lookup definer. Markdown HTML is skipped, external images become
++manual HTTPS links, and no learner code or server asset fetch is executed.
++Course archive preserves content; explicit module/lesson deletion is permanent.
++Downgrade to 0005 deletes all course data. Back up before migrating.
++
++Validation: 198 API/unit, 12 script tests, 16 Action tests, 11 Chromium browser
++cases; typecheck/build and npm production audit pass. Provider tests use a signed
++synthetic IdP. Owner-reported Auth0 dev-TOTP UAT belongs to the parent branch;
++Mac course UAT, remote CI and independent Claude review are pending.
++
++Stacked branch: base feat/LMS-01-auth0-development at 4733526. The authentication
++parent remains unmerged and needs its own independent review. This change does
++not approve production access or deployment. Details: LMS-02-HANDOFF.md.
+diff --git a/maaher-lms-starter/docs/adr/006-course-authoring.md b/maaher-lms-starter/docs/adr/006-course-authoring.md
+new file mode 100644
+index 0000000..3dfcc39
+--- /dev/null
++++ b/maaher-lms-starter/docs/adr/006-course-authoring.md
+@@ -0,0 +1,84 @@
++# ADR-006 — kursus, modul dan pelajaran
++
++Status: implementasi development LMS-02 setelah instruksi lanjut pemilik pada
++10 November 2026. Source asli Maaher; perilaku Timedoor belum diverifikasi REA.
++Auth0 parent branch belum mendapat signoff produksi; modul ini tidak melewati gate.
++
++## Permission dan database
++
++| Peran | Pengelolaan |
++|---|---|
++| Admin tenant aktif dengan session/MFA yang sah | Buat kursus, kelola seluruh kursus tenant, assign guru, arsip/pulihkan |
++| Guru aktif | Baca/edit/publish hanya kursus yang ditugaskan; tanpa create/assign/arsip |
++| Siswa | Tidak mendapat endpoint pengelolaan; pembacaan materi menunggu enrollment LMS-03 |
++
++Migration 0006 menambah courses, courses_teachers, course_modules, course_lessons.
++Seluruhnya FORCE RLS dan membawa tenant_id; FK komposit mengikat course/module/
++lesson/membership ke tenant yang sama. PK/FK/owner/tenant tidak bisa diubah role
++runtime. Credential auth tidak mendapat akses ke tabel kursus.
++
++course_member_role adalah satu fungsi SECURITY DEFINER baru dengan owner
++maaher_definer NOLOGIN non-superuser yang sudah digunakan LMS-01, fixed search_path
++dan tanpa PUBLIC EXECUTE. Fungsi mengikat tenant selector ke identity session
++runtime_identity, memeriksa tenant/membership/user aktif dan hanya membolehkan
++lookup role diri sendiri atau lookup target oleh admin tenant. Tidak membaca
++password/faktor/token. Tidak menambah privilege tabel untuk definer.
++course_can_manage adalah SECURITY INVOKER, membaca assignment melalui RLS yang
++tidak mereferensikan kembali courses; ini menghindari siklus policy.
++GUC user_id atau tenant_id tanpa capability session valid tidak mengotorisasi.
++
++Principal memvalidasi membership pada setiap request. Query menyebut tenant
++eksplisit, sementara RLS memeriksa session/MFA/membership/assignment lagi. Tidak
++ada role dari email, user_metadata atau marker operator. Revoke assignment atau
++membership berlaku untuk request berikutnya pada session yang masih ada.
++
++## Authoring dan publikasi
++
++Admin membuat course draft; guru yang ditugaskan mengelola materi. Setiap
++mutation mengunci row course, mencocokkan version, lalu menaikkan version dan
++mencatat audit actor/action/target tanpa isi materi. Writer bersamaan: satu menang,
++yang memakai version lama mendapat 409. Error child/validation me-rollback seluruh
++transaksi, termasuk perubahan state. COMMIT selesai sebelum respons sukses.
++
++Edit metadata, struktur, materi dan assignment mengembalikan course ke draft.
++Child writes juga membutuhkan parent draft pada policy SQL. Publish memerlukan
++minimal satu modul, setiap modul mempunyai lesson, dan semua lesson berisi.
++Status published adalah status authoring; belum berarti tersedia untuk siswa
++tanpa enrollment. Endpoint siswa tidak dibuka dalam tahap ini.
++
++Kursus memakai arsip/pulihkan. Hapus modul/pelajaran meminta konfirmasi UI dan
++menghapus child yang terkait secara permanen pada transaksi authoring; course
++kembali draft. FK lesson/course melindungi keterkaitan tenant/parent. Reorder
++memerlukan seluruh ID pada parent yang sama tepat satu kali; unique posisi
++deferrable memudahkan perpindahan atomik. ID urut untuk pagination list courses;
++tree hanya mengirim metadata lesson, content dimuat saat lesson dibuka.
++
++## Content dan batas
++
++Materi memakai react-markdown 10.1.0, skipHtml, tanpa MDX/raw HTML plugin atau
++dangerouslySetInnerHTML. URI transform hanya HTTPS, gambar menjadi link manual,
++tidak ada request gambar otomatis. React merender judul/label sebagai teks.
++Resources tambahan maksimum sepuluh link HTTPS dengan validasi format host,
++tanpa credential/control character/backslash dan menolak literal IP privat/
++localhost/bentuk IPv4 pendek. Host tidak di-resolve, dan tidak di-fetch server;
++ini link pengguna, bukan mekanisme upload/proxy berkas. Link tab baru memakai
++noopener/noreferrer. File upload/video hosting memerlukan desain tersendiri.
++
++Course cap 500/tenant, module cap 30/course, lesson cap 50/module, teacher cap
++50/course, content 30.000
++karakter, judul 160, deskripsi 2.000. API dan BFF membatasi POST ke 256 KiB sebelum
++parse. Courses list paginated maksimal 50, default 30; tree dibatasi caps tadi.
++Version/request extra fields divalidasi server. Origin exact pada setiap mutation,
++BFF hanya meneruskan route/metode/query yang diizinkan, cookie opak dan ingress
++identity yang sudah diverifikasi. CSP/headers lama tetap berlaku.
++
++## Migrasi dan gate
++
++Upgrade 0005→0006 menambah schema/fungsi tanpa mengubah akun, binding, secret atau
++session Auth0. Downgrade ke 0005 **menghapus seluruh data kursus** dan fungsi baru,
++mempertahankan auth. Backup terlebih dahulu; review rollback sebelum dipakai.
++Tes fixture roundtrip seluruh migration dan preservasi identity auth berjalan
++pada DB sintetis kosong baru. Tidak ada migrasi Mac/produksi dari cloud.
++
++Review independen Claude, UAT Mac LMS-02, CI remote, production MFA/recovery,
++SMTP/inbox, backup/restore serta ingress/TLS tetap menunggu bukti/gate masing-masing.
+diff --git a/maaher-lms-starter/docs/tickets/LMS-02.md b/maaher-lms-starter/docs/tickets/LMS-02.md
+new file mode 100644
+index 0000000..c9e724c
+--- /dev/null
++++ b/maaher-lms-starter/docs/tickets/LMS-02.md
+@@ -0,0 +1,31 @@
++# LMS-02 — manajemen kursus development
++
++Kelanjutan yang diminta pemilik setelah UAT Auth0 berhasil, 10 November 2026.
++Implementasi asli berdasarkan PROJECT-SPEC/ARCHITECTURE, bukan hasil observasi
++Timedoor yang belum tersedia. Branch ditumpuk pada source LMS-01; review auth
++dan produksi tetap terbuka. Tidak ada merge/deploy otomatis.
++
++Lingkup: admin membuat kursus, menunjuk guru aktif dalam tenant, mengarsipkan/
++memulihkan kursus; admin/guru yang ditugaskan mengelola modul/pelajaran, urutan,
++Markdown, tautan materi HTTPS, terbitkan/tarik publikasi. Semua query memakai
++tenant dari session+membership, FORCE RLS, FK komposit dan role runtime terbatas.
++Siswa belum mendapat akses materi sampai enrollment LMS-03 mengatur haknya.
++Unggah berkas, video hosting, pembayaran dan runner tidak termasuk tahap ini.
++
++Asumsi: kursus terdiri dari modul dan pelajaran berurutan. Materi Markdown tidak
++mengeksekusi HTML/script; gambar eksternal menjadi tautan, tidak dimuat otomatis.
++Tautan HTTPS tidak di-fetch server. Setiap edit mengembalikan kursus ke draft;
++publikasi memerlukan modul/pelajaran berisi. Optimistic version mencegah edit
++saling menimpa; seluruh perubahan diaudit tanpa mencatat isi pelajaran.
++
++File: migrasi 0006, API courses, BFF khusus, UI /courses/ dan link dari /auth,
++fixture/migration/API/SQL/browser tests, CI dan handoff. Tes wajib: tenant asing,
++forged GUC tanpa session, role siswa/guru tanpa assignment, pencabutan assignment/
++membership, FK tenant, XSS/URL berbahaya, state/version conflict, publish validation,
++audit, migrasi roundtrip dan browser login→kursus→pelajaran→publish→logout.
++
++Batas sumber daya: 500 kursus per tenant, 30 modul per kursus, 50 pelajaran per
++modul, 50 pengajar per kursus, 10 tautan per pelajaran, Markdown 30.000 karakter;
++list kursus paginated.
++Menghapus modul/pelajaran adalah tindakan eksplisit pada draft dan menghapus
++isinya; kursus diarsipkan, tidak dihapus. Backup/restore sebelum penggunaan nyata.
+diff --git a/maaher-lms-starter/scripts/test-lms01-browser.py b/maaher-lms-starter/scripts/test-lms01-browser.py
+index 5468355..b68d960 100644
+--- a/maaher-lms-starter/scripts/test-lms01-browser.py
++++ b/maaher-lms-starter/scripts/test-lms01-browser.py
+@@ -54,9 +54,12 @@ def main():
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--oidc', action='store_true', help='Use the test-only signed OIDC provider probe')
+     parser.add_argument('--dev-totp', action='store_true', help='Exercise local synthetic TOTP assurance with --oidc')
++    parser.add_argument('--courses', action='store_true', help='Run course authoring after synthetic OIDC login')
+     args = parser.parse_args()
+     if args.dev_totp and not args.oidc:
+         parser.error('--dev-totp requires --oidc')
++    if args.courses and not args.oidc:
++        parser.error('--courses requires --oidc')
+     owner = os.environ["TEST_MIGRATION_DATABASE_URL"]
+     runtime = os.environ["TEST_DATABASE_URL"]
+     with psycopg.connect(owner) as db:
+@@ -83,6 +86,8 @@ def main():
+         # Probe module is under tests/, never copied into the runtime API image.
+         target = 'oidc_browser_probe:app'
+         test_file = 'oidc.spec.ts'
++        if args.courses:
++            test_file = 'courses.spec.ts'
+         env.update(AUTH0_DOMAIN='browser-tests.us.auth0.com', AUTH0_CLIENT_ID='synthetic-browser-client',
+                    AUTH0_CLIENT_SECRET='synthetic-browser-client-secret-not-a-real-credential',
+                    PYTHONPATH=os.pathsep.join((str(ROOT/'apps/api'),str(ROOT/'apps/api/tests'))))
+diff --git a/maaher-lms-starter/scripts/verify-auth0-local.py b/maaher-lms-starter/scripts/verify-auth0-local.py
+index a15a957..ecbb38f 100644
+--- a/maaher-lms-starter/scripts/verify-auth0-local.py
++++ b/maaher-lms-starter/scripts/verify-auth0-local.py
+@@ -112,10 +112,10 @@ def database(config, report):
+                 report.add('database','FAIL','checker hanya untuk DB development sintetis maaher_test_*; tidak menginspeksi data pengguna')
+                 return
+             revision = owner.execute('SELECT version_num FROM alembic_version').fetchone()[0]
+-            if revision != '0005_dev_totp':
++            if revision not in {'0005_dev_totp', '0006_courses'}:
+                 report.add('database migration','FAIL','migration 0005 belum aktif; periksa source dan DB development yang dipilih')
+                 return
+-            report.add('database migration','PASS','0005 aktif pada DB sintetis')
++            report.add('database migration','PASS','schema Auth0 tersedia pada head yang dikenali di DB sintetis')
+         with psycopg.connect(config['AUTH_DATABASE_URL'],connect_timeout=5,options='-c default_transaction_read_only=on') as auth:
+             if auth.execute('SELECT current_database()').fetchone()[0] != name:
+                 report.add('auth role','FAIL','auth dan migration URL menuju database berbeda')
