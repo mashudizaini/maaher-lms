@@ -1,6 +1,6 @@
 """Tenant-isolated course authoring, assignments and lesson resources."""
 from pathlib import Path
-from alembic import op
+from alembic import context, op
 
 revision = "0006_courses"
 down_revision = "0005_dev_totp"
@@ -14,6 +14,9 @@ def upgrade():
 
 
 def downgrade():
+    populated = op.get_bind().exec_driver_sql('SELECT EXISTS(SELECT 1 FROM courses)').scalar()
+    if populated and context.get_x_argument(as_dictionary=True).get('allow_course_data_loss') != 'yes':
+        raise RuntimeError('Downgrade would delete course data; back up first and explicitly pass -x allow_course_data_loss=yes')
     op.execute("DROP TABLE course_lessons,course_modules,courses_teachers,courses")
     op.execute("DROP FUNCTION course_can_manage(uuid,uuid)")
     op.execute("DROP FUNCTION course_member_role(uuid,uuid)")

@@ -1,5 +1,92 @@
 # LMS-02 — manajemen kursus siap review development
 
+## Tindak lanjut review LOW — status terbaru 10 November 2026
+
+Bagian ini menggantikan status review pending/head 0006 serta perilaku assignment
+pada snapshot historis di bawah. Pemilik menyampaikan review Claude: tujuh LOW,
+tanpa BLOCKER/HIGH/MEDIUM. File asli/verdict formal tidak tersedia di cloud;
+[relay author](../reviews/LMS-02-review-relay-20261110.md) menjaga provenance.
+Respons per item tersedia di [author response](../reviews/LMS-02-author-response.md).
+
+Ketujuh temuan sudah diperbaiki oleh author: assign/cabut menjaga publikasi;
+role/status membership/user mencabut assignment tanpa pulih otomatis; guru
+tidak membaca arsip/child; server memeriksa link aktif Markdown dan resource;
+URL tersembunyi/trailing dot ditolak; rollback data kursus perlu ack; detail
+field eksplisit dan budget mutation 60/menit per tenant/user dengan RLS/retensi.
+Trigger mengunci membership/user untuk race assignment vs role/status; audit
+cleanup hanya memakai actor admin yang benar-benar tervalidasi. Editor tetap
+utuh setelah 429 dan BFF meneruskan Retry-After, tanpa memperluas cookie/header.
+
+Head baru **0007_course_review**, parent 0006. Upgrade mempertahankan materi,
+state/version, assignment aktif yang valid, akun/binding/session/secret. Assignment
+yang saat upgrade tidak valid dibersihkan. Riwayat role yang sudah kembali
+teacher sebelum upgrade tidak dapat disimpulkan dari schema lama; admin perlu
+meninjau kasus historis yang diketahui. Tidak ada auto-publish draft lama atau
+penulisan ulang Markdown. Link legacy diperiksa ulang saat save/publish.
+
+Downgrade 7→6 menjaga materi tetapi melepas guard/budget baru dan tidak
+mengembalikan assignment yang telah dicabut. Guard downgrade **0006** dibackport:
+bila ada course, menolak downgrade ke 0005 kecuali `-x allow_course_data_loss=yes`.
+Ack bukan langkah upgrade/UAT; hanya pengujian disposable atau keputusan
+rollback operator setelah backup. Tidak ada bypass nama DB, tidak ada rollback
+DB pengguna. Fixture menguji penolakan/rollback transaksi dan ack eksplisit.
+
+### Validasi delta baru oleh author
+
+| Pemeriksaan | Hasil |
+|---|---|
+| API lengkap Python 3.12.14/Linux + PostgreSQL 16.15 | **244 passed**, 0 skip, 2 deprecation warnings, 119.31s |
+| Subset course + review regressions | **74 passed**, 0 skip, 90.80s; termasuk 46 kasus review baru |
+| Migration seeded 0006→0007, 7→6→7, guard populated rollback, auth/base roundtrip | PASS pada fixture suite |
+| Script tests / Auth0 Action unit tests | **12 / 16 passed**, 0 skip |
+| Browser kursus final | **2 passed**, 14.9s; assignment published, link server, editor/Retry-After 429, persist/archive/logout/BFF |
+| Browser auth baseline / OIDC FIDO2 sintetis / OIDC dev-TOTP sintetis | **7 / 1 / 1 passed**, 20.9s / 3.2s / 3.3s; total seluruh browser **11**, 0 skip |
+| Next production build + typecheck | PASS setelah perbaikan label pemilih pengajar |
+| npm production audit / PyPI runtime snapshot | **0 vulnerabilities / 41 pins, 0 findings/errors** |
+| pip check, compileall | PASS |
+
+Browser pertama menemukan nama aksesibilitas select pengajar berubah karena
+label membungkus option; label kini htmlFor/id eksplisit dan run kursus final
+lulus. Tidak ada failure yang disembunyikan dengan SKIP. Runtime SQL/RLS,
+dua urutan race koneksi nyata, budget slot terakhir/concurrency/retensi,
+field-set dan target CommonMark aktif/literal kode diuji pada test_course_review.
+Jumlah definer schema final sebelas, owner non-superuser/ACL/search_path diuji.
+CommonMark server menambah markdown-it-py 4.3.0 dan mdurl 0.1.2 pada lock Python.
+
+DB uji baru: maaher_test_course_review_target_20261110 (subset),
+maaher_test_course_review_full_20261110 (full API),
+maaher_test_course_review_courses_browser_final_20261110 (browser final).
+Browser auth/OIDC memakai DB terpisah maaher_test_course_review_auth_browser_20261110,
+maaher_test_course_review_fido_browser_20261110 dan
+maaher_test_course_review_totp_browser_20261110, seluruhnya dipertahankan.
+DB probe/course browser awal juga dipertahankan. Role runtime non-owner tanpa
+BYPASSRLS; auth/operator/mail/maintenance terpisah. Semuanya milik sesi cloud,
+bukan DB UAT Mac. Container maaher-cloud-review-20261109, binding tes
+127.0.0.1:32773; jangan memakai port historis di bawah bila dijalankan kembali.
+Container tes dihentikan setelah validasi, tidak dihapus; seluruh DB tetap ada.
+
+Source base delta **f4f9cf7**; branch tetap feat/LMS-02-course-management. Patch/
+manifest baru review-fixes terpisah dari artifact LMS-02 awal, yang tetap utuh.
+Laporan Claude LMS-01 historis tetap SHA256 yang dicatat di bawah.
+
+### Langkah Mac dan review
+
+Ikuti [panduan Mac yang diperbarui](LMS-02-MAC-SETUP.md): ambil source tanpa
+menimpa perubahan lokal, backup **DB development sintetis yang benar**, upgrade
+maju **0006→0007** dengan credential migrasi, install lock/rebuild API dan web.
+Pertahankan .env/keyring/Auth0/binding/MFA yang sudah berhasil; user melakukan
+login sendiri. UAT khusus assignment published, role cycle, arsip guru, link
+Markdown dan alur utama. Hasil UAT f38c231 tidak dianggap menguji delta ini.
+
+Minta Claude re-review menggunakan [review request](../reviews/LMS-02-review-request.md).
+Auth parent tetap perlu review penuh terpisah; pemeriksaan terarah sebelumnya
+bukan persetujuan auth. Signed synthetic IdP tidak menguji tenant Auth0 nyata,
+inbox SMTP atau security key fisik. Mac UAT baru, re-review, CI remote dan build
+image aplikasi belum terverifikasi oleh cloud. Enrollment LMS-03 belum dimulai.
+Tidak ada perubahan Auth0/.env/DB Mac, merge atau deploy.
+
+## Snapshot historis LMS-02 f38c231 dan laporan UAT awal
+
 **Pembaruan UAT Mac:** pemilik kini melaporkan backup/upgrade 0006, validasi lokal
 198 API + 12 scripts + 16 Action + 2 browser, preflight Auth0 13 PASS, serta
 keberhasilan UAT manual alur utama. Lihat [catatan UAT](LMS-02-DEV-UAT-20261110.md)

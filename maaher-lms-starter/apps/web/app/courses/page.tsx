@@ -16,7 +16,12 @@ const states: Record<string, string> = { draft: 'Draft', published: 'Terbit', ar
 
 function safeHttps(value: string | undefined) {
   if (!value || /[\s\\\u0000-\u001f]/.test(value)) return false;
-  try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; } catch { return false; }
+  try {
+    const invisible = new RegExp('[\\p{Cc}\\p{Cf}\\p{Cs}]', 'u');
+    if (invisible.test(value) || invisible.test(decodeURIComponent(value))) return false;
+    const url = new URL(value);
+    return url.protocol === 'https:' && !url.username && !url.password && !url.hostname.endsWith('.');
+  } catch { return false; }
 }
 
 class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
@@ -48,7 +53,10 @@ export default function Courses() {
     const response = await fetch(path, { method: body ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store',
       headers: { 'content-type': 'application/json', ...(selectedTenant ? { 'x-tenant-id': selectedTenant } : {}) }, body: body ? JSON.stringify(body) : undefined });
     const data = await response.json();
-    if (!response.ok) throw new RequestError(typeof data.detail === 'string' ? data.detail : 'Periksa judul, materi, dan tautan yang diisi', response.status);
+    if (!response.ok) {
+      const linkError = Array.isArray(data.detail) && data.detail.some((item: { type?: string; loc?: unknown[] }) => item.type === 'value_error' && item.loc?.some(part => part === 'content' || part === 'url'));
+      throw new RequestError(typeof data.detail === 'string' ? data.detail : linkError ? 'Materi dan tautan tambahan hanya boleh memakai URL HTTPS publik tanpa karakter tersembunyi' : 'Periksa judul, materi, dan tautan yang diisi', response.status);
+    }
     return data;
   }
 
@@ -115,7 +123,7 @@ export default function Courses() {
     <p role="status" aria-live="polite" className="studio-status">{busy ? 'Memproses…' : message}</p>
     {!role && <p><a href="/auth">Masuk atau pilih organisasi melalui halaman akun</a></p>}
     {['admin','teacher'].includes(role) && <div className="studio-grid">
-      <aside className="studio-panel"><h2>Daftar kursus</h2><label className="check-label"><input type="checkbox" checked={archived} disabled={busy} onChange={event => switchContext(async () => { setCourse(null); setLesson(null); setArchived(event.target.checked); await list(tenant, event.target.checked); })} /> Tampilkan arsip</label>
+      <aside className="studio-panel"><h2>Daftar kursus</h2>{role === 'admin' && <label className="check-label"><input type="checkbox" checked={archived} disabled={busy} onChange={event => switchContext(async () => { setCourse(null); setLesson(null); setArchived(event.target.checked); await list(tenant, event.target.checked); })} /> Tampilkan arsip</label>}
         <ul className="course-list">{courses.map(item => <li key={item.id}><button type="button" className={course?.id === item.id ? 'course-card selected' : 'course-card'} disabled={busy} onClick={() => switchContext(async () => { setLesson(null); setModuleId(''); await openCourse(item.id); setMessage('Kursus dimuat'); })}>
           <span className={`badge ${item.state}`}>{states[item.state]}</span><strong>{item.title}</strong><span>{item.description || 'Belum ada deskripsi'}</span></button></li>)}</ul>
         {!courses.length && <p className="muted">Belum ada kursus pada daftar ini.</p>}
@@ -141,7 +149,7 @@ export default function Courses() {
           {role === 'admin' && editable && <section className="studio-panel"><h3>Pengajar kursus</h3><button disabled={busy || dirty} onClick={() => void run(() => loadMembers())}>Muat daftar pengajar</button>
             {memberNext && <button disabled={busy || dirty} onClick={() => void run(() => loadMembers(memberNext))}>Muat anggota berikutnya</button>}
             <form className="inline-form" onSubmit={event => { event.preventDefault(); void run(async () => { await mutate('/teachers', { user_id: teacher, assigned: true }); setMessage('Pengajar ditugaskan'); }); }}>
-              <label>Pengajar aktif<select value={teacher} onChange={event => setTeacher(event.target.value)} disabled={busy || dirty} required><option value="">Pilih pengajar</option>{members.filter(m => m.role === 'teacher' && m.status === 'active').map(m => <option key={m.user_id} value={m.user_id}>{m.email}</option>)}</select></label>
+              <div><label htmlFor="course-teacher">Pengajar aktif</label><select id="course-teacher" value={teacher} onChange={event => setTeacher(event.target.value)} disabled={busy || dirty} required><option value="">Pilih pengajar</option>{members.filter(m => m.role === 'teacher' && m.status === 'active').map(m => <option key={m.user_id} value={m.user_id}>{m.email}</option>)}</select></div>
               <button disabled={busy || dirty || !teacher}>Tugaskan pengajar</button></form>
             <ul>{course.teachers.map(id => <li key={id}>{members.find(m => m.user_id === id)?.email ?? 'Pengajar terdaftar'}{' '}<button disabled={busy || dirty} onClick={() => void run(async () => { await mutate('/teachers', { user_id: id, assigned: false }); setMessage('Penugasan pengajar dicabut'); })}>Cabut penugasan</button></li>)}</ul></section>}
           <section className="studio-panel"><h3>Struktur pembelajaran</h3>

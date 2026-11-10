@@ -56,9 +56,11 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path?: s
     }
     const result = await fetch(upstream, { method: request.method, headers, body: body as BodyInit | undefined,
       cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15000) });
-    return new Response(await result.arrayBuffer(), { status: result.status, headers: {
+    const outgoing = new Headers({
       'content-type': 'application/json', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
-    } });
+    });
+    const retry = result.headers.get('retry-after'); if (retry) outgoing.set('retry-after', retry);
+    return new Response(await result.arrayBuffer(), { status: result.status, headers: outgoing });
   } catch { return Response.json({ detail: 'Layanan sementara tidak tersedia' }, { status: 503 }); }
 }
 

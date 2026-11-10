@@ -14,7 +14,7 @@ Unggah berkas, video hosting, pembayaran dan runner tidak termasuk tahap ini.
 
 Asumsi: kursus terdiri dari modul dan pelajaran berurutan. Materi Markdown tidak
 mengeksekusi HTML/script; gambar eksternal menjadi tautan, tidak dimuat otomatis.
-Tautan HTTPS tidak di-fetch server. Setiap edit mengembalikan kursus ke draft;
+Tautan HTTPS tidak di-fetch server. Edit materi/metadata/struktur mengembalikan kursus ke draft;
 publikasi memerlukan modul/pelajaran berisi. Optimistic version mencegah edit
 saling menimpa; seluruh perubahan diaudit tanpa mencatat isi pelajaran.
 
@@ -29,3 +29,24 @@ modul, 50 pengajar per kursus, 10 tautan per pelajaran, Markdown 30.000 karakter
 list kursus paginated.
 Menghapus modul/pelajaran adalah tindakan eksplisit pada draft dan menghapus
 isinya; kursus diarsipkan, tidak dihapus. Backup/restore sebelum penggunaan nyata.
+
+## Tindak lanjut review LOW — 10 November 2026
+
+Pemilik meminta author menindaklanjuti tujuh LOW dari laporan Claude yang
+disampaikan melalui chat. Tidak ada BLOCKER/HIGH/MEDIUM dilaporkan. Delta ini
+tetap LMS-02, sebelum enrollment LMS-03; bukan persetujuan penuh auth parent.
+
+Acceptance tambahan: assignment/cabut guru mempertahankan status publikasi;
+perubahan aktual role/status membership atau status user menghapus assignment
+lama, termasuk pada perubahan yang bersamaan; guru tidak dapat membaca arsip
+atau child-nya. Server memvalidasi target Markdown aktif dan resource HTTPS,
+termasuk Unicode tersembunyi/trailing dot; contoh literal dalam kode tetap sah.
+Downgrade 0006 menolak penghapusan kursus berisi tanpa ack eksplisit. Detail
+memakai daftar field eksplisit; POST kursus memiliki budget terautentikasi
+60/menit per tenant/user dengan retensi dan 429/Retry-After tanpa membuang editor.
+
+File tambahan: migration 0007/course_review.sql, course_content/course_limits,
+regresi API/SQL/concurrency/browser, lock Python dan dokumentasi respons author.
+Migrasi maju mempertahankan materi/auth dan assignment guru yang masih valid.
+Uji hanya pada DB sintetis baru; tidak mengubah konfigurasi Auth0/MFA, tidak
+memulai enrollment, merge atau deploy. Re-review independen tetap diperlukan.

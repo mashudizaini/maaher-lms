@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 from uuid import uuid4
+from types import SimpleNamespace
 import pytest
 
 
@@ -36,8 +37,36 @@ def database():
             db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES (%s,%s,%s,'student')",
                        (uuid4(), legacy_tenant, legacy_user))
             db.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES ('legacy-token-hash',%s,now()+interval '1 hour')", (legacy_user,))
+        command.upgrade(config, "0006_courses")
+        legacy_course, legacy_module, legacy_lesson, trusted_teacher, stale_teacher = (uuid4() for _ in range(5))
+        with psycopg.connect(owner_url) as db:
+            for uid, role in ((trusted_teacher, 'teacher'), (stale_teacher, 'student')):
+                db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'upgrade-fixture')", (uid, f'{uid}@example.invalid'))
+                db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,%s)", (uuid4(),legacy_tenant,uid,role))
+            db.execute("INSERT INTO courses(id,tenant_id,owner_id,title,state,version) VALUES(%s,%s,%s,'Upgrade fixture','published',3)", (legacy_course,legacy_tenant,legacy_user))
+            db.execute("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,'Module fixture',1)", (legacy_module,legacy_tenant,legacy_course))
+            db.execute("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,position) VALUES(%s,%s,%s,%s,'Lesson fixture','Preserve course content',1)", (legacy_lesson,legacy_tenant,legacy_course,legacy_module))
+            for uid in (trusted_teacher, stale_teacher):
+                db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s)", (legacy_tenant,legacy_course,uid))
         command.upgrade(config, "head")
-        command.downgrade(config, "0005_dev_totp")
+        with psycopg.connect(owner_url) as db:
+            assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
+            assert db.execute("SELECT state,version FROM courses WHERE id=%s", (legacy_course,)).fetchone() == ('published',3)
+            assert db.execute("SELECT user_id FROM courses_teachers WHERE course_id=%s", (legacy_course,)).fetchall() == [(trusted_teacher,)]
+        command.downgrade(config, "0006_courses")
+        with psycopg.connect(owner_url) as db:
+            assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
+        command.upgrade(config, "head")
+        with pytest.raises(RuntimeError, match='allow_course_data_loss'):
+            command.downgrade(config, "0005_dev_totp")
+        with psycopg.connect(owner_url) as db:
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0007_course_review'
+            assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
+        config.cmd_opts = SimpleNamespace(x=['allow_course_data_loss=yes'])
+        try:
+            command.downgrade(config, "0005_dev_totp")
+        finally:
+            config.cmd_opts = None
         with psycopg.connect(owner_url) as db:
             for table in ("courses", "courses_teachers", "course_modules", "course_lessons"):
                 assert db.execute("SELECT to_regclass(%s)", ("public." + table,)).fetchone()[0] is None
@@ -88,11 +117,11 @@ def database():
                           "invitations", "password_resets", "mfa_factors", "auth_events", "auth_mail_outbox",
                           "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit",
                           "oidc_identities", "oidc_login_flows", "oidc_sessions",
-                          "courses", "courses_teachers", "course_modules", "course_lessons"):
+                          "courses", "courses_teachers", "course_modules", "course_lessons", "course_write_limits"):
                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
         command.upgrade(config, "head")
         with psycopg.connect(owner_url) as db:
-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0006_courses"
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_course_review"
         yield owner_url
     finally:
         if previous is None:

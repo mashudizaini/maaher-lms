@@ -1,0 +1,1552 @@
+diff --git a/maaher-lms-starter/apps/api/app/course_content.py b/maaher-lms-starter/apps/api/app/course_content.py
+new file mode 100644
+index 0000000..5a2231b
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/course_content.py
+@@ -0,0 +1,59 @@
++"""Authoring URL policy, shared by resources and server-side Markdown checks."""
++import ipaddress
++import re
++import unicodedata
++from urllib.parse import unquote, urlsplit
++
++from markdown_it import MarkdownIt
++
++
++def https_resource(value):
++    try:
++        decoded = unquote(value, errors="strict")
++    except (ValueError, UnicodeError):
++        raise ValueError("Tautan memuat encoding yang tidak valid") from None
++    if (len(value) > 2048 or re.search(r"%(?![0-9a-fA-F]{2})", value)
++            or any(c.isspace() or c == "\\" for c in value)
++            or any(unicodedata.category(c) in {"Cc", "Cf", "Cs"} for c in value + decoded)):
++        raise ValueError("Tautan HTTPS tidak boleh memuat karakter kontrol atau tersembunyi")
++    try:
++        url = urlsplit(value)
++        host = (url.hostname or "").encode("idna").decode().lower()
++        valid = (url.scheme == "https" and url.username is None and url.password is None
++                 and url.port in {None, 443} and bool(host) and not host.endswith('.'))
++        try:
++            valid = valid and ipaddress.ip_address(host).is_global
++        except ValueError:
++            labels = host.split('.')
++            valid = (valid and 1 < len(labels) and len(host) <= 253
++                     and not host.endswith((".local", ".localhost", ".internal"))
++                     and bool(re.fullmatch(r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})", labels[-1]))
++                     and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels))
++    except (ValueError, UnicodeError):
++        valid = False
++    if not valid:
++        raise ValueError("Gunakan tautan HTTPS publik tanpa kredensial atau trailing dot")
++    return value
++
++
++def validate_markdown(value):
++    # Tokenize only: never render this parser's HTML. Disabling its default URL
++    # rejection exposes ALL parsed link destinations to our stricter validator,
++    # including javascript/mailto/relative targets. Preserve raw destinations so
++    # IDNA/percent normalization cannot erase hidden Unicode before inspection.
++    parser = MarkdownIt("commonmark", {"html": False})
++    parser.validateLink = lambda _: True
++    parser.normalizeLink = lambda url: url
++    try:
++        pending = parser.parse(value)
++        while pending:
++            token = pending.pop()
++            if token.children:
++                pending.extend(token.children)
++            if token.type in {"link_open", "image"}:
++                target = token.attrGet("href" if token.type == "link_open" else "src")
++                if target is not None:
++                    https_resource(target)
++    except RecursionError:
++        raise ValueError("Struktur Markdown terlalu dalam") from None
++    return value
+diff --git a/maaher-lms-starter/apps/api/app/course_limits.py b/maaher-lms-starter/apps/api/app/course_limits.py
+new file mode 100644
+index 0000000..d2ce773
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/course_limits.py
+@@ -0,0 +1,24 @@
++"""Committed per-membership course budgets, before parsing mutation bodies."""
++from fastapi import HTTPException
++
++from .auth import principal, verify_origin
++from .database import transaction
++
++
++def admit_course_write(request):
++    verify_origin(request)
++    # This independent transaction commits even if subsequent body validation,
++    # object lookup, version checks or the authoring transaction fails.
++    with transaction() as db:
++        actor = principal(request, db)
++        if actor.role not in {"admin", "teacher"}:
++            raise HTTPException(403, "Pengelolaan kursus tersedia bagi admin dan pengajar")
++        row = db.execute("""INSERT INTO course_write_limits(tenant_id,user_id,attempts,window_start)
++            VALUES(%s,%s,1,now()) ON CONFLICT(tenant_id,user_id) DO UPDATE SET
++            attempts=CASE WHEN course_write_limits.window_start<=now()-interval '1 minute' THEN 1
++                          ELSE LEAST(course_write_limits.attempts+1,61) END,
++            window_start=CASE WHEN course_write_limits.window_start<=now()-interval '1 minute'
++                              THEN now() ELSE course_write_limits.window_start END
++            WHERE course_write_limits.attempts<61 OR course_write_limits.window_start<=now()-interval '1 minute'
++            RETURNING attempts""", (actor.tenant_id, actor.user_id)).fetchone()
++        return row is not None and row["attempts"] <= 60
+diff --git a/maaher-lms-starter/apps/api/app/courses.py b/maaher-lms-starter/apps/api/app/courses.py
+index c91c4db..a855993 100644
+--- a/maaher-lms-starter/apps/api/app/courses.py
++++ b/maaher-lms-starter/apps/api/app/courses.py
+@@ -1,42 +1,18 @@
+ """Course authoring: validated session, tenant RLS, assignments and version locks."""
+-import ipaddress
+-import re
+-from urllib.parse import urlsplit
+ from uuid import UUID, uuid4
+ 
+ from fastapi import APIRouter, Depends, HTTPException, Query
+ from pydantic import BaseModel, ConfigDict, Field, field_validator
+ from psycopg.types.json import Jsonb
++from psycopg.errors import CheckViolation, ForeignKeyViolation
+ 
+ from .auth import connection, principal, verify_origin
+ from .security import Principal
++from .course_content import https_resource, validate_markdown
+ 
+ router = APIRouter(prefix="/courses")
+ 
+ 
+-def https_resource(value):
+-    if any(ord(c) <= 32 or c == "\\" for c in value):
+-        raise ValueError("Gunakan tautan HTTPS publik tanpa spasi atau kredensial")
+-    try:
+-        url = urlsplit(value)
+-        host = (url.hostname or "").encode("idna").decode().lower().rstrip('.')
+-        valid = (url.scheme == "https" and url.username is None and url.password is None
+-                 and url.port in {None, 443} and bool(host))
+-        try:
+-            valid = valid and ipaddress.ip_address(host).is_global
+-        except ValueError:
+-            labels = host.split('.')
+-            valid = (valid and 1 < len(labels) and len(host) <= 253
+-                     and not host.endswith((".local", ".localhost", ".internal"))
+-                     and bool(re.fullmatch(r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})", labels[-1]))
+-                     and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels))
+-    except (ValueError, UnicodeError):
+-        valid = False
+-    if not valid:
+-        raise ValueError("Gunakan tautan HTTPS publik tanpa kredensial")
+-    return value
+-
+-
+ class Input(BaseModel):
+     model_config = ConfigDict(extra="forbid")
+ 
+@@ -77,6 +53,7 @@ class Resource(Input):
+ class Lesson(Title, Version):
+     content: str = Field(default="", max_length=30000)
+     resources: list[Resource] = Field(default_factory=list, max_length=10)
++    _markdown = field_validator("content")(validate_markdown)
+ 
+ 
+ class Teacher(Version):
+@@ -105,7 +82,7 @@ def audit(db, actor, action, target, kind="course"):
+ 
+ 
+ def locked(db, actor, course_id, version, archived=False):
+-    row = db.execute("SELECT * FROM courses WHERE tenant_id=%s AND id=%s FOR UPDATE", (actor.tenant_id, course_id)).fetchone()
++    row = db.execute("SELECT id,state,version FROM courses WHERE tenant_id=%s AND id=%s FOR UPDATE", (actor.tenant_id, course_id)).fetchone()
+     if not row:
+         raise HTTPException(404, "Kursus tidak ditemukan")
+     if row["version"] != version:
+@@ -154,7 +131,7 @@ def create_course(body: NewCourse, actor=Depends(manager), db=Depends(connection
+ 
+ @router.get("/{cid}")
+ def course_detail(cid: UUID, actor=Depends(manager), db=Depends(connection, scope="function")):
+-    row = db.execute("SELECT * FROM courses WHERE tenant_id=%s AND id=%s", (actor.tenant_id, cid)).fetchone()
++    row = db.execute("SELECT id,title,description,state,version,created_at,updated_at FROM courses WHERE tenant_id=%s AND id=%s", (actor.tenant_id, cid)).fetchone()
+     if not row:
+         raise HTTPException(404, "Kursus tidak ditemukan")
+     modules = db.execute("SELECT id,title,position FROM course_modules WHERE tenant_id=%s AND course_id=%s ORDER BY position,id",
+@@ -186,6 +163,18 @@ def publish(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connect
+     empty = db.execute("SELECT 1 FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND length(btrim(content))=0 LIMIT 1", (actor.tenant_id, cid)).fetchone()
+     if not modules or incomplete or empty:
+         raise HTTPException(409, "Isi setiap modul dengan pelajaran dan materi sebelum menerbitkan")
++    # Existing 0006 content is preserved during upgrade. Revalidate on publish
++    # using a cursor so legacy links cannot bypass the new write policy.
++    try:
++        with db.cursor(name="course_publish_links") as cursor:
++            cursor.itersize = 20
++            cursor.execute("SELECT content,resources FROM course_lessons WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid))
++            for lesson in cursor:
++                validate_markdown(lesson["content"])
++                for resource in lesson["resources"]:
++                    Resource.model_validate(resource)
++    except ValueError:
++        raise HTTPException(409, "Perbaiki tautan materi agar memakai HTTPS publik tanpa karakter tersembunyi sebelum menerbitkan") from None
+     result = changed(db, actor, cid, "published"); audit(db, actor, "course.published", cid)
+     return result
+ 
+@@ -213,7 +202,7 @@ def restore(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connect
+ 
+ @router.post("/{cid}/teachers", dependencies=[Depends(verify_origin)])
+ def assign_teacher(cid: UUID, body: Teacher, actor=Depends(manager), db=Depends(connection, scope="function")):
+-    admin(actor); locked(db, actor, cid, body.version)
++    admin(actor); course = locked(db, actor, cid, body.version)
+     if body.assigned:
+         role = db.execute("SELECT course_member_role(%s,%s) AS role", (actor.tenant_id, body.user_id)).fetchone()["role"]
+         if role != "teacher":
+@@ -222,10 +211,13 @@ def assign_teacher(cid: UUID, body: Teacher, actor=Depends(manager), db=Depends(
+         present = db.execute("SELECT 1 FROM courses_teachers WHERE tenant_id=%s AND course_id=%s AND user_id=%s", (actor.tenant_id, cid, body.user_id)).fetchone()
+         if count >= 50 and not present:
+             raise HTTPException(409, "Batas 50 pengajar per kursus telah tercapai")
+-        db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (actor.tenant_id, cid, body.user_id))
++        try:
++            db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (actor.tenant_id, cid, body.user_id))
++        except (CheckViolation, ForeignKeyViolation):
++            raise HTTPException(409, "Keanggotaan pengajar telah berubah. Muat ulang sebelum menugaskan") from None
+     else:
+         db.execute("DELETE FROM courses_teachers WHERE tenant_id=%s AND course_id=%s AND user_id=%s", (actor.tenant_id, cid, body.user_id))
+-    result = changed(db, actor, cid); audit(db, actor, "course.teacher_assigned" if body.assigned else "course.teacher_removed", body.user_id, "course_teacher")
++    result = changed(db, actor, cid, course["state"]); audit(db, actor, "course.teacher_assigned" if body.assigned else "course.teacher_removed", body.user_id, "course_teacher")
+     return result
+ 
+ 
+diff --git a/maaher-lms-starter/apps/api/app/main.py b/maaher-lms-starter/apps/api/app/main.py
+index cd785a3..6885472 100644
+--- a/maaher-lms-starter/apps/api/app/main.py
++++ b/maaher-lms-starter/apps/api/app/main.py
+@@ -7,6 +7,7 @@ from .auth_lifecycle import router as lifecycle_router
+ from .mfa import router as mfa_router
+ from .oidc import router as oidc_router
+ from .courses import router as courses_router
++from .course_limits import admit_course_write
+ from .traffic import ANONYMOUS_PATHS, admit
+ from .auth_support import limited
+ 
+@@ -21,6 +22,15 @@ app.include_router(courses_router)
+ @app.middleware("http")
+ async def private_responses(request, call_next):
+     if request.method == 'POST' and (request.url.path == '/courses' or request.url.path.startswith('/courses/')):
++        try:
++            allowed = await run_in_threadpool(admit_course_write, request)
++        except HTTPException as error:
++            return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers={'Cache-Control': 'no-store'})
++        except DatabaseError:
++            return JSONResponse({'detail': 'Layanan penyimpanan sementara tidak tersedia'}, status_code=503, headers={'Cache-Control': 'no-store'})
++        if not allowed:
++            return JSONResponse({'detail': 'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi'}, status_code=429,
++                                headers={'Retry-After': '60', 'Cache-Control': 'no-store'})
+         body = bytearray()
+         async for chunk in request.stream():
+             body.extend(chunk)
+diff --git a/maaher-lms-starter/apps/api/migrations/course_review.sql b/maaher-lms-starter/apps/api/migrations/course_review.sql
+new file mode 100644
+index 0000000..948b9e2
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/course_review.sql
+@@ -0,0 +1,90 @@
++ALTER POLICY course_read ON courses USING(course_can_manage(tenant_id,id)
++    AND (state<>'archived' OR course_member_role(tenant_id,runtime_identity())='admin'));
++-- statement
++ALTER POLICY module_read ON course_modules USING(course_can_manage(tenant_id,course_id)
++    AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id=course_modules.tenant_id AND c.id=course_modules.course_id));
++-- statement
++ALTER POLICY lesson_read ON course_lessons USING(course_can_manage(tenant_id,course_id)
++    AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id=course_lessons.tenant_id AND c.id=course_lessons.course_id));
++-- statement
++GRANT SELECT,DELETE ON courses_teachers TO maaher_definer;
++-- statement
++CREATE FUNCTION course_assignment_guard() RETURNS trigger
++LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
++DECLARE actor uuid; target_user uuid; target_tenant uuid; member_role text; member_status text; removed record;
++BEGIN
++    IF TG_RELID='public.courses_teachers'::regclass AND TG_OP='INSERT' THEN
++        -- Serialize assignment with user/membership changes. FK key-share locks
++        -- alone do not conflict with updates to role/status.
++        PERFORM 1 FROM public.users WHERE id=NEW.user_id AND status='active' FOR SHARE;
++        IF NOT FOUND THEN RAISE EXCEPTION 'active teacher required' USING ERRCODE='23514'; END IF;
++        SELECT role,status INTO member_role,member_status FROM public.memberships
++          WHERE tenant_id=NEW.tenant_id AND user_id=NEW.user_id FOR SHARE;
++        IF NOT FOUND OR member_role<>'teacher' OR member_status<>'active' THEN
++            RAISE EXCEPTION 'active teacher required' USING ERRCODE='23514';
++        END IF;
++        RETURN NEW;
++    ELSIF TG_RELID='public.memberships'::regclass AND TG_OP='UPDATE' THEN
++        target_user:=NEW.user_id; target_tenant:=NEW.tenant_id;
++    ELSIF TG_RELID='public.users'::regclass AND TG_OP='UPDATE' THEN
++        target_user:=NEW.id;
++    ELSE
++        RAISE EXCEPTION 'unsupported assignment trigger';
++    END IF;
++    actor:=public.runtime_identity();
++    FOR removed IN DELETE FROM public.courses_teachers
++      WHERE user_id=target_user AND (target_tenant IS NULL OR tenant_id=target_tenant)
++      RETURNING tenant_id,course_id LOOP
++        IF actor IS NOT NULL AND public.course_member_role(removed.tenant_id,actor)='admin' THEN
++            INSERT INTO public.audit_events(id,tenant_id,actor_id,action,target_type,target_id)
++              VALUES(gen_random_uuid(),removed.tenant_id,actor,'course.teacher_access_revoked','course',removed.course_id);
++        END IF;
++    END LOOP;
++    -- Do not lock courses here: assignment writes lock course before membership,
++    -- so acquiring course locks during a role update would invert that order.
++    RETURN NEW;
++END $$;
++-- statement
++ALTER FUNCTION course_assignment_guard() OWNER TO maaher_definer;
++-- statement
++REVOKE ALL ON FUNCTION course_assignment_guard() FROM PUBLIC;
++-- statement
++CREATE TRIGGER course_assignment_insert_guard BEFORE INSERT ON courses_teachers
++FOR EACH ROW EXECUTE FUNCTION course_assignment_guard();
++-- statement
++CREATE TRIGGER course_membership_changed AFTER UPDATE OF role,status ON memberships
++FOR EACH ROW WHEN (OLD.role IS DISTINCT FROM NEW.role OR OLD.status IS DISTINCT FROM NEW.status)
++EXECUTE FUNCTION course_assignment_guard();
++-- statement
++CREATE TRIGGER course_user_status_changed AFTER UPDATE OF status ON users
++FOR EACH ROW WHEN (OLD.status IS DISTINCT FROM NEW.status) EXECUTE FUNCTION course_assignment_guard();
++-- statement
++DELETE FROM courses_teachers a WHERE NOT EXISTS(
++    SELECT 1 FROM memberships m JOIN users u ON u.id=m.user_id
++    WHERE m.tenant_id=a.tenant_id AND m.user_id=a.user_id AND m.role='teacher'
++      AND m.status='active' AND u.status='active');
++-- statement
++CREATE TABLE course_write_limits (
++    tenant_id uuid NOT NULL, user_id uuid NOT NULL,
++    attempts integer NOT NULL CHECK(attempts BETWEEN 1 AND 61),
++    window_start timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(tenant_id,user_id),
++    FOREIGN KEY(tenant_id,user_id) REFERENCES memberships(tenant_id,user_id) ON DELETE CASCADE
++);
++-- statement
++ALTER TABLE course_write_limits ENABLE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE course_write_limits FORCE ROW LEVEL SECURITY;
++-- statement
++CREATE POLICY own_course_budget ON course_write_limits TO maaher_runtime
++USING(tenant_id::text=current_setting('app.tenant_id',true) AND user_id=runtime_identity()
++      AND course_member_role(tenant_id,user_id) IN ('admin','teacher'))
++WITH CHECK(tenant_id::text=current_setting('app.tenant_id',true) AND user_id=runtime_identity()
++      AND course_member_role(tenant_id,user_id) IN ('admin','teacher'));
++-- statement
++REVOKE ALL ON course_write_limits FROM PUBLIC,maaher_auth;
++-- statement
++GRANT SELECT,INSERT,UPDATE ON course_write_limits TO maaher_runtime;
++-- statement
++GRANT DELETE ON course_write_limits TO maaher_definer;
++-- statement
++GRANT SELECT(window_start) ON course_write_limits TO maaher_definer;
+diff --git a/maaher-lms-starter/apps/api/migrations/versions/0006_courses.py b/maaher-lms-starter/apps/api/migrations/versions/0006_courses.py
+index 5d7004c..5dbb9c0 100644
+--- a/maaher-lms-starter/apps/api/migrations/versions/0006_courses.py
++++ b/maaher-lms-starter/apps/api/migrations/versions/0006_courses.py
+@@ -1,6 +1,6 @@
+ """Tenant-isolated course authoring, assignments and lesson resources."""
+ from pathlib import Path
+-from alembic import op
++from alembic import context, op
+ 
+ revision = "0006_courses"
+ down_revision = "0005_dev_totp"
+@@ -14,6 +14,9 @@ def upgrade():
+ 
+ 
+ def downgrade():
++    populated = op.get_bind().exec_driver_sql('SELECT EXISTS(SELECT 1 FROM courses)').scalar()
++    if populated and context.get_x_argument(as_dictionary=True).get('allow_course_data_loss') != 'yes':
++        raise RuntimeError('Downgrade would delete course data; back up first and explicitly pass -x allow_course_data_loss=yes')
+     op.execute("DROP TABLE course_lessons,course_modules,courses_teachers,courses")
+     op.execute("DROP FUNCTION course_can_manage(uuid,uuid)")
+     op.execute("DROP FUNCTION course_member_role(uuid,uuid)")
+diff --git a/maaher-lms-starter/apps/api/migrations/versions/0007_course_review.py b/maaher-lms-starter/apps/api/migrations/versions/0007_course_review.py
+new file mode 100644
+index 0000000..ea491cb
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/versions/0007_course_review.py
+@@ -0,0 +1,32 @@
++"""Course access revocation, archived visibility and authenticated write budget."""
++from pathlib import Path
++from alembic import op
++
++revision = "0007_course_review"
++down_revision = "0006_courses"
++branch_labels = None
++depends_on = None
++
++
++def retention_statement():
++    source = (Path(__file__).parent.parent / "auth0_oidc.sql").read_text()
++    return next(s for s in source.split("\n-- statement\n") if s.startswith("CREATE OR REPLACE FUNCTION retain_auth_data"))
++
++
++def upgrade():
++    for statement in (Path(__file__).parent.parent / "course_review.sql").read_text().split("\n-- statement\n"):
++        op.execute(statement)
++    op.execute(retention_statement().replace("BEGIN\n", "BEGIN\n    DELETE FROM public.course_write_limits WHERE window_start<now()-interval '1 day';\n", 1))
++
++
++def downgrade():
++    op.execute(retention_statement())
++    op.execute("DROP TRIGGER course_assignment_insert_guard ON courses_teachers")
++    op.execute("DROP TRIGGER course_membership_changed ON memberships")
++    op.execute("DROP TRIGGER course_user_status_changed ON users")
++    op.execute("DROP FUNCTION course_assignment_guard()")
++    op.execute("REVOKE SELECT,DELETE ON courses_teachers FROM maaher_definer")
++    op.execute("ALTER POLICY course_read ON courses USING(course_can_manage(tenant_id,id))")
++    op.execute("ALTER POLICY module_read ON course_modules USING(course_can_manage(tenant_id,course_id))")
++    op.execute("ALTER POLICY lesson_read ON course_lessons USING(course_can_manage(tenant_id,course_id))")
++    op.execute("DROP TABLE course_write_limits")
+diff --git a/maaher-lms-starter/apps/api/requirements-dev.lock b/maaher-lms-starter/apps/api/requirements-dev.lock
+index b42ad65..bd6a395 100644
+--- a/maaher-lms-starter/apps/api/requirements-dev.lock
++++ b/maaher-lms-starter/apps/api/requirements-dev.lock
+@@ -20,6 +20,8 @@ idna==3.20
+ iniconfig==2.3.1
+ joserfc==1.8.0
+ mako==1.4.3
++markdown-it-py==4.3.0
++mdurl==0.1.2
+ markupsafe==3.0.4
+ opentelemetry-api==1.45.2
+ packaging==26.3
+diff --git a/maaher-lms-starter/apps/api/requirements.lock b/maaher-lms-starter/apps/api/requirements.lock
+index e950740..03c7dbb 100644
+--- a/maaher-lms-starter/apps/api/requirements.lock
++++ b/maaher-lms-starter/apps/api/requirements.lock
+@@ -19,6 +19,8 @@ httpx==0.28.1
+ idna==3.20
+ joserfc==1.8.0
+ mako==1.4.3
++markdown-it-py==4.3.0
++mdurl==0.1.2
+ markupsafe==3.0.4
+ opentelemetry-api==1.45.2
+ psycopg==3.2.12
+diff --git a/maaher-lms-starter/apps/api/requirements.txt b/maaher-lms-starter/apps/api/requirements.txt
+index c506cec..1b518c0 100644
+--- a/maaher-lms-starter/apps/api/requirements.txt
++++ b/maaher-lms-starter/apps/api/requirements.txt
+@@ -9,3 +9,4 @@ pyotp==2.9.0
+ cryptography==50.0.2
+ Authlib==1.9.5
+ httpx==0.28.1
++markdown-it-py==4.3.0
+diff --git a/maaher-lms-starter/apps/api/tests/conftest.py b/maaher-lms-starter/apps/api/tests/conftest.py
+index 2ac1d65..cebd1f0 100644
+--- a/maaher-lms-starter/apps/api/tests/conftest.py
++++ b/maaher-lms-starter/apps/api/tests/conftest.py
+@@ -1,6 +1,7 @@
+ import os
+ from pathlib import Path
+ from uuid import uuid4
++from types import SimpleNamespace
+ import pytest
+ 
+ 
+@@ -36,8 +37,36 @@ def database():
+             db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES (%s,%s,%s,'student')",
+                        (uuid4(), legacy_tenant, legacy_user))
+             db.execute("INSERT INTO sessions(token_hash,user_id,expires_at) VALUES ('legacy-token-hash',%s,now()+interval '1 hour')", (legacy_user,))
++        command.upgrade(config, "0006_courses")
++        legacy_course, legacy_module, legacy_lesson, trusted_teacher, stale_teacher = (uuid4() for _ in range(5))
++        with psycopg.connect(owner_url) as db:
++            for uid, role in ((trusted_teacher, 'teacher'), (stale_teacher, 'student')):
++                db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'upgrade-fixture')", (uid, f'{uid}@example.invalid'))
++                db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,%s)", (uuid4(),legacy_tenant,uid,role))
++            db.execute("INSERT INTO courses(id,tenant_id,owner_id,title,state,version) VALUES(%s,%s,%s,'Upgrade fixture','published',3)", (legacy_course,legacy_tenant,legacy_user))
++            db.execute("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,'Module fixture',1)", (legacy_module,legacy_tenant,legacy_course))
++            db.execute("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,position) VALUES(%s,%s,%s,%s,'Lesson fixture','Preserve course content',1)", (legacy_lesson,legacy_tenant,legacy_course,legacy_module))
++            for uid in (trusted_teacher, stale_teacher):
++                db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s)", (legacy_tenant,legacy_course,uid))
+         command.upgrade(config, "head")
+-        command.downgrade(config, "0005_dev_totp")
++        with psycopg.connect(owner_url) as db:
++            assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
++            assert db.execute("SELECT state,version FROM courses WHERE id=%s", (legacy_course,)).fetchone() == ('published',3)
++            assert db.execute("SELECT user_id FROM courses_teachers WHERE course_id=%s", (legacy_course,)).fetchall() == [(trusted_teacher,)]
++        command.downgrade(config, "0006_courses")
++        with psycopg.connect(owner_url) as db:
++            assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
++        command.upgrade(config, "head")
++        with pytest.raises(RuntimeError, match='allow_course_data_loss'):
++            command.downgrade(config, "0005_dev_totp")
++        with psycopg.connect(owner_url) as db:
++            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0007_course_review'
++            assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
++        config.cmd_opts = SimpleNamespace(x=['allow_course_data_loss=yes'])
++        try:
++            command.downgrade(config, "0005_dev_totp")
++        finally:
++            config.cmd_opts = None
+         with psycopg.connect(owner_url) as db:
+             for table in ("courses", "courses_teachers", "course_modules", "course_lessons"):
+                 assert db.execute("SELECT to_regclass(%s)", ("public." + table,)).fetchone()[0] is None
+@@ -88,11 +117,11 @@ def database():
+                           "invitations", "password_resets", "mfa_factors", "auth_events", "auth_mail_outbox",
+                           "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit",
+                           "oidc_identities", "oidc_login_flows", "oidc_sessions",
+-                          "courses", "courses_teachers", "course_modules", "course_lessons"):
++                          "courses", "courses_teachers", "course_modules", "course_lessons", "course_write_limits"):
+                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
+         command.upgrade(config, "head")
+         with psycopg.connect(owner_url) as db:
+-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0006_courses"
++            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_course_review"
+         yield owner_url
+     finally:
+         if previous is None:
+diff --git a/maaher-lms-starter/apps/api/tests/test_course_review.py b/maaher-lms-starter/apps/api/tests/test_course_review.py
+new file mode 100644
+index 0000000..5e2290c
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_course_review.py
+@@ -0,0 +1,240 @@
++"""Regression evidence for the seven LMS-02 review findings."""
++from concurrent.futures import ThreadPoolExecutor
++from threading import Event
++import os
++import time
++from uuid import uuid4
++
++import psycopg
++from psycopg.rows import dict_row
++import pytest
++from fastapi.testclient import TestClient
++from pydantic import ValidationError
++
++from app.course_content import validate_markdown
++from app.courses import Resource
++from app.database import transaction, session_context, tenant_context, user_context
++from app.main import app
++from app.security import token_digest
++from auth_helpers import sign_in
++from test_courses import author, detail, filled, write
++
++
++@pytest.fixture
++def teacher_account(author):
++    identity, headers, cid = author
++    with psycopg.connect(identity[1]) as db:
++        uid = db.execute('SELECT user_id FROM memberships WHERE tenant_id=%s', (identity[4],)).fetchone()[0]
++        db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'teacher')", (uuid4(),identity[3],uid))
++    with TestClient(app, base_url='https://testserver') as client:
++        assert sign_in(client, f'{uid}@example.invalid', identity[6]).status_code == 200
++        yield uid, client
++
++
++def test_teacher_changes_preserve_publication_and_content(author, teacher_account):
++    uid, _ = teacher_account; filled(author)
++    assert write(author, '/publish').status_code == 200
++    version = detail(author)['version']
++    for assigned in (True, False):
++        response = write(author, '/teachers', user_id=str(uid), assigned=assigned)
++        assert response.status_code == 200 and response.json()['state'] == 'published'
++        assert response.json()['version'] == version + 1
++        version += 1
++    assert detail(author)['modules'][0]['lessons'][0]['title'] == 'Hello Python'
++
++
++def test_role_cycle_does_not_restore_old_assignments(author, teacher_account):
++    uid, teacher = teacher_account; identity, headers, cid = author
++    assert write(author, '/teachers', user_id=str(uid), assigned=True).status_code == 200
++    assert teacher.get('/courses/' + cid, headers=headers).status_code == 200
++    for role in ('student', 'teacher'):
++        response = identity[0].post(f'/auth/memberships/{uid}/role', json={'role':role}, headers=headers)
++        assert response.status_code == 200, response.text
++    assert teacher.get('/courses/' + cid, headers=headers).status_code == 404
++    assert detail(author)['teachers'] == []
++    events = identity[0].get('/auth/audit', headers=headers).json()
++    assert any(e['action'] == 'course.teacher_access_revoked' and e['target_id'] == cid for e in events)
++    assert write(author, '/teachers', user_id=str(uid), assigned=True).status_code == 200
++    assert teacher.get('/courses/' + cid, headers=headers).status_code == 200
++
++
++@pytest.mark.parametrize('scope', ['membership', 'user'])
++def test_reactivation_needs_fresh_assignment(author, teacher_account, scope):
++    uid, teacher = teacher_account; identity, headers, cid = author
++    assert write(author, '/teachers', user_id=str(uid), assigned=True).status_code == 200
++    with psycopg.connect(identity[1]) as db:
++        if scope == 'membership':
++            db.execute("UPDATE memberships SET status='revoked' WHERE tenant_id=%s AND user_id=%s", (identity[3],uid))
++            db.execute("UPDATE memberships SET status='active' WHERE tenant_id=%s AND user_id=%s", (identity[3],uid))
++        else:
++            db.execute("UPDATE users SET status='disabled' WHERE id=%s", (uid,))
++            db.execute("UPDATE users SET status='active' WHERE id=%s", (uid,))
++    assert teacher.get('/courses/' + cid, headers=headers).status_code == 404
++    assert detail(author)['teachers'] == []
++
++
++def test_archives_hide_course_and_children_from_teacher_but_preserve_admin_access(author, teacher_account):
++    uid, teacher = teacher_account; identity, headers, cid = author; mid, lid = filled(author)
++    assert write(author, '/teachers', user_id=str(uid), assigned=True).status_code == 200
++    assert write(author, '/archive').status_code == 200
++    assert teacher.get('/courses?archived=true', headers=headers).json()['courses'] == []
++    assert teacher.get('/courses/' + cid, headers=headers).status_code == 404
++    assert teacher.get(f'/courses/{cid}/modules/{mid}/lessons/{lid}', headers=headers).status_code == 404
++    with transaction() as db:
++        session_context(db, token_digest(teacher.cookies['maaher_session'])); tenant_context(db, identity[3])
++        assert db.execute('SELECT id FROM course_modules WHERE course_id=%s', (cid,)).fetchall() == []
++        assert db.execute('SELECT id FROM course_lessons WHERE course_id=%s', (cid,)).fetchall() == []
++    assert identity[0].get(f'/courses/{cid}/modules/{mid}/lessons/{lid}', headers=headers).status_code == 200
++    assert write(author, '/restore').status_code == 200
++    assert teacher.get('/courses/' + cid, headers=headers).status_code == 200
++
++
++def wait_for_lock(owner, name):
++    deadline = time.monotonic() + 3
++    while time.monotonic() < deadline:
++        with psycopg.connect(owner) as db:
++            if db.execute("SELECT 1 FROM pg_stat_activity WHERE application_name=%s AND wait_event_type='Lock'", (name,)).fetchone():
++                return
++        time.sleep(.03)
++    raise AssertionError('Expected assignment/membership lock was not observed')
++
++
++@pytest.mark.parametrize('first', ['role', 'assignment'])
++def test_assignment_and_role_changes_serialize_without_revived_access(author, teacher_account, first):
++    uid, _ = teacher_account; identity, headers, cid = author
++    name = 'maaher_course_race_' + uuid4().hex[:12]
++    started = Event()
++    def change_role():
++        with psycopg.connect(identity[1], application_name=name, options='-c lock_timeout=4000 -c statement_timeout=5000') as db:
++            started.set()
++            db.execute("UPDATE memberships SET role='student' WHERE tenant_id=%s AND user_id=%s", (identity[3],uid))
++        return 'changed'
++    def assign():
++        try:
++            with psycopg.connect(os.environ['TEST_DATABASE_URL'], row_factory=dict_row, application_name=name,
++                                 options='-c lock_timeout=4000 -c statement_timeout=5000') as db:
++                session_context(db, token_digest(identity[0].cookies['maaher_session'])); tenant_context(db, identity[3])
++                started.set()
++                db.execute('INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s)', (identity[3],cid,uid))
++            return 'assigned'
++        except (psycopg.errors.CheckViolation, psycopg.errors.InsufficientPrivilege):
++            return 'denied'
++    if first == 'role':
++        with psycopg.connect(identity[1]) as holder, ThreadPoolExecutor(max_workers=1) as pool:
++            holder.execute("UPDATE memberships SET role='student' WHERE tenant_id=%s AND user_id=%s", (identity[3],uid))
++            future = pool.submit(assign)
++            try:
++                assert started.wait(2); wait_for_lock(identity[1], name)
++            finally:
++                holder.commit()
++            assert future.result(timeout=5) == 'denied'
++    else:
++        with transaction() as holder, ThreadPoolExecutor(max_workers=1) as pool:
++            session_context(holder, token_digest(identity[0].cookies['maaher_session'])); tenant_context(holder, identity[3])
++            holder.execute('INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s)', (identity[3],cid,uid))
++            future = pool.submit(change_role)
++            try:
++                assert started.wait(2); wait_for_lock(identity[1], name)
++            finally:
++                holder.commit()
++            assert future.result(timeout=5) == 'changed'
++    with psycopg.connect(identity[1]) as db:
++        assert db.execute('SELECT count(*) FROM courses_teachers WHERE course_id=%s AND user_id=%s', (cid,uid)).fetchone()[0] == 0
++
++
++@pytest.mark.parametrize('content', [
++    '[x](http://example.org)', '[x](//example.org)', '[x](/relative)', '[x](#heading)',
++    '[x](mailto:a@example.org)', '[x](javascript:alert(1))', '![x](http://example.org)',
++    '![x](data:image/png;base64,abc)', '[x][ref]\n\n[ref]: http://example.org', '<http://example.org>',
++    '<a@example.org>', '[x](https://example.org/path\u202e)', '[x](https://exam\u200bple.org/)',
++    '[x](https://example.org/%E2%80%8B)', '[x](https://example.org./path)',
++])
++def test_server_rejects_non_https_or_hidden_markdown_targets(content):
++    with pytest.raises(ValueError): validate_markdown(content)
++
++
++@pytest.mark.parametrize('content', [
++    '[x](https://example.org)', '![x](https://example.org/a.png)', '<https://example.org>',
++    '[x][ref]\n\n[ref]: https://example.org', '`[x](http://example.org)`',
++    '```text\n[x](javascript:alert(1))\n```', 'Alamat contoh: http://example.org',
++])
++def test_markdown_preserves_safe_links_and_literal_code_examples(content):
++    assert validate_markdown(content) == content
++
++
++@pytest.mark.parametrize('url', [
++    'https://example.org.', 'https://example.org./a', 'https://example.org\u3002',
++    'https://example.org/a\u202eb', 'https://exam\u200bple.org', 'https://example.org/\ufeff',
++    'https://example.org/%E2%80%AE', 'https://example.org/%E2%80%8B', 'https://example.org/%00',
++    'https://example.org/a\u2066b', 'https://example.org/%FF',
++])
++def test_resource_validator_rejects_unicode_controls_and_trailing_dots(url):
++    with pytest.raises((ValidationError,ValueError)): Resource(label='Doc', url=url)
++
++
++def test_server_content_policy_and_legacy_publish_validation_are_atomic(author):
++    identity, headers, cid = author; mid,lid = filled(author)
++    before = detail(author)
++    assert write(author, f'/modules/{mid}/lessons/{lid}', title='Unsafe', content='[x](http://example.org)').status_code == 422
++    assert detail(author)['version'] == before['version']
++    with psycopg.connect(identity[1]) as db:
++        db.execute('UPDATE course_lessons SET content=%s WHERE id=%s', ('[legacy](http://example.org)',lid))
++    assert write(author, '/publish').status_code == 409
++    assert detail(author)['state'] == 'draft' and detail(author)['version'] == before['version']
++
++
++def test_course_detail_returns_an_explicit_public_field_set(author):
++    assert set(detail(author)) == {'id','title','description','state','version','created_at','updated_at','modules','teachers'}
++
++
++def test_budget_commits_on_invalid_body_then_resets_without_affecting_other_actors(author, teacher_account):
++    identity, headers, cid = author; _, teacher = teacher_account
++    with psycopg.connect(identity[1]) as db:
++        db.execute('UPDATE course_write_limits SET attempts=59,window_start=now() WHERE tenant_id=%s AND user_id=%s', (identity[3],identity[2]))
++    assert identity[0].post('/courses', json={'title':'Invalid','tenant_id':str(identity[4])}, headers=headers).status_code == 422
++    denied = identity[0].post('/courses', json={'title':'Over budget'}, headers=headers)
++    assert denied.status_code == 429 and denied.headers['retry-after'] == '60'
++    assert teacher.post(f'/courses/{cid}/modules', json={'title':'Unassigned','version':1}, headers=headers).status_code == 404
++    with psycopg.connect(identity[1]) as db:
++        assert db.execute('SELECT attempts FROM course_write_limits WHERE tenant_id=%s AND user_id=%s', (identity[3],identity[2])).fetchone()[0] == 61
++        db.execute("UPDATE course_write_limits SET window_start=now()-interval '2 minutes' WHERE tenant_id=%s AND user_id=%s", (identity[3],identity[2]))
++    assert identity[0].post('/courses', json={'title':'After window'}, headers=headers).status_code == 201
++
++
++def test_last_budget_slot_is_atomic_across_connections(author):
++    identity, headers, cid = author; version = detail(author)['version']
++    with psycopg.connect(identity[1]) as db:
++        db.execute('UPDATE course_write_limits SET attempts=59,window_start=now() WHERE tenant_id=%s AND user_id=%s', (identity[3],identity[2]))
++    def save(title):
++        with TestClient(app, base_url='https://testserver') as client:
++            client.cookies.update(identity[0].cookies)
++            return client.post('/courses/' + cid, json={'title':title,'version':version}, headers=headers).status_code
++    with ThreadPoolExecutor(max_workers=2) as pool:
++        assert sorted(pool.map(save, ['Writer one','Writer two'])) == [200,429]
++
++
++def test_anonymous_and_student_writes_do_not_allocate_budget(identity):
++    headers = {'origin':'https://testserver','x-tenant-id':str(identity[3])}
++    assert identity[0].post('/courses', json={'title':'Anon'}, headers=headers).status_code == 401
++    assert sign_in(identity[0],identity[5],identity[6]).status_code == 200
++    assert identity[0].post('/courses', json={'title':'Student'}, headers=headers).status_code == 403
++    with psycopg.connect(identity[1]) as db:
++        assert db.execute('SELECT count(*) FROM course_write_limits WHERE user_id=%s', (identity[2],)).fetchone()[0] == 0
++
++
++def test_budget_rls_and_retention_keep_the_live_actor_row(author):
++    from app.maintenance import retain
++    identity, headers, cid = author
++    with psycopg.connect(identity[1]) as db:
++        other = db.execute('SELECT user_id FROM memberships WHERE tenant_id=%s', (identity[4],)).fetchone()[0]
++        db.execute("INSERT INTO course_write_limits(tenant_id,user_id,attempts,window_start) VALUES(%s,%s,1,now()-interval '2 days')", (identity[4],other))
++    with transaction() as db:
++        session_context(db, token_digest(identity[0].cookies['maaher_session'])); tenant_context(db, identity[3])
++        assert [r['user_id'] for r in db.execute('SELECT user_id FROM course_write_limits').fetchall()] == [identity[2]]
++        user_context(db,other); tenant_context(db,identity[4])
++        assert db.execute('SELECT user_id FROM course_write_limits').fetchall() == []
++    with psycopg.connect(os.environ['TEST_MAINTENANCE_DATABASE_URL'], row_factory=dict_row) as db:
++        retain(db)
++    with psycopg.connect(identity[1]) as db:
++        assert db.execute('SELECT 1 FROM course_write_limits WHERE tenant_id=%s AND user_id=%s', (identity[4],other)).fetchone() is None
++        assert db.execute('SELECT 1 FROM course_write_limits WHERE tenant_id=%s AND user_id=%s', (identity[3],identity[2])).fetchone() == (1,)
+diff --git a/maaher-lms-starter/apps/api/tests/test_review_regressions.py b/maaher-lms-starter/apps/api/tests/test_review_regressions.py
+index 79bdac2..5a5ef42 100644
+--- a/maaher-lms-starter/apps/api/tests/test_review_regressions.py
++++ b/maaher-lms-starter/apps/api/tests/test_review_regressions.py
+@@ -127,9 +127,9 @@ def test_m6_definers_are_nonlogin_nonsuperuser_minimum_privilege(identity):
+                     WHERE a.grantee=0 AND a.privilege_type='EXECUTE') AS public_execute
+              FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
+              WHERE n.nspname='public' AND p.prosecdef""").fetchall()
+-        assert len(rows) == 10
++        assert len(rows) == 11
+         assert {row['proname'] for row in rows} == {'resolve_session','tenant_admin','list_members','change_member',
+-            'reset_password','accept_invitation','authorize_mfa_request','retain_auth_data','runtime_identity','course_member_role'}
++            'reset_password','accept_invitation','authorize_mfa_request','retain_auth_data','runtime_identity','course_member_role','course_assignment_guard'}
+         for row in rows:
+             assert row['rolname']=='maaher_definer'
+             assert not any(row[k] for k in ('rolsuper','rolcanlogin','rolcreaterole','public_execute'))
+diff --git a/maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts b/maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts
+index 7218347..b883ec8 100644
+--- a/maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts
++++ b/maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts
+@@ -56,9 +56,11 @@ async function proxy(request: NextRequest, context: { params: Promise<{ path?: s
+     }
+     const result = await fetch(upstream, { method: request.method, headers, body: body as BodyInit | undefined,
+       cache: 'no-store', redirect: 'error', signal: AbortSignal.timeout(15000) });
+-    return new Response(await result.arrayBuffer(), { status: result.status, headers: {
++    const outgoing = new Headers({
+       'content-type': 'application/json', 'cache-control': 'no-store', 'referrer-policy': 'no-referrer', 'x-content-type-options': 'nosniff',
+-    } });
++    });
++    const retry = result.headers.get('retry-after'); if (retry) outgoing.set('retry-after', retry);
++    return new Response(await result.arrayBuffer(), { status: result.status, headers: outgoing });
+   } catch { return Response.json({ detail: 'Layanan sementara tidak tersedia' }, { status: 503 }); }
+ }
+ 
+diff --git a/maaher-lms-starter/apps/web/app/courses/page.tsx b/maaher-lms-starter/apps/web/app/courses/page.tsx
+index c2d187b..496efdc 100644
+--- a/maaher-lms-starter/apps/web/app/courses/page.tsx
++++ b/maaher-lms-starter/apps/web/app/courses/page.tsx
+@@ -16,7 +16,12 @@ const states: Record<string, string> = { draft: 'Draft', published: 'Terbit', ar
+ 
+ function safeHttps(value: string | undefined) {
+   if (!value || /[\s\\\u0000-\u001f]/.test(value)) return false;
+-  try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password; } catch { return false; }
++  try {
++    const invisible = new RegExp('[\\p{Cc}\\p{Cf}\\p{Cs}]', 'u');
++    if (invisible.test(value) || invisible.test(decodeURIComponent(value))) return false;
++    const url = new URL(value);
++    return url.protocol === 'https:' && !url.username && !url.password && !url.hostname.endsWith('.');
++  } catch { return false; }
+ }
+ 
+ class RequestError extends Error { constructor(message: string, public status: number) { super(message); } }
+@@ -48,7 +53,10 @@ export default function Courses() {
+     const response = await fetch(path, { method: body ? 'POST' : 'GET', credentials: 'same-origin', cache: 'no-store',
+       headers: { 'content-type': 'application/json', ...(selectedTenant ? { 'x-tenant-id': selectedTenant } : {}) }, body: body ? JSON.stringify(body) : undefined });
+     const data = await response.json();
+-    if (!response.ok) throw new RequestError(typeof data.detail === 'string' ? data.detail : 'Periksa judul, materi, dan tautan yang diisi', response.status);
++    if (!response.ok) {
++      const linkError = Array.isArray(data.detail) && data.detail.some((item: { type?: string; loc?: unknown[] }) => item.type === 'value_error' && item.loc?.some(part => part === 'content' || part === 'url'));
++      throw new RequestError(typeof data.detail === 'string' ? data.detail : linkError ? 'Materi dan tautan tambahan hanya boleh memakai URL HTTPS publik tanpa karakter tersembunyi' : 'Periksa judul, materi, dan tautan yang diisi', response.status);
++    }
+     return data;
+   }
+ 
+@@ -115,7 +123,7 @@ export default function Courses() {
+     <p role="status" aria-live="polite" className="studio-status">{busy ? 'Memproses…' : message}</p>
+     {!role && <p><a href="/auth">Masuk atau pilih organisasi melalui halaman akun</a></p>}
+     {['admin','teacher'].includes(role) && <div className="studio-grid">
+-      <aside className="studio-panel"><h2>Daftar kursus</h2><label className="check-label"><input type="checkbox" checked={archived} disabled={busy} onChange={event => switchContext(async () => { setCourse(null); setLesson(null); setArchived(event.target.checked); await list(tenant, event.target.checked); })} /> Tampilkan arsip</label>
++      <aside className="studio-panel"><h2>Daftar kursus</h2>{role === 'admin' && <label className="check-label"><input type="checkbox" checked={archived} disabled={busy} onChange={event => switchContext(async () => { setCourse(null); setLesson(null); setArchived(event.target.checked); await list(tenant, event.target.checked); })} /> Tampilkan arsip</label>}
+         <ul className="course-list">{courses.map(item => <li key={item.id}><button type="button" className={course?.id === item.id ? 'course-card selected' : 'course-card'} disabled={busy} onClick={() => switchContext(async () => { setLesson(null); setModuleId(''); await openCourse(item.id); setMessage('Kursus dimuat'); })}>
+           <span className={`badge ${item.state}`}>{states[item.state]}</span><strong>{item.title}</strong><span>{item.description || 'Belum ada deskripsi'}</span></button></li>)}</ul>
+         {!courses.length && <p className="muted">Belum ada kursus pada daftar ini.</p>}
+@@ -141,7 +149,7 @@ export default function Courses() {
+           {role === 'admin' && editable && <section className="studio-panel"><h3>Pengajar kursus</h3><button disabled={busy || dirty} onClick={() => void run(() => loadMembers())}>Muat daftar pengajar</button>
+             {memberNext && <button disabled={busy || dirty} onClick={() => void run(() => loadMembers(memberNext))}>Muat anggota berikutnya</button>}
+             <form className="inline-form" onSubmit={event => { event.preventDefault(); void run(async () => { await mutate('/teachers', { user_id: teacher, assigned: true }); setMessage('Pengajar ditugaskan'); }); }}>
+-              <label>Pengajar aktif<select value={teacher} onChange={event => setTeacher(event.target.value)} disabled={busy || dirty} required><option value="">Pilih pengajar</option>{members.filter(m => m.role === 'teacher' && m.status === 'active').map(m => <option key={m.user_id} value={m.user_id}>{m.email}</option>)}</select></label>
++              <div><label htmlFor="course-teacher">Pengajar aktif</label><select id="course-teacher" value={teacher} onChange={event => setTeacher(event.target.value)} disabled={busy || dirty} required><option value="">Pilih pengajar</option>{members.filter(m => m.role === 'teacher' && m.status === 'active').map(m => <option key={m.user_id} value={m.user_id}>{m.email}</option>)}</select></div>
+               <button disabled={busy || dirty || !teacher}>Tugaskan pengajar</button></form>
+             <ul>{course.teachers.map(id => <li key={id}>{members.find(m => m.user_id === id)?.email ?? 'Pengajar terdaftar'}{' '}<button disabled={busy || dirty} onClick={() => void run(async () => { await mutate('/teachers', { user_id: id, assigned: false }); setMessage('Penugasan pengajar dicabut'); })}>Cabut penugasan</button></li>)}</ul></section>}
+           <section className="studio-panel"><h3>Struktur pembelajaran</h3>
+diff --git a/maaher-lms-starter/apps/web/tests/courses.spec.ts b/maaher-lms-starter/apps/web/tests/courses.spec.ts
+index 472e4eb..d8cc4b4 100644
+--- a/maaher-lms-starter/apps/web/tests/courses.spec.ts
++++ b/maaher-lms-starter/apps/web/tests/courses.spec.ts
+@@ -39,16 +39,40 @@ test('admin authors real persisted course content after OIDC; Markdown is inert;
+   expect(await page.evaluate(() => (window as unknown as { __courseXss?: number }).__courseXss)).toBeUndefined();
+   expect(externalLoads).toEqual([]);
+   await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('hanya boleh memakai URL HTTPS publik');
++  await page.getByLabel('Materi Markdown', { exact: true }).fill('# Mulai coding\n\n```python\nprint("Halo")\n```\n\n![Diagram](https://assets.example.invalid/probe.png)');
++  await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
+   await expect(page.getByRole('status')).toContainText('Pelajaran disimpan');
+   if (process.env.LMS_COURSE_SCREENSHOT) await page.screenshot({ path: process.env.LMS_COURSE_SCREENSHOT, fullPage: true });
+   await page.getByRole('button', { name: 'Terbitkan kursus', exact: true }).click();
+   await expect(page.getByRole('status')).toContainText('Kursus berhasil diterbitkan');
++  const teacher = JSON.parse(execFileSync(process.env.LMS_TEST_PYTHON!,
++    [`${process.env.LMS_TEST_ROOT}/scripts/lms01-browser-fixtures.py`, 'member'],
++    { input: JSON.stringify({ tenant: account.tenant, role: 'teacher' }), encoding: 'utf8' }));
++  await page.getByRole('button', { name: 'Muat daftar pengajar', exact: true }).click();
++  await page.getByLabel('Pengajar aktif', { exact: true }).selectOption(teacher.user);
++  await page.getByRole('button', { name: 'Tugaskan pengajar', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Pengajar ditugaskan');
++  await expect(page.getByRole('button', { name: 'Tarik publikasi', exact: true })).toBeVisible();
++  await page.getByRole('button', { name: 'Cabut penugasan', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Penugasan pengajar dicabut');
++  await expect(page.getByRole('button', { name: 'Tarik publikasi', exact: true })).toBeVisible();
+   await page.reload();
+   await page.getByRole('button', { name: /Python praktis/ }).click();
+   await page.getByRole('button', { name: 'Halo Python', exact: true }).click();
+   await expect(page.getByLabel('Materi Markdown', { exact: true })).toHaveValue(/print\("Halo"\)/);
+   await expect(preview.getByRole('link', { name: 'Dokumentasi Python', exact: true })).toHaveAttribute('href', 'https://docs.python.org/3/');
+   await page.getByLabel('Materi Markdown', { exact: true }).fill('Materi revisi');
++  const budget = (mode: string) => execFileSync(process.env.LMS_TEST_PYTHON!,
++    [`${process.env.LMS_TEST_ROOT}/scripts/lms01-browser-fixtures.py`, 'course-budget'],
++    { input: JSON.stringify({ tenant: account.tenant, user: account.user, mode }), encoding: 'utf8' });
++  budget('exhaust');
++  const limited = page.waitForResponse(response => response.url().includes('/api/courses/') && response.status() === 429);
++  await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
++  expect((await limited).headers()['retry-after']).toBe('60');
++  await expect(page.getByRole('status')).toContainText('Terlalu banyak perubahan kursus');
++  await expect(page.getByLabel('Materi Markdown', { exact: true })).toHaveValue('Materi revisi');
++  budget('expire');
+   await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
+   await expect(page.getByRole('status')).toContainText('Pelajaran disimpan');
+   await expect(page.getByRole('button', { name: 'Terbitkan kursus', exact: true })).toBeEnabled();
+diff --git a/maaher-lms-starter/docs/ARCHITECTURE.md b/maaher-lms-starter/docs/ARCHITECTURE.md
+index ef0fc94..eb5703e 100644
+--- a/maaher-lms-starter/docs/ARCHITECTURE.md
++++ b/maaher-lms-starter/docs/ARCHITECTURE.md
+@@ -32,7 +32,9 @@ All tenant-owned relations carry tenant_id; enforce composite FK where possible
+ ## Auth implementation and external decisions
+ 
+ LMS-02 development menambah schema 0006 untuk authoring course/module/lesson dan
+-assignment guru. Contract permission, RLS, version/publish, safe Markdown dan
++assignment guru; tindak lanjut review 0007 menambah pencabutan assignment pada
++perubahan role/status, pembatasan arsip dan budget mutation terautentikasi.
++Contract permission, RLS, version/publish, safe Markdown server dan
+ rollback dijelaskan pada [ADR-006](adr/006-course-authoring.md). Pembacaan materi
+ siswa tetap menunggu enrollment; belum ada runner atau upload service.
+ Pemilik menyetujui Auth0/OIDC untuk admin/operator pada 10 November 2026.
+diff --git a/maaher-lms-starter/docs/LMS-02-CHECKLIST.md b/maaher-lms-starter/docs/LMS-02-CHECKLIST.md
+index 060a0b8..5350807 100644
+--- a/maaher-lms-starter/docs/LMS-02-CHECKLIST.md
++++ b/maaher-lms-starter/docs/LMS-02-CHECKLIST.md
+@@ -1,8 +1,9 @@
+ # LMS-02 — status development dan review
+ 
+-Source code yang diuji: **f38c231**. Laporan Mac/manual dari pemilik direkam pada
++Source awal yang UAT Mac: **f38c231**. Laporan Mac/manual dari pemilik direkam pada
+ [UAT development](LMS-02-DEV-UAT-20261110.md). Dokumen ini membedakan bukti
+-otomatis, laporan manual dan pekerjaan yang masih pending.
++otomatis, laporan manual dan pekerjaan yang masih pending. Delta review setelah
++base **f4f9cf7** menambah head **0007_course_review**; UAT/re-review delta pending.
+ 
+ | Item | Bukti/status |
+ |---|---|
+@@ -10,14 +11,17 @@ otomatis, laporan manual dan pekerjaan yang masih pending.
+ | Publish, edit kembali Draft | Otomatis PASS; UAT utama Mac dilaporkan berhasil |
+ | Archive/restore dengan materi utuh | Otomatis PASS; UAT utama Mac dilaporkan berhasil |
+ | Logout | Otomatis PASS; UAT utama Mac dilaporkan berhasil; hitungan session manual tidak diberikan |
+-| Assignment/revoke guru, role/membership | Otomatis PASS; UAT manual khusus belum dirinci |
+-| Tenant isolation, FK, forged context, least privilege | Otomatis PostgreSQL PASS; review independen masih pending |
++| Assignment/revoke guru, role/membership | Regresi published/role cycle/race SQL PASS; UAT delta pending |
++| Arsip guru, parent/child SQL RLS | Regresi API/SQL PASS; admin restore tetap tersedia |
++| Tenant isolation, FK, forged context, least privilege | Otomatis PostgreSQL PASS; review awal terarah dilaporkan; re-review delta pending |
+ | Version conflict, publish atomicity, caps | Otomatis PASS; UAT manual khusus belum dirinci |
+-| Markdown/XSS, HTTPS resources, body/Origin/query | Otomatis API/browser PASS; review independen masih pending |
+-| Migrasi 0006, auth dipertahankan | Cloud roundtrip PASS; Mac backup/upgrade dilaporkan berhasil |
++| Markdown/XSS, HTTPS resources, body/Origin/query | Parser server/Unicode/legacy publish dan browser PASS; re-review pending |
++| Detail field eksplisit dan budget course writes | API/concurrency/RLS/retensi PASS; browser 429/Retry-After/editor PASS |
++| Migrasi 0006→0007, auth/materi dipertahankan | Cloud seeded upgrade/roundtrip/guard rollback PASS; Mac delta pending |
+ | Build/typecheck/npm audit | Cloud PASS; Mac build ulang dilaporkan berhasil |
+ | Auth0 local preflight | Mac 13 PASS menurut CLI; tidak mencakup seluruh setting provider |
+-| Review Claude untuk LMS-02 | **PENDING**, belum ada reviews/LMS-02-claude.md |
++| Review Claude awal untuk LMS-02 | Dilaporkan pemilik: tujuh LOW, tanpa BLOCKER/HIGH/MEDIUM; file/verdict formal belum tersedia cloud |
++| Respons/re-review LOW | Ketujuh diimplementasikan/diuji author; **RE-REVIEW PENDING** |
+ | Review auth parent terbaru | **PENDING**, laporan auth lama tetap CHANGES_REQUESTED dan bukan review source Auth0 terbaru |
+ | GitHub CI remote | **UNVERIFIED**, konfigurasi CI tersedia; belum ada bukti hasil remote |
+ | Diagnostic flag setelah UAT | Belum dilaporkan; cleanup lokal dibahas pada panduan Mac |
+@@ -25,5 +29,7 @@ otomatis, laporan manual dan pekerjaan yang masih pending.
+ 
+ Alur utama LMS-02 **lulus UAT development menurut pemilik**. Enrollment/cohort
+ LMS-03, belajar siswa LMS-04, grading dan runner merupakan scope terpisah.
++Validasi delta cloud: **244 API, 12 scripts, 16 Action, 11 browser**, tanpa skip;
++build/typecheck, npm0, PyPI41pins0. Detail perintah dan hasil pada handoff.
+ Sumber perintah, schema, batas dan risiko downgrade: [handoff](LMS-02-HANDOFF.md).
+ Review request siap dipakai pada [reviews](../reviews/LMS-02-review-request.md).
+diff --git a/maaher-lms-starter/docs/LMS-02-HANDOFF.md b/maaher-lms-starter/docs/LMS-02-HANDOFF.md
+index 1938e81..22149ad 100644
+--- a/maaher-lms-starter/docs/LMS-02-HANDOFF.md
++++ b/maaher-lms-starter/docs/LMS-02-HANDOFF.md
+@@ -1,5 +1,92 @@
+ # LMS-02 — manajemen kursus siap review development
+ 
++## Tindak lanjut review LOW — status terbaru 10 November 2026
++
++Bagian ini menggantikan status review pending/head 0006 serta perilaku assignment
++pada snapshot historis di bawah. Pemilik menyampaikan review Claude: tujuh LOW,
++tanpa BLOCKER/HIGH/MEDIUM. File asli/verdict formal tidak tersedia di cloud;
++[relay author](../reviews/LMS-02-review-relay-20261110.md) menjaga provenance.
++Respons per item tersedia di [author response](../reviews/LMS-02-author-response.md).
++
++Ketujuh temuan sudah diperbaiki oleh author: assign/cabut menjaga publikasi;
++role/status membership/user mencabut assignment tanpa pulih otomatis; guru
++tidak membaca arsip/child; server memeriksa link aktif Markdown dan resource;
++URL tersembunyi/trailing dot ditolak; rollback data kursus perlu ack; detail
++field eksplisit dan budget mutation 60/menit per tenant/user dengan RLS/retensi.
++Trigger mengunci membership/user untuk race assignment vs role/status; audit
++cleanup hanya memakai actor admin yang benar-benar tervalidasi. Editor tetap
++utuh setelah 429 dan BFF meneruskan Retry-After, tanpa memperluas cookie/header.
++
++Head baru **0007_course_review**, parent 0006. Upgrade mempertahankan materi,
++state/version, assignment aktif yang valid, akun/binding/session/secret. Assignment
++yang saat upgrade tidak valid dibersihkan. Riwayat role yang sudah kembali
++teacher sebelum upgrade tidak dapat disimpulkan dari schema lama; admin perlu
++meninjau kasus historis yang diketahui. Tidak ada auto-publish draft lama atau
++penulisan ulang Markdown. Link legacy diperiksa ulang saat save/publish.
++
++Downgrade 7→6 menjaga materi tetapi melepas guard/budget baru dan tidak
++mengembalikan assignment yang telah dicabut. Guard downgrade **0006** dibackport:
++bila ada course, menolak downgrade ke 0005 kecuali `-x allow_course_data_loss=yes`.
++Ack bukan langkah upgrade/UAT; hanya pengujian disposable atau keputusan
++rollback operator setelah backup. Tidak ada bypass nama DB, tidak ada rollback
++DB pengguna. Fixture menguji penolakan/rollback transaksi dan ack eksplisit.
++
++### Validasi delta baru oleh author
++
++| Pemeriksaan | Hasil |
++|---|---|
++| API lengkap Python 3.12.14/Linux + PostgreSQL 16.15 | **244 passed**, 0 skip, 2 deprecation warnings, 119.31s |
++| Subset course + review regressions | **74 passed**, 0 skip, 90.80s; termasuk 46 kasus review baru |
++| Migration seeded 0006→0007, 7→6→7, guard populated rollback, auth/base roundtrip | PASS pada fixture suite |
++| Script tests / Auth0 Action unit tests | **12 / 16 passed**, 0 skip |
++| Browser kursus final | **2 passed**, 14.9s; assignment published, link server, editor/Retry-After 429, persist/archive/logout/BFF |
++| Browser auth baseline / OIDC FIDO2 sintetis / OIDC dev-TOTP sintetis | **7 / 1 / 1 passed**, 20.9s / 3.2s / 3.3s; total seluruh browser **11**, 0 skip |
++| Next production build + typecheck | PASS setelah perbaikan label pemilih pengajar |
++| npm production audit / PyPI runtime snapshot | **0 vulnerabilities / 41 pins, 0 findings/errors** |
++| pip check, compileall | PASS |
++
++Browser pertama menemukan nama aksesibilitas select pengajar berubah karena
++label membungkus option; label kini htmlFor/id eksplisit dan run kursus final
++lulus. Tidak ada failure yang disembunyikan dengan SKIP. Runtime SQL/RLS,
++dua urutan race koneksi nyata, budget slot terakhir/concurrency/retensi,
++field-set dan target CommonMark aktif/literal kode diuji pada test_course_review.
++Jumlah definer schema final sebelas, owner non-superuser/ACL/search_path diuji.
++CommonMark server menambah markdown-it-py 4.3.0 dan mdurl 0.1.2 pada lock Python.
++
++DB uji baru: maaher_test_course_review_target_20261110 (subset),
++maaher_test_course_review_full_20261110 (full API),
++maaher_test_course_review_courses_browser_final_20261110 (browser final).
++Browser auth/OIDC memakai DB terpisah maaher_test_course_review_auth_browser_20261110,
++maaher_test_course_review_fido_browser_20261110 dan
++maaher_test_course_review_totp_browser_20261110, seluruhnya dipertahankan.
++DB probe/course browser awal juga dipertahankan. Role runtime non-owner tanpa
++BYPASSRLS; auth/operator/mail/maintenance terpisah. Semuanya milik sesi cloud,
++bukan DB UAT Mac. Container maaher-cloud-review-20261109, binding tes
++127.0.0.1:32773; jangan memakai port historis di bawah bila dijalankan kembali.
++Container tes dihentikan setelah validasi, tidak dihapus; seluruh DB tetap ada.
++
++Source base delta **f4f9cf7**; branch tetap feat/LMS-02-course-management. Patch/
++manifest baru review-fixes terpisah dari artifact LMS-02 awal, yang tetap utuh.
++Laporan Claude LMS-01 historis tetap SHA256 yang dicatat di bawah.
++
++### Langkah Mac dan review
++
++Ikuti [panduan Mac yang diperbarui](LMS-02-MAC-SETUP.md): ambil source tanpa
++menimpa perubahan lokal, backup **DB development sintetis yang benar**, upgrade
++maju **0006→0007** dengan credential migrasi, install lock/rebuild API dan web.
++Pertahankan .env/keyring/Auth0/binding/MFA yang sudah berhasil; user melakukan
++login sendiri. UAT khusus assignment published, role cycle, arsip guru, link
++Markdown dan alur utama. Hasil UAT f38c231 tidak dianggap menguji delta ini.
++
++Minta Claude re-review menggunakan [review request](../reviews/LMS-02-review-request.md).
++Auth parent tetap perlu review penuh terpisah; pemeriksaan terarah sebelumnya
++bukan persetujuan auth. Signed synthetic IdP tidak menguji tenant Auth0 nyata,
++inbox SMTP atau security key fisik. Mac UAT baru, re-review, CI remote dan build
++image aplikasi belum terverifikasi oleh cloud. Enrollment LMS-03 belum dimulai.
++Tidak ada perubahan Auth0/.env/DB Mac, merge atau deploy.
++
++## Snapshot historis LMS-02 f38c231 dan laporan UAT awal
++
+ **Pembaruan UAT Mac:** pemilik kini melaporkan backup/upgrade 0006, validasi lokal
+ 198 API + 12 scripts + 16 Action + 2 browser, preflight Auth0 13 PASS, serta
+ keberhasilan UAT manual alur utama. Lihat [catatan UAT](LMS-02-DEV-UAT-20261110.md)
+diff --git a/maaher-lms-starter/docs/LMS-02-MAC-SETUP.md b/maaher-lms-starter/docs/LMS-02-MAC-SETUP.md
+index c7ec1b0..f36b89d 100644
+--- a/maaher-lms-starter/docs/LMS-02-MAC-SETUP.md
++++ b/maaher-lms-starter/docs/LMS-02-MAC-SETUP.md
+@@ -1,10 +1,11 @@
+ # Menjalankan manajemen kursus di Mac
+ 
+-**Status:** alur utama manual Mac pada f38c231 sudah dilaporkan berhasil oleh
+-pemilik. Simpan data UAT yang ada; tidak perlu mengulang setup atau migrasi hanya
+-untuk memperbarui catatan ini. Lihat [hasil UAT](LMS-02-DEV-UAT-20261110.md) dan
+-[review request](../reviews/LMS-02-review-request.md). Langkah setup di bawah
+-tetap panduan untuk checkout baru; review independen masih pending.
++**Status terbaru:** UAT utama f38c231 berhasil menurut pemilik; review Claude
++kemudian melaporkan tujuh LOW tanpa BLOCKER/HIGH/MEDIUM. Delta perbaikannya
++menambah **0007_course_review**. Simpan data UAT, backup lalu upgrade maju;
++tidak perlu setup ulang Auth0. UAT delta dan re-review masih pending. Lihat
++[respons author](../reviews/LMS-02-author-response.md) dan
++[hasil UAT sebelumnya](LMS-02-DEV-UAT-20261110.md).
+ 
+ Branch: `feat/LMS-02-course-management`. Root aplikasi pada repository GitHub
+ adalah `maaher-lms-starter/`. Branch bertumpu pada source Auth0 yang sama dengan
+@@ -21,20 +22,37 @@ UAT sebelumnya. Tidak perlu membuat ulang tenant/user/Action/binding Auth0.
+    AUTH0_LOCAL_DIAGNOSTICS=false pada development dan restart API.
+ 3. Backup DB Auth0 development yang sudah dipastikan sintetis maaher_test_*.
+    Periksa migration/auth/runtime menuju DB yang benar dan role terpisah.
+-   Dengan credential migrasi, upgrade dari **0005_dev_totp ke 0006_courses**.
++   Dengan credential migrasi, upgrade dari **0006_courses ke 0007_course_review**
++   (`python -m alembic -c apps/api/alembic.ini upgrade head` dari root aplikasi,
++   konfigurasi credential migrasi tetap lokal). Checkout baru dari 0005 melewati
++   0006 lalu 0007 pada perintah yang sama.
+    Jangan menargetkan DB pengguna, DB tes lama, atau mengubah role menjadi owner.
+    Tidak perlu downgrade/reset. Upgrade ini tidak mengubah akun/binding auth.
+ 4. Install dependency sesuai lockfile, termasuk `npm ci` pada apps/web. Rebuild/
+    restart hanya layanan API/web development sesuai workflow yang sudah digunakan;
+    pertahankan volume dan database. Jangan memakai service lama dengan schema
+    baru atau web lama tanpa route /api/courses. Checker Auth0 kini mengenali
+-   schema 0005 maupun 0006.
++   schema 0005, 0006 maupun 0007. Lock Python kini mencakup parser Markdown server;
++   rebuild API diperlukan, selain web. Jangan hanya memperbarui frontend.
+ 5. Login Auth0 → pilih organisasi yang sah → **Kelola kursus**, atau buka
+    `http://127.0.0.1:3000/courses`. Halaman memuat membership session, tidak
+    menggunakan role/tenant dari query sebagai authority.
+ 
+ ## UAT yang perlu dilakukan
+ 
++- Regresi baru: pada kursus Terbit, tugaskan/cabut guru; status harus tetap
++  Terbit. Dengan guru sintetis yang sudah diotorisasi, role teacher→student→
++  teacher tidak mengembalikan kursus lama; admin harus menugaskan ulang.
++- Guru tidak melihat/membaca kursus arsip. Admin tetap dapat memulihkannya.
++  Assignment yang valid tetap ada saat archive/restore; perubahan role/status
++  membership atau user mencabut assignment secara permanen.
++- Tautan aktif Markdown HTTP/relative/tersembunyi harus ditolak saat simpan;
++  contoh URL di inline/blok kode tetap dapat disimpan. Data legacy dipertahankan
++  saat upgrade; perbaiki link yang ditolak sebelum simpan/publish. Tidak ada
++  publikasi ulang otomatis untuk draft yang dibuat perilaku lama.
++- Limit mutation adalah 60/menit per admin/guru per tenant. 429 meminta menunggu
++  dan mempertahankan editor. Tidak perlu membanjiri DB UAT untuk mengujinya;
++  bukti concurrency dan 429 tersedia pada tes DB/browser sintetis terpisah.
+ - Dengan admin tenant yang sudah ada: buat kursus, tambah modul/pelajaran,
+   simpan Markdown + link HTTPS, reload dan pastikan data tetap ada.
+ - Kursus kosong tidak dapat diterbitkan. Isi seluruh modul/pelajaran lalu
+@@ -57,22 +75,32 @@ Ini pengelolaan materi. Enrollment/cohort LMS-03 dan tampilan belajar siswa
+ LMS-04 belum tersedia; status Terbit tidak membuka katalog anonim. Asset berupa
+ tautan HTTPS, belum upload file/video. Eksekusi kode learner tetap dinonaktifkan.
+ 
++0007 membersihkan assignment yang **saat upgrade** tidak valid. Schema lama
++tidak merekam kapan penugasan dibuat; bila pernah terjadi siklus role sebelum
++upgrade, tinjau assignment guru saat ini dan cabut yang tidak lagi disetujui.
++Jangan menganggap migrasi dapat menyimpulkan riwayat tersebut. Downgrade bukan
++langkah UAT: 0007→0006 menghilangkan guard baru tanpa mengembalikan assignment;
++0006→0005 menghapus materi dan kini menuntut ack eksplisit bila course berisi.
++
+ ## Prompt Codex CLI
+ 
+ ```text
+-Lanjutkan UAT LMS-02 dari branch feat/LMS-02-course-management di
++Lanjutkan perbaikan review/UAT LMS-02 dari branch feat/LMS-02-course-management di
+ mashudizaini/maaher-lms. Root aplikasi GitHub: maaher-lms-starter/.
+-Baca AGENTS.md dan docs/LMS-02-MAC-SETUP.md. Periksa Git status; ambil source
++Baca AGENTS.md, docs/LMS-02-MAC-SETUP.md dan reviews/LMS-02-author-response.md.
++Periksa Git status; ambil source
+ ke checkout/worktree baru jika perlu tanpa menimpa perubahan lokal saya.
+ Pertahankan konfigurasi Auth0 dev-TOTP, binding, .env, keyring dan seluruh DB
+ lama yang sudah berhasil. Jangan mencetak nilai secret atau membuat ulang IdP.
+ Pastikan flag diagnosis lokal sudah false. Backup lalu upgrade hanya DB Auth0
+-development yang sudah terbukti sintetis dari 0005 ke 0006_courses memakai
++development yang sudah terbukti sintetis dari 0006 ke 0007_course_review memakai
+ credential migrasi terpisah; jangan reset/downgrade/migrasi database lain.
+ Install lockfile dan rebuild/restart API/web development sesuai workflow lokal.
+ Jalankan checker Auth0 dan buka /courses. Saya menyelesaikan login Auth0 sendiri.
+-Verifikasi admin tenant existing, lalu uji create course→module→lesson→save→
+-reload→publish→edit kembali draft→archive/restore→logout pada data sintetis.
++Verifikasi admin tenant existing; uji assign/cabut pada course Terbit tetap
++Terbit, siklus role tidak mengembalikan assignment, guru tidak membaca arsip,
++validasi link Markdown, serta create→save→reload→publish→edit draft→restore→logout.
++Jangan menyimpulkan UAT baru lulus dari catatan f38c231; catat hasil aktual.
+ Catat hasil nyata, code/schema SHA dan FAIL/SKIP, serta bukti tanpa PII/secret.
+ Jangan menambah role dari email atau menonaktifkan MFA/RLS. Jangan merge/deploy.
+ ```
+diff --git a/maaher-lms-starter/docs/LMS-02-PR.md b/maaher-lms-starter/docs/LMS-02-PR.md
+index 51dbd96..b86834d 100644
+--- a/maaher-lms-starter/docs/LMS-02-PR.md
++++ b/maaher-lms-starter/docs/LMS-02-PR.md
+@@ -1,24 +1,30 @@
+-# Add tenant-isolated course authoring
++# Add tenant-isolated course authoring and address review findings
+ 
+-Staff who could sign in previously had no course management screen. Admins can
+-now create courses, assign active tenant teachers and manage ordered modules and
+-Markdown lessons through /courses. Assigned teachers can edit their courses;
+-students and unrelated tenants cannot use the management API. Edits return a
+-published course to draft, and concurrent changes use version checks.
++Staff can create courses, manage ordered modules and Markdown lessons, and
++publish/archive/restore through /courses. Only tenant admins and assigned active
++teachers can use the management API; students wait for enrollment. Content edits
++return a course to draft; assigning or removing a teacher preserves publication.
++Role or membership status changes permanently revoke old assignments, including
++concurrent changes; teachers cannot read archived courses or their lessons.
+ 
+-Migration 0006 adds four FORCE-RLS tables with composite tenant keys and one
+-restricted role-lookup definer. Markdown HTML is skipped, external images become
+-manual HTTPS links, and no learner code or server asset fetch is executed.
+-Course archive preserves content; explicit module/lesson deletion is permanent.
+-Downgrade to 0005 deletes all course data. Back up before migrating.
++Migrations 0006/0007 enforce tenant keys, RLS, restricted definer ownership and
++an authenticated mutation budget (60/minute per tenant/user). The server validates
++active Markdown/resource HTTPS targets, hidden Unicode and trailing-dot hosts.
++429 responses preserve unsaved editor content. Upgrade preserves course/auth
++content and valid assignments; review known historical role cycles manually.
++Downgrading past 0006 deletes courses and now refuses populated rollback without
++explicit data-loss acknowledgement. Back up first; no UAT database rollback.
+ 
+-Validation: 198 API/unit, 12 script tests, 16 Action tests, 11 Chromium browser
+-cases; typecheck/build and npm production audit pass. Provider tests use a signed
+-synthetic IdP. Owner-reported Auth0 dev-TOTP UAT belongs to the parent branch.
+-The owner now reports successful Mac course UAT on f38c231 after backup/0006
+-upgrade, local 198 API, 12 scripts, 16 Action, 2 browser and 13 preflight PASS.
+-See LMS-02-DEV-UAT-20261110.md; remote CI and independent Claude review remain pending.
++Validation: 244 API/unit (0 skip, 2 existing deprecation warnings), 12 scripts,
++16 Action tests, 11 Chromium browser cases; production Next build/typecheck,
++pip check, npm production audit 0 and PyPI snapshot 41 pins/0 findings. Tests
++cover seeded migration preservation, guarded rollback, direct runtime SQL/RLS,
++assignment/role races, Markdown and quota concurrency. OIDC tests use a signed
++synthetic IdP, not the owner's real Auth0 tenant.
+ 
+-Stacked branch: base feat/LMS-01-auth0-development at 4733526. The authentication
+-parent remains unmerged and needs its own independent review. This change does
+-not approve production access or deployment. Details: LMS-02-HANDOFF.md.
++The owner reported successful Mac UAT on the earlier f38c231/0006. Their relayed
++Claude review reported seven LOW and no BLOCKER/HIGH/MEDIUM. The author addressed
++all seven; re-review and Mac UAT of 0007 are pending. CI remote and application
++Docker image build are unverified. Branch is stacked on unmerged auth parent
++4733526, whose full independent review remains pending. No merge/deploy or
++production approval. See LMS-02-HANDOFF.md and reviews/LMS-02-author-response.md.
+diff --git a/maaher-lms-starter/docs/adr/006-course-authoring.md b/maaher-lms-starter/docs/adr/006-course-authoring.md
+index 3dfcc39..787129b 100644
+--- a/maaher-lms-starter/docs/adr/006-course-authoring.md
++++ b/maaher-lms-starter/docs/adr/006-course-authoring.md
+@@ -9,7 +9,7 @@ Auth0 parent branch belum mendapat signoff produksi; modul ini tidak melewati ga
+ | Peran | Pengelolaan |
+ |---|---|
+ | Admin tenant aktif dengan session/MFA yang sah | Buat kursus, kelola seluruh kursus tenant, assign guru, arsip/pulihkan |
+-| Guru aktif | Baca/edit/publish hanya kursus yang ditugaskan; tanpa create/assign/arsip |
++| Guru aktif | Baca/edit/publish hanya kursus nonarsip yang ditugaskan; tanpa create/assign/arsip |
+ | Siswa | Tidak mendapat endpoint pengelolaan; pembacaan materi menunggu enrollment LMS-03 |
+ 
+ Migration 0006 menambah courses, courses_teachers, course_modules, course_lessons.
+@@ -40,7 +40,8 @@ mencatat audit actor/action/target tanpa isi materi. Writer bersamaan: satu mena
+ yang memakai version lama mendapat 409. Error child/validation me-rollback seluruh
+ transaksi, termasuk perubahan state. COMMIT selesai sebelum respons sukses.
+ 
+-Edit metadata, struktur, materi dan assignment mengembalikan course ke draft.
++Edit metadata, struktur dan materi mengembalikan course ke draft. Assignment/
++pencabutan guru mempertahankan state, sambil menaikkan version dan mencatat audit.
+ Child writes juga membutuhkan parent draft pada policy SQL. Publish memerlukan
+ minimal satu modul, setiap modul mempunyai lesson, dan semua lesson berisi.
+ Status published adalah status authoring; belum berarti tersedia untuk siswa
+@@ -58,9 +59,15 @@ tree hanya mengirim metadata lesson, content dimuat saat lesson dibuka.
+ Materi memakai react-markdown 10.1.0, skipHtml, tanpa MDX/raw HTML plugin atau
+ dangerouslySetInnerHTML. URI transform hanya HTTPS, gambar menjadi link manual,
+ tidak ada request gambar otomatis. React merender judul/label sebagai teks.
++Server memeriksa target link/image/autolink/referensi Markdown menggunakan
++tokenizer CommonMark markdown-it-py 4.3.0 (bukan renderer). Semua target aktif
++memakai kebijakan HTTPS yang sama dengan resources. Contoh literal di code fence,
++inline code dan teks URL biasa tidak dianggap tautan aktif. Simpan dan publish
++memvalidasi kembali; data lama tidak dihapus atau ditulis ulang saat upgrade.
+ Resources tambahan maksimum sepuluh link HTTPS dengan validasi format host,
+ tanpa credential/control character/backslash dan menolak literal IP privat/
+-localhost/bentuk IPv4 pendek. Host tidak di-resolve, dan tidak di-fetch server;
++localhost/bentuk IPv4 pendek, Unicode kategori Cc/Cf/Cs (mentah maupun encoded),
++encoding invalid dan trailing dot setelah IDNA. Host tidak di-resolve, dan tidak di-fetch server;
+ ini link pengguna, bukan mekanisme upload/proxy berkas. Link tab baru memakai
+ noopener/noreferrer. File upload/video hosting memerlukan desain tersendiri.
+ 
+@@ -72,13 +79,40 @@ Version/request extra fields divalidasi server. Origin exact pada setiap mutatio
+ BFF hanya meneruskan route/metode/query yang diizinkan, cookie opak dan ingress
+ identity yang sudah diverifikasi. CSP/headers lama tetap berlaku.
+ 
++POST /courses dan child memiliki budget 60/menit per membership tenant/user
++terautentikasi admin/guru. Admission memakai transaksi runtime tersendiri sebelum
++parse body; counter tetap commit bila validasi/lookup/version berikutnya gagal.
++UPSERT atomik dengan satu row per membership; request anonim/siswa tidak membuat
++row. Counter jenuh pada 61; request berikutnya tidak menulis ulang row sampai
++window berakhir. 429 membawa Retry-After: 60 melalui BFF; editor tetap utuh.
++Retensi existing menghapus budget lebih tua satu hari. Ini budget aplikasi,
++bukan pengganti rate limit ingress produksi.
++
++Migration 0007 menambah FORCE RLS budget dan trigger assignment. INSERT mengunci
++user dan membership FOR SHARE agar berserial dengan perubahan role/status.
++Setiap perubahan aktual role/status membership atau status user menghapus
++assignment terkait, sehingga reaktivasi tidak menghidupkan akses lama. Trigger
++definer dimiliki maaher_definer, fixed search_path, tanpa PUBLIC EXECUTE; grants
++tambahan hanya SELECT/DELETE assignment dan DELETE/SELECT(window_start) budget.
++Cleanup tidak mengunci course agar urutan lock tidak terbalik dengan authoring.
++Perubahan permission ini tidak mengubah materi/state/version kursus; audit
++course.teacher_access_revoked dibuat bila ada actor admin tenant tervalidasi.
++SQL maintenance tanpa actor tidak direkayasa menjadi actor aplikasi.
++
+ ## Migrasi dan gate
+ 
+-Upgrade 0005→0006 menambah schema/fungsi tanpa mengubah akun, binding, secret atau
+-session Auth0. Downgrade ke 0005 **menghapus seluruh data kursus** dan fungsi baru,
+-mempertahankan auth. Backup terlebih dahulu; review rollback sebelum dipakai.
++Upgrade 0005→0006→0007 mempertahankan akun, binding, secret, session dan materi.
++0007 membersihkan assignment yang saat upgrade tidak lagi valid, mempertahankan
++assignment aktif yang valid. Siklus role sebelum upgrade tidak bisa disimpulkan
++dari schema lama; admin perlu meninjau assignment bila pernah terjadi siklus itu.
++Downgrade 0007→0006 mempertahankan materi tetapi menghapus guard/budget baru dan
++tidak mengembalikan assignment yang dicabut. Downgrade 0006→0005 **menghapus
++seluruh data kursus**; kini diblokir bila ada course, kecuali operator memberikan
++`alembic -x allow_course_data_loss=yes ... downgrade ...` setelah backup/review.
++Database kosong tetap dapat roundtrip tanpa ack. Tidak ada bypass prefix nama DB.
+ Tes fixture roundtrip seluruh migration dan preservasi identity auth berjalan
+ pada DB sintetis kosong baru. Tidak ada migrasi Mac/produksi dari cloud.
+ 
+-Review independen Claude, UAT Mac LMS-02, CI remote, production MFA/recovery,
++UAT utama Mac f38c231 dan review LOW awal dilaporkan pemilik. UAT delta 0007,
++re-review independen Claude, review penuh auth parent, CI remote, production MFA/recovery,
+ SMTP/inbox, backup/restore serta ingress/TLS tetap menunggu bukti/gate masing-masing.
+diff --git a/maaher-lms-starter/docs/tickets/LMS-02.md b/maaher-lms-starter/docs/tickets/LMS-02.md
+index c9e724c..bcbf347 100644
+--- a/maaher-lms-starter/docs/tickets/LMS-02.md
++++ b/maaher-lms-starter/docs/tickets/LMS-02.md
+@@ -14,7 +14,7 @@ Unggah berkas, video hosting, pembayaran dan runner tidak termasuk tahap ini.
+ 
+ Asumsi: kursus terdiri dari modul dan pelajaran berurutan. Materi Markdown tidak
+ mengeksekusi HTML/script; gambar eksternal menjadi tautan, tidak dimuat otomatis.
+-Tautan HTTPS tidak di-fetch server. Setiap edit mengembalikan kursus ke draft;
++Tautan HTTPS tidak di-fetch server. Edit materi/metadata/struktur mengembalikan kursus ke draft;
+ publikasi memerlukan modul/pelajaran berisi. Optimistic version mencegah edit
+ saling menimpa; seluruh perubahan diaudit tanpa mencatat isi pelajaran.
+ 
+@@ -29,3 +29,24 @@ modul, 50 pengajar per kursus, 10 tautan per pelajaran, Markdown 30.000 karakter
+ list kursus paginated.
+ Menghapus modul/pelajaran adalah tindakan eksplisit pada draft dan menghapus
+ isinya; kursus diarsipkan, tidak dihapus. Backup/restore sebelum penggunaan nyata.
++
++## Tindak lanjut review LOW — 10 November 2026
++
++Pemilik meminta author menindaklanjuti tujuh LOW dari laporan Claude yang
++disampaikan melalui chat. Tidak ada BLOCKER/HIGH/MEDIUM dilaporkan. Delta ini
++tetap LMS-02, sebelum enrollment LMS-03; bukan persetujuan penuh auth parent.
++
++Acceptance tambahan: assignment/cabut guru mempertahankan status publikasi;
++perubahan aktual role/status membership atau status user menghapus assignment
++lama, termasuk pada perubahan yang bersamaan; guru tidak dapat membaca arsip
++atau child-nya. Server memvalidasi target Markdown aktif dan resource HTTPS,
++termasuk Unicode tersembunyi/trailing dot; contoh literal dalam kode tetap sah.
++Downgrade 0006 menolak penghapusan kursus berisi tanpa ack eksplisit. Detail
++memakai daftar field eksplisit; POST kursus memiliki budget terautentikasi
++60/menit per tenant/user dengan retensi dan 429/Retry-After tanpa membuang editor.
++
++File tambahan: migration 0007/course_review.sql, course_content/course_limits,
++regresi API/SQL/concurrency/browser, lock Python dan dokumentasi respons author.
++Migrasi maju mempertahankan materi/auth dan assignment guru yang masih valid.
++Uji hanya pada DB sintetis baru; tidak mengubah konfigurasi Auth0/MFA, tidak
++memulai enrollment, merge atau deploy. Re-review independen tetap diperlukan.
+diff --git a/maaher-lms-starter/reviews/LMS-02-author-response.md b/maaher-lms-starter/reviews/LMS-02-author-response.md
+new file mode 100644
+index 0000000..be6e851
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-02-author-response.md
+@@ -0,0 +1,50 @@
++# LMS-02 — respons author atas tujuh LOW
++
++10 November 2026. Author Codex; base perbaikan **f4f9cf7**, branch
++feat/LMS-02-course-management. Laporan yang disampaikan pemilik dicatat di
++[review relay](LMS-02-review-relay-20261110.md); label berikut dibuat author.
++Status setiap item: **diimplementasikan dan diuji author, menunggu re-review
++independen**. Bukan deklarasi CLOSED/approval oleh Claude. Auth parent hanya
++ditinjau terarah pada review sebelumnya dan tetap memerlukan review penuh.
++
++| ID lokal | Temuan dan perubahan | Bukti regresi |
++|---|---|---|
++| L2-01 | Assignment/cabut mempertahankan state kursus; version/audit tetap naik. Edit materi tetap draft. | API published add/revoke + content preservation; browser memeriksa Tarik publikasi tetap ada pada kedua aksi. |
++| L2-02 | Trigger menghapus assignment pada setiap perubahan aktual role/status membership atau status user. INSERT mengunci user/membership FOR SHARE sehingga tidak balapan dengan perubahan role/status. Tidak otomatis kembali setelah reaktivasi. | Role cycle melalui API; revoke/reactivate membership/user; dua urutan race SQL pada koneksi nyata; assignment eksplisit baru mengembalikan akses. |
++| L2-03 | RLS parent/child menyembunyikan arsip dari guru. Admin tetap dapat baca/pulihkan; assignment valid tidak dihapus karena archive saja. Checkbox arsip hanya admin. | API list/detail/lesson dan SELECT runtime langsung ke module/lesson kosong; admin read dan restore berhasil. |
++| L2-04 | Tokenizer CommonMark memvalidasi semua target link/image/autolink/referensi di server saat simpan; publish memeriksa legacy material/resources lagi. Tidak merender HTML atau fetch aset. | HTTP/relative/mailto/javascript/data/ref/autolink ditolak, contoh literal kode sah; request 422 dan legacy publish 409 tidak mengubah state/version; browser editor dapat diperbaiki lalu disimpan. |
++| L2-05 | URL menolak Cc/Cf/Cs raw/percent-encoded, encoding invalid, serta trailing dot setelah IDNA. Filter frontend juga menolak karakter tersembunyi/trailing dot. | Resource dan Markdown: bidi/zero-width/BOM/C0/invalid UTF-8/trailing dot termasuk ideographic dot; kebijakan host/IP lama tetap diuji. |
++| L2-06 | Downgrade 0006 yang berisi course menolak berjalan tanpa `-x allow_course_data_loss=yes`. Tidak ada bypass prefix DB. Upgrade 0006 tidak ditulis ulang; guard downgrade dibackport. | Fixture seeded 0006→0007 menjaga materi/state/version/valid assignment; 7→6→7 menjaga materi; downgrade tanpa ack gagal dan transaksi mempertahankan head/data; ack hanya dipakai pada DB sintetis disposable. |
++| L2-07 | Detail/lock memakai daftar field SQL eksplisit. POST kursus dibatasi 60/menit per tenant/user terautentikasi, counter commit sebelum parse; RLS/retensi dan header Retry-After BFF. | Field set response tepat; invalid body tetap terhitung; slot terakhir dua koneksi hanya satu lolos; actor lain/window baru lolos; anonim/siswa tak membuat row; RLS/retensi; browser 429 mempertahankan editor. |
++
++## Bukti dan batas
++
++API lengkap **244 passed, 0 skip, 2 warning deprecation** (119.31s), termasuk
++**46 kasus baru** pada test_course_review.py dan seluruh 198 tes sebelumnya.
++Subset course+review **74 passed** (90.80s). Fixture juga menguji rollback auth
++lama hingga base dan upgrade kembali. Python 3.12.14/Linux, PostgreSQL 16.15
++dengan runtime non-owner/non-BYPASSRLS, role auth/operator/mail/maintenance
++terpisah. **11 tes browser lulus, 0 skip**: kursus 2, auth baseline 7, OIDC
++FIDO2 sintetis 1 dan dev-TOTP sintetis 1. Build/typecheck, 12 tes scripts,
++16 tes Action, pip check dan snapshot
++PyPI **41 pin, 0 findings/errors**, npm production audit **0 vulnerabilities**.
++Hasil browser final dan DB evidence tercantum pada handoff; signed synthetic
++provider tidak membuktikan konfigurasi Auth0 tenant nyata atau security key fisik.
++
++Upgrade 0007 hanya membersihkan assignment yang **saat upgrade** tidak valid.
++Schema sebelumnya tidak merekam waktu assignment, sehingga siklus role yang
++sudah kembali teacher sebelum upgrade tidak bisa disimpulkan. Pertahankan
++assignment valid dan minta admin meninjau riwayat yang diketahui; tidak
++menghapus semua assignment secara spekulatif. Trigger selanjutnya mencegah
++pengulangan. Cleanup tidak mengubah version/state kursus agar tidak membalik
++urutan lock parent-course→membership; otorisasi/RLS diperiksa pada request baru.
++
++Materi legacy tidak ditulis ulang saat migrasi; bila link melanggar, perbaiki
++sebelum save/publish. Kursus yang telanjur draft oleh bug lama tidak otomatis
++dipublikasikan. Downgrade 7→6 tidak mengembalikan assignment yang dicabut dan
++menonaktifkan guard/budget baru. Downgrade 6→5 tetap destruktif bila operator
++memberi ack; backup/review wajib. Tidak ada rollback pada DB UAT pengguna.
++
++UAT Mac pada delta baru, re-review, CI remote, build image aplikasi dan gate
++produksi belum terverifikasi. Tidak ada merge/deploy atau enrollment LMS-03.
++Laporan Claude LMS-01 historis dan artifact awal LMS-02 dipertahankan.
+diff --git a/maaher-lms-starter/reviews/LMS-02-review-relay-20261110.md b/maaher-lms-starter/reviews/LMS-02-review-relay-20261110.md
+new file mode 100644
+index 0000000..279af61
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-02-review-relay-20261110.md
+@@ -0,0 +1,37 @@
++# Ringkasan review Claude yang disampaikan pemilik
++
++Dicatat oleh **author Codex**, 10 November 2026, dari pesan pemilik. Ini bukan
++laporan independen baru, bukan file asli Claude, dan bukan keputusan author atas
++review. File asli LMS-02 belum diberikan di cloud. Pemilik melaporkan tidak ada
++BLOCKER/HIGH/MEDIUM dan tujuh LOW. Label L2-01–07 pada respons author adalah label
++lokal untuk pemetaan; bukan ID yang diklaim berasal dari reviewer.
++
++Reviewer melaporkan 198 API lulus, 0 skip, 2 warning; empat probe independen
++lulus. Guru kursus A ditolak saat mengakses modul/pelajaran B. Next production
++BFF diuji terhadap API tiruan perekam: hanya cookie maaher_session dan tenant
++selector diteruskan; spoof header dibuang, Set-Cookie tidak bocor, limit body
++256 KiB dan Origin berlaku. Build/typecheck, npm audit 0 dan PyPI 39 pin 0.
++Probe katalog membuktikan runtime ditolak membaca users/menyisipkan sessions,
++dan definer dimiliki non-superuser pada auth parent yang ditinjau terarah.
++
++Tujuh LOW yang dilaporkan:
++
++1. Assignment/cabut guru pada course published diam-diam menjadi draft.
++2. Siklus teacher→student→teacher melalui change_member mengembalikan assignment
++   lama tanpa penugasan baru; perubahan role/membership tidak membersihkannya.
++3. Guru yang ditugaskan masih membaca course archived.
++4. HTTPS target Markdown hanya ditegakkan pratinjau; server memeriksa resources.
++5. URL menerima bidi override, zero-width dan trailing dot.
++6. Downgrade 0006 menghapus semua materi kursus tanpa pengaman.
++7. Course detail memakai SELECT * dan mutation tidak dibatasi laju.
++
++Reviewer menyarankan dua pertama selesai sebelum enrollment LMS-03. Auth parent
++130 berkas/sekitar 30 ribu baris hanya diperiksa terarah, **bukan persetujuan auth**.
++Tidak ada ref main pada checkout reviewer; pembanding 8941a79..4733526 dilaporkan.
++UAT pemilik tidak diverifikasi; assurance UAT dev-TOTP, bukan FIDO2. Playwright,
++CI remote, Docker image, Python 3.12/Linux dan migrasi ke DB UAT tidak dijalankan
++reviewer. Keputusan bukan otoritas merge/deploy.
++
++Pemilik tidak menyampaikan string verdict formal (APPROVED/APPROVED_WITH_NOTES/
++CHANGES_REQUESTED) untuk LMS-02, sehingga dokumen ini tidak menetapkannya.
++Laporan Claude LMS-01 historis dipertahankan tanpa perubahan.
+diff --git a/maaher-lms-starter/reviews/LMS-02-review-request.md b/maaher-lms-starter/reviews/LMS-02-review-request.md
+index 561eafd..953193d 100644
+--- a/maaher-lms-starter/reviews/LMS-02-review-request.md
++++ b/maaher-lms-starter/reviews/LMS-02-review-request.md
+@@ -1,60 +1,52 @@
+-# Permintaan review independen LMS-02 dan auth parent
+-
+-Dokumen ini disiapkan **author Codex**, bukan hasil review Claude. Status review
+-**PENDING**. Source LMS-02 yang diuji adalah f38c231; perubahan setelahnya pada
+-tahap pencatatan UAT hanya dokumen. Hasil manual pemilik tersedia di
+-docs/LMS-02-DEV-UAT-20261110.md.
+-
+-## Scope dan provenance
+-
+-- Branch: feat/LMS-02-course-management, repo mashudizaini/maaher-lms.
+-- Root aplikasi: maaher-lms-starter/. Git root berada satu tingkat di atas
+-  pada checkout monorepo. Periksa Git status tanpa reset/stash/overwrite.
+-- Delta course: 4733526..f38c231. Auth parent 4733526 belum di-merge/review atas
+-  source Auth0 terbaru; periksa main...HEAD untuk seluruh trust boundary.
+-- reviews/LMS-02-manifest.json dan LMS-02-author.patch adalah snapshot f38c231.
+-  Dokumen handoff/setup/PR kemudian diperbarui untuk status UAT; beda dokumentasi
+-  dari manifest tidak boleh disalahartikan sebagai beda source runtime.
+-- Laporan reviews/LMS-01-claude.md awal tetap utuh, SHA256
+-  004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce.
+-  Status lama CHANGES_REQUESTED tidak ditulis ulang menjadi persetujuan.
+-
+-## Fokus pemeriksaan
+-
+-1. RLS/tenant/session capability, composite FK, role runtime/definer dan grants.
+-2. Guru hanya kursus yang ditugaskan; assignment/membership/user dicabut atau
+-   disabled berhenti memberikan akses pada session yang sudah terbit.
+-3. Version lock, mutation concurrent, rollback error child, publish/draft/archive
+-   dan akses SQL langsung pada parent/child yang sudah dipublikasikan.
+-4. Markdown/XSS, resource URL, gambar tidak di-fetch otomatis, BFF Origin/route/
+-   query/payload serta penanganan ingress. Tidak ada code runner learner.
+-5. Auth0 issuer/sub binding, PKCE/state/nonce/RS256, local dev-TOTP guard,
+-   fallback/recovery restriction dan kode diagnosis yang tidak mencetak secret.
+-6. Upgrade 0006 mempertahankan auth; downgrade menghapus course data dan perlu
+-   backup. Uji migrasi hanya pada DB kosong sintetis baru milik review.
++# Permintaan re-review independen LMS-02
++
++Disiapkan **author Codex**, bukan laporan Claude. Pemilik menyampaikan review
++awal dengan tujuh LOW tanpa BLOCKER/HIGH/MEDIUM; ringkasannya dicatat dengan
++provenance pada [review relay](LMS-02-review-relay-20261110.md). Verdict formal
++tidak diberikan. Source f38c231 telah lulus UAT Mac menurut pemilik; **delta
++perbaikan dan migration 0007 belum UAT Mac/re-review**.
++
++Branch feat/LMS-02-course-management di mashudizaini/maaher-lms. Root Git berada
++satu tingkat di atas root aplikasi maaher-lms-starter/. Scope delta review
++**f4f9cf7..HEAD**; delta seluruh course **4733526..HEAD**. Auth parent diperiksa
++terarah pada review sebelumnya, belum mendapat review penuh. Ambil ref main
++tanpa mengubah source lokal (`git fetch origin main:refs/remotes/origin/main`),
++lalu gunakan `git diff origin/main...HEAD` untuk scope penuh. Jika akses remote
++gagal, catat keterbatasan dan base eksplisit 8941a79; jangan berpura-pura
++main...HEAD telah diperiksa. Pertahankan Git status/perubahan lokal.
++
++Artifact awal LMS-02-manifest.json/author.patch tetap historis f38c231. Snapshot
++delta baru ada pada LMS-02-review-fixes-manifest.json dan review-fixes.patch;
++Git diff adalah sumber review utama. Laporan Claude LMS-01 tetap SHA256
++004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce, tanpa perubahan.
+ 
+ ## Prompt Claude Code
+ 
+ ```text
+-Anda reviewer independen READ-ONLY untuk Maaher LMS, branch
+-feat/LMS-02-course-management, source LMS-02 f38c231 yang telah lulus UAT Mac
+-menurut pemilik. Root aplikasi GitHub: maaher-lms-starter/.
++Anda reviewer independen READ-ONLY untuk LMS-02, branch
++feat/LMS-02-course-management di mashudizaini/maaher-lms.
+ Baca CLAUDE.md, docs/AGENT-WORKFLOW.md, PROJECT-SPEC.md, ARCHITECTURE.md,
+-.claude/skills/lms-security-review/SKILL.md, docs/LMS-02-HANDOFF.md,
+-docs/LMS-02-CHECKLIST.md, dan reviews/LMS-02-review-request.md.
+-Periksa source/status Git sebenarnya tanpa menimpa perubahan lokal. Review
+-4733526..f38c231 untuk delta kursus dan main...HEAD untuk auth parent terbaru.
+-Bedakan source runtime dengan catatan UAT baru pada dokumentasi.
+-Jalankan tes aman pada DB kosong baru maaher_test_* dan role terpisah milik
+-review; jangan memakai DB UAT, database lama, secret IdP atau data pengguna.
+-Fokus RLS/IDOR/FK, session/MFA/definer, teacher assignment/revoke, publish/version
+-atomicity, Markdown/XSS/HTTPS, BFF serta migrasi/rollback. Reproduksi temuan dan
+-catat file:line, severity, dampak, bukti, rekomendasi serta tes yang tidak dijalankan.
+-Jangan ubah source/Auth0/.env, memperlemah guard, merge atau deploy.
+-Pertahankan laporan Claude lama. Tulis reviews/LMS-02-claude.md dan pisahkan
+-temuan auth parent dari LMS-02; berikan CHANGES_REQUESTED, APPROVED_WITH_NOTES
+-atau APPROVED berdasarkan bukti. UAT dev bukan bukti kesiapan produksi.
++.claude/skills/lms-security-review/SKILL.md, ticket LMS-02, ADR-006,
++reviews/LMS-02-author-response.md dan docs/LMS-02-HANDOFF.md.
++Pertahankan source/config/data dan laporan Claude asli. Periksa diff
++f4f9cf7..HEAD (review fixes), 4733526..HEAD (kursus), serta origin/main...HEAD
++untuk auth parent jika meninjau penuh; fetch ref main secara read-only dahulu.
++Jangan menganggap pemeriksaan terarah auth sebagai approval penuh.
++Reproduksi tujuh LOW: assignment published tidak draft; siklus role/status
++tidak mengembalikan akses (termasuk concurrency INSERT assignment vs UPDATE);
++archived teacher parent/child RLS; target Markdown server dan Unicode URL;
++guard rollback berisi; explicit detail fields dan budget mutation atomik.
++Periksa definer trigger/ACL, retensi, BFF Retry-After, editor setelah 429,
++upgrade 0006→0007 dengan data dan batas cleanup assignment historis.
++Gunakan DB kosong baru maaher_test_* milik review, role runtime non-owner tanpa
++BYPASSRLS; jangan reset/downgrade DB UAT atau DB lama. Pengujian penghapusan
++course dengan allow_course_data_loss hanya pada DB fixture sintetis tersebut.
++Jalankan tes aman, jelaskan batas signed synthetic IdP vs Auth0 nyata, rekam
++file:line/severity/probe dan pemeriksaan yang tidak dijalankan.
++Jangan ubah source/Auth0/.env atau guard, jangan merge/deploy. Simpan laporan
++baru reviews/LMS-02-claude-rereview.md; pertahankan laporan lama. Berikan verdict
++berdasarkan bukti. Pisahkan auth parent, UAT dev dan gate produksi.
+ ```
+ 
+-Setelah laporan ada, author menindaklanjuti temuan dan meminta review ulang
+-sesuai workflow. Source tidak otomatis digabungkan atau dideploy oleh review.
++Human tetap memutuskan merge/deploy setelah review dan gate terkait. Enrollment
++LMS-03 belum diimplementasikan pada delta ini.
+diff --git a/maaher-lms-starter/scripts/lms01-browser-fixtures.py b/maaher-lms-starter/scripts/lms01-browser-fixtures.py
+index cdf7100..2d9e1e5 100644
+--- a/maaher-lms-starter/scripts/lms01-browser-fixtures.py
++++ b/maaher-lms-starter/scripts/lms01-browser-fixtures.py
+@@ -33,9 +33,18 @@ def main():
+             result = {"email": email, "password": password, "tenant": str(tenant), "user": str(user)}
+         elif operation == 'member':
+             uid=uuid4();email=f'{uid}@example.invalid'
++            role=payload.get('role','student')
++            assert role in {'student','teacher'}, 'Unsupported synthetic member role'
+             db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'unused-synthetic-password')",(uid,email))
+-            db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'student')",(uuid4(),payload['tenant'],uid))
++            db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,%s)",(uuid4(),payload['tenant'],uid,role))
+             result={'user':str(uid),'email':email}
++        elif operation == 'course-budget':
++            # Test-only owner bridge; never part of the API/runtime image.
++            assert payload['mode'] in {'exhaust','expire'}
++            row=db.execute("UPDATE course_write_limits SET attempts=60,window_start=CASE WHEN %s='expire' THEN now()-interval '2 minutes' ELSE now() END WHERE tenant_id=%s AND user_id=%s RETURNING user_id",
++                           (payload['mode'],payload['tenant'],payload['user'])).fetchone()
++            assert row, 'Synthetic actor must have made a course write'
++            result={'updated':True}
+         elif operation == "token":
+             row = db.execute("SELECT encrypted_token FROM auth_mail_outbox WHERE recipient=%s AND kind=%s ORDER BY expires_at DESC LIMIT 1",
+                              (payload["email"], payload["kind"])).fetchone()
+diff --git a/maaher-lms-starter/scripts/verify-auth0-local.py b/maaher-lms-starter/scripts/verify-auth0-local.py
+index ecbb38f..cfb5223 100644
+--- a/maaher-lms-starter/scripts/verify-auth0-local.py
++++ b/maaher-lms-starter/scripts/verify-auth0-local.py
+@@ -112,7 +112,7 @@ def database(config, report):
+                 report.add('database','FAIL','checker hanya untuk DB development sintetis maaher_test_*; tidak menginspeksi data pengguna')
+                 return
+             revision = owner.execute('SELECT version_num FROM alembic_version').fetchone()[0]
+-            if revision not in {'0005_dev_totp', '0006_courses'}:
++            if revision not in {'0005_dev_totp', '0006_courses', '0007_course_review'}:
+                 report.add('database migration','FAIL','migration 0005 belum aktif; periksa source dan DB development yang dipilih')
+                 return
+             report.add('database migration','PASS','schema Auth0 tersedia pada head yang dikenali di DB sintetis')

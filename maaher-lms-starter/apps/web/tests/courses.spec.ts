@@ -39,16 +39,40 @@ test('admin authors real persisted course content after OIDC; Markdown is inert;
   expect(await page.evaluate(() => (window as unknown as { __courseXss?: number }).__courseXss)).toBeUndefined();
   expect(externalLoads).toEqual([]);
   await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('hanya boleh memakai URL HTTPS publik');
+  await page.getByLabel('Materi Markdown', { exact: true }).fill('# Mulai coding\n\n```python\nprint("Halo")\n```\n\n![Diagram](https://assets.example.invalid/probe.png)');
+  await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('Pelajaran disimpan');
   if (process.env.LMS_COURSE_SCREENSHOT) await page.screenshot({ path: process.env.LMS_COURSE_SCREENSHOT, fullPage: true });
   await page.getByRole('button', { name: 'Terbitkan kursus', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('Kursus berhasil diterbitkan');
+  const teacher = JSON.parse(execFileSync(process.env.LMS_TEST_PYTHON!,
+    [`${process.env.LMS_TEST_ROOT}/scripts/lms01-browser-fixtures.py`, 'member'],
+    { input: JSON.stringify({ tenant: account.tenant, role: 'teacher' }), encoding: 'utf8' }));
+  await page.getByRole('button', { name: 'Muat daftar pengajar', exact: true }).click();
+  await page.getByLabel('Pengajar aktif', { exact: true }).selectOption(teacher.user);
+  await page.getByRole('button', { name: 'Tugaskan pengajar', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Pengajar ditugaskan');
+  await expect(page.getByRole('button', { name: 'Tarik publikasi', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'Cabut penugasan', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('Penugasan pengajar dicabut');
+  await expect(page.getByRole('button', { name: 'Tarik publikasi', exact: true })).toBeVisible();
   await page.reload();
   await page.getByRole('button', { name: /Python praktis/ }).click();
   await page.getByRole('button', { name: 'Halo Python', exact: true }).click();
   await expect(page.getByLabel('Materi Markdown', { exact: true })).toHaveValue(/print\("Halo"\)/);
   await expect(preview.getByRole('link', { name: 'Dokumentasi Python', exact: true })).toHaveAttribute('href', 'https://docs.python.org/3/');
   await page.getByLabel('Materi Markdown', { exact: true }).fill('Materi revisi');
+  const budget = (mode: string) => execFileSync(process.env.LMS_TEST_PYTHON!,
+    [`${process.env.LMS_TEST_ROOT}/scripts/lms01-browser-fixtures.py`, 'course-budget'],
+    { input: JSON.stringify({ tenant: account.tenant, user: account.user, mode }), encoding: 'utf8' });
+  budget('exhaust');
+  const limited = page.waitForResponse(response => response.url().includes('/api/courses/') && response.status() === 429);
+  await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
+  expect((await limited).headers()['retry-after']).toBe('60');
+  await expect(page.getByRole('status')).toContainText('Terlalu banyak perubahan kursus');
+  await expect(page.getByLabel('Materi Markdown', { exact: true })).toHaveValue('Materi revisi');
+  budget('expire');
   await page.getByRole('button', { name: 'Simpan pelajaran', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('Pelajaran disimpan');
   await expect(page.getByRole('button', { name: 'Terbitkan kursus', exact: true })).toBeEnabled();

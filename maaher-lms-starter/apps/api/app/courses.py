@@ -1,40 +1,16 @@
 """Course authoring: validated session, tenant RLS, assignments and version locks."""
-import ipaddress
-import re
-from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from psycopg.types.json import Jsonb
+from psycopg.errors import CheckViolation, ForeignKeyViolation
 
 from .auth import connection, principal, verify_origin
 from .security import Principal
+from .course_content import https_resource, validate_markdown
 
 router = APIRouter(prefix="/courses")
-
-
-def https_resource(value):
-    if any(ord(c) <= 32 or c == "\\" for c in value):
-        raise ValueError("Gunakan tautan HTTPS publik tanpa spasi atau kredensial")
-    try:
-        url = urlsplit(value)
-        host = (url.hostname or "").encode("idna").decode().lower().rstrip('.')
-        valid = (url.scheme == "https" and url.username is None and url.password is None
-                 and url.port in {None, 443} and bool(host))
-        try:
-            valid = valid and ipaddress.ip_address(host).is_global
-        except ValueError:
-            labels = host.split('.')
-            valid = (valid and 1 < len(labels) and len(host) <= 253
-                     and not host.endswith((".local", ".localhost", ".internal"))
-                     and bool(re.fullmatch(r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})", labels[-1]))
-                     and all(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in labels))
-    except (ValueError, UnicodeError):
-        valid = False
-    if not valid:
-        raise ValueError("Gunakan tautan HTTPS publik tanpa kredensial")
-    return value
 
 
 class Input(BaseModel):
@@ -77,6 +53,7 @@ class Resource(Input):
 class Lesson(Title, Version):
     content: str = Field(default="", max_length=30000)
     resources: list[Resource] = Field(default_factory=list, max_length=10)
+    _markdown = field_validator("content")(validate_markdown)
 
 
 class Teacher(Version):
@@ -105,7 +82,7 @@ def audit(db, actor, action, target, kind="course"):
 
 
 def locked(db, actor, course_id, version, archived=False):
-    row = db.execute("SELECT * FROM courses WHERE tenant_id=%s AND id=%s FOR UPDATE", (actor.tenant_id, course_id)).fetchone()
+    row = db.execute("SELECT id,state,version FROM courses WHERE tenant_id=%s AND id=%s FOR UPDATE", (actor.tenant_id, course_id)).fetchone()
     if not row:
         raise HTTPException(404, "Kursus tidak ditemukan")
     if row["version"] != version:
@@ -154,7 +131,7 @@ def create_course(body: NewCourse, actor=Depends(manager), db=Depends(connection
 
 @router.get("/{cid}")
 def course_detail(cid: UUID, actor=Depends(manager), db=Depends(connection, scope="function")):
-    row = db.execute("SELECT * FROM courses WHERE tenant_id=%s AND id=%s", (actor.tenant_id, cid)).fetchone()
+    row = db.execute("SELECT id,title,description,state,version,created_at,updated_at FROM courses WHERE tenant_id=%s AND id=%s", (actor.tenant_id, cid)).fetchone()
     if not row:
         raise HTTPException(404, "Kursus tidak ditemukan")
     modules = db.execute("SELECT id,title,position FROM course_modules WHERE tenant_id=%s AND course_id=%s ORDER BY position,id",
@@ -186,6 +163,18 @@ def publish(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connect
     empty = db.execute("SELECT 1 FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND length(btrim(content))=0 LIMIT 1", (actor.tenant_id, cid)).fetchone()
     if not modules or incomplete or empty:
         raise HTTPException(409, "Isi setiap modul dengan pelajaran dan materi sebelum menerbitkan")
+    # Existing 0006 content is preserved during upgrade. Revalidate on publish
+    # using a cursor so legacy links cannot bypass the new write policy.
+    try:
+        with db.cursor(name="course_publish_links") as cursor:
+            cursor.itersize = 20
+            cursor.execute("SELECT content,resources FROM course_lessons WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid))
+            for lesson in cursor:
+                validate_markdown(lesson["content"])
+                for resource in lesson["resources"]:
+                    Resource.model_validate(resource)
+    except ValueError:
+        raise HTTPException(409, "Perbaiki tautan materi agar memakai HTTPS publik tanpa karakter tersembunyi sebelum menerbitkan") from None
     result = changed(db, actor, cid, "published"); audit(db, actor, "course.published", cid)
     return result
 
@@ -213,7 +202,7 @@ def restore(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connect
 
 @router.post("/{cid}/teachers", dependencies=[Depends(verify_origin)])
 def assign_teacher(cid: UUID, body: Teacher, actor=Depends(manager), db=Depends(connection, scope="function")):
-    admin(actor); locked(db, actor, cid, body.version)
+    admin(actor); course = locked(db, actor, cid, body.version)
     if body.assigned:
         role = db.execute("SELECT course_member_role(%s,%s) AS role", (actor.tenant_id, body.user_id)).fetchone()["role"]
         if role != "teacher":
@@ -222,10 +211,13 @@ def assign_teacher(cid: UUID, body: Teacher, actor=Depends(manager), db=Depends(
         present = db.execute("SELECT 1 FROM courses_teachers WHERE tenant_id=%s AND course_id=%s AND user_id=%s", (actor.tenant_id, cid, body.user_id)).fetchone()
         if count >= 50 and not present:
             raise HTTPException(409, "Batas 50 pengajar per kursus telah tercapai")
-        db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (actor.tenant_id, cid, body.user_id))
+        try:
+            db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s) ON CONFLICT DO NOTHING", (actor.tenant_id, cid, body.user_id))
+        except (CheckViolation, ForeignKeyViolation):
+            raise HTTPException(409, "Keanggotaan pengajar telah berubah. Muat ulang sebelum menugaskan") from None
     else:
         db.execute("DELETE FROM courses_teachers WHERE tenant_id=%s AND course_id=%s AND user_id=%s", (actor.tenant_id, cid, body.user_id))
-    result = changed(db, actor, cid); audit(db, actor, "course.teacher_assigned" if body.assigned else "course.teacher_removed", body.user_id, "course_teacher")
+    result = changed(db, actor, cid, course["state"]); audit(db, actor, "course.teacher_assigned" if body.assigned else "course.teacher_removed", body.user_id, "course_teacher")
     return result
 
 

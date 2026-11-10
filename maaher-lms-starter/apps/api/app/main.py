@@ -7,6 +7,7 @@ from .auth_lifecycle import router as lifecycle_router
 from .mfa import router as mfa_router
 from .oidc import router as oidc_router
 from .courses import router as courses_router
+from .course_limits import admit_course_write
 from .traffic import ANONYMOUS_PATHS, admit
 from .auth_support import limited
 
@@ -21,6 +22,15 @@ app.include_router(courses_router)
 @app.middleware("http")
 async def private_responses(request, call_next):
     if request.method == 'POST' and (request.url.path == '/courses' or request.url.path.startswith('/courses/')):
+        try:
+            allowed = await run_in_threadpool(admit_course_write, request)
+        except HTTPException as error:
+            return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers={'Cache-Control': 'no-store'})
+        except DatabaseError:
+            return JSONResponse({'detail': 'Layanan penyimpanan sementara tidak tersedia'}, status_code=503, headers={'Cache-Control': 'no-store'})
+        if not allowed:
+            return JSONResponse({'detail': 'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi'}, status_code=429,
+                                headers={'Retry-After': '60', 'Cache-Control': 'no-store'})
         body = bytearray()
         async for chunk in request.stream():
             body.extend(chunk)

@@ -33,9 +33,18 @@ def main():
             result = {"email": email, "password": password, "tenant": str(tenant), "user": str(user)}
         elif operation == 'member':
             uid=uuid4();email=f'{uid}@example.invalid'
+            role=payload.get('role','student')
+            assert role in {'student','teacher'}, 'Unsupported synthetic member role'
             db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'unused-synthetic-password')",(uid,email))
-            db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'student')",(uuid4(),payload['tenant'],uid))
+            db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,%s)",(uuid4(),payload['tenant'],uid,role))
             result={'user':str(uid),'email':email}
+        elif operation == 'course-budget':
+            # Test-only owner bridge; never part of the API/runtime image.
+            assert payload['mode'] in {'exhaust','expire'}
+            row=db.execute("UPDATE course_write_limits SET attempts=60,window_start=CASE WHEN %s='expire' THEN now()-interval '2 minutes' ELSE now() END WHERE tenant_id=%s AND user_id=%s RETURNING user_id",
+                           (payload['mode'],payload['tenant'],payload['user'])).fetchone()
+            assert row, 'Synthetic actor must have made a course write'
+            result={'updated':True}
         elif operation == "token":
             row = db.execute("SELECT encrypted_token FROM auth_mail_outbox WHERE recipient=%s AND kind=%s ORDER BY expires_at DESC LIMIT 1",
                              (payload["email"], payload["kind"])).fetchone()
