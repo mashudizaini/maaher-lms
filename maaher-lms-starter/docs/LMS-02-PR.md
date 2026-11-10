@@ -14,8 +14,10 @@ Downgrade to 0005 deletes all course data. Back up before migrating.
 
 Validation: 198 API/unit, 12 script tests, 16 Action tests, 11 Chromium browser
 cases; typecheck/build and npm production audit pass. Provider tests use a signed
-synthetic IdP. Owner-reported Auth0 dev-TOTP UAT belongs to the parent branch;
-Mac course UAT, remote CI and independent Claude review are pending.
+synthetic IdP. Owner-reported Auth0 dev-TOTP UAT belongs to the parent branch.
+The owner now reports successful Mac course UAT on f38c231 after backup/0006
+upgrade, local 198 API, 12 scripts, 16 Action, 2 browser and 13 preflight PASS.
+See LMS-02-DEV-UAT-20261110.md; remote CI and independent Claude review remain pending.
 
 Stacked branch: base feat/LMS-01-auth0-development at 4733526. The authentication
 parent remains unmerged and needs its own independent review. This change does

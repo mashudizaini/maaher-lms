@@ -1,5 +1,12 @@
 # LMS-02 — manajemen kursus siap review development
 
+**Pembaruan UAT Mac:** pemilik kini melaporkan backup/upgrade 0006, validasi lokal
+198 API + 12 scripts + 16 Action + 2 browser, preflight Auth0 13 PASS, serta
+keberhasilan UAT manual alur utama. Lihat [catatan UAT](LMS-02-DEV-UAT-20261110.md)
+dan [checklist](LMS-02-CHECKLIST.md). Pernyataan UAT Mac pending pada snapshot
+di bawah telah digantikan laporan tersebut. Review Claude dan CI remote tetap
+pending/unverified. Source runtime yang diuji tetap f38c231.
+
 10 November 2026. Branch `feat/LMS-02-course-management`, parent `4733526`
 (catatan UAT Auth0 yang dilaporkan pemilik). Branch auth/main tidak digabungkan.
 Pemilik mengizinkan kelanjutan setelah login→organisasi→logout Mac berhasil.

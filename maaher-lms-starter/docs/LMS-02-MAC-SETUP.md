@@ -1,5 +1,11 @@
 # Menjalankan manajemen kursus di Mac
 
+**Status:** alur utama manual Mac pada f38c231 sudah dilaporkan berhasil oleh
+pemilik. Simpan data UAT yang ada; tidak perlu mengulang setup atau migrasi hanya
+untuk memperbarui catatan ini. Lihat [hasil UAT](LMS-02-DEV-UAT-20261110.md) dan
+[review request](../reviews/LMS-02-review-request.md). Langkah setup di bawah
+tetap panduan untuk checkout baru; review independen masih pending.
+
 Branch: `feat/LMS-02-course-management`. Root aplikasi pada repository GitHub
 adalah `maaher-lms-starter/`. Branch bertumpu pada source Auth0 yang sama dengan
 UAT sebelumnya. Tidak perlu membuat ulang tenant/user/Action/binding Auth0.
