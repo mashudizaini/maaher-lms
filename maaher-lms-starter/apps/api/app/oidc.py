@@ -24,6 +24,7 @@ from .auth_support import cipher, reserve_session_slot, security_event
 from .database import auth_transaction, user_context
 from .security import new_token, token_digest
 from .oidc_policy import FIDO2_ASSURANCE, DEV_TOTP_ASSURANCE, configured_assurance
+from .oidc_diagnostics import Denial, log_denial, provider_denial
 
 router = APIRouter(prefix="/auth/oidc")
 FLOW_COOKIE = "maaher_oidc_flow"
@@ -98,7 +99,8 @@ def clear_flow(response):
     response.delete_cookie(FLOW_COOKIE, path="/", secure=secure_cookie(), httponly=True, samesite="lax")
 
 
-def denied():
+def denied(code):
+    log_denial(code)
     response = JSONResponse({"detail": "Login Auth0 tidak berlaku atau tidak diizinkan"}, status_code=400)
     clear_flow(response)
     return response
@@ -154,14 +156,19 @@ async def callback(request: Request, response: Response, config=Depends(settings
             or not 20 <= len(query.get("state", "")) <= 256
             or len(query.get("code", "")) > 4096
             or not 32 <= len(request.cookies.get(FLOW_COOKIE, "")) <= 128):
-        return denied()
+        return denied(Denial.INVALID_CALLBACK)
     flow = consume_flow(request.cookies[FLOW_COOKIE], query["state"])
-    if not flow or flow["config_hash"] != config.fingerprint:
-        return denied()
+    if not flow:
+        return denied(Denial.FLOW_UNAVAILABLE)
+    if flow["config_hash"] != config.fingerprint:
+        return denied(Denial.FLOW_CONFIG_CHANGED)
     if query.get("error") or not query.get("code"):
-        return denied()
+        return denied(provider_denial(query.get("error_description", "")) if query.get("error") else Denial.INVALID_CALLBACK)
     try:
         request.scope["session"] = json.loads(cipher().decrypt(flow["encrypted_state"].encode()).decode())
+    except (InvalidToken, ValueError, TypeError, KeyError):
+        return denied(Denial.FLOW_PAYLOAD_INVALID)
+    try:
         token = await make_client(config).authorize_access_token(
             request, leeway=0,
             claims_options={"iss": {"essential": True, "value": config.issuer},
@@ -170,20 +177,32 @@ async def callback(request: Request, response: Response, config=Depends(settings
         )
         claims = token.get("userinfo")
         now = time.time()
-        if (not claims or claims.get(ASSURANCE_CLAIM) != config.assurance
-                or "mfa" not in claims.get("amr", [])
-                or isinstance(claims.get("auth_time"), bool)
+        if not claims:
+            return denied(Denial.TOKEN_RESPONSE_INVALID)
+        if claims.get(ASSURANCE_CLAIM) != config.assurance:
+            return denied(Denial.ASSURANCE_MISMATCH)
+        if "mfa" not in claims.get("amr", []):
+            return denied(Denial.MFA_MISSING)
+        if (isinstance(claims.get("auth_time"), bool)
                 or not isinstance(claims.get("auth_time"), (int, float))
-                or not now - FLOW_SECONDS <= claims["auth_time"] <= now + 30
-                or not isinstance(claims.get("sub"), str) or not 1 <= len(claims["sub"]) <= 255):
-            return denied()
-    except (OAuthError, JoseError, HTTPError, InvalidToken, ValueError, TypeError, KeyError):
-        return denied()
+                or not now - FLOW_SECONDS <= claims["auth_time"] <= now + 30):
+            return denied(Denial.AUTH_TIME_INVALID)
+        if not isinstance(claims.get("sub"), str) or not 1 <= len(claims["sub"]) <= 255:
+            return denied(Denial.SUBJECT_INVALID)
+    except OAuthError as error:
+        return denied({"invalid_client": Denial.CLIENT_AUTH_FAILED,
+                       "invalid_grant": Denial.CODE_EXCHANGE_REJECTED}.get(error.error, Denial.PROVIDER_PROTOCOL_ERROR))
+    except JoseError:
+        return denied(Denial.ID_TOKEN_INVALID)
+    except HTTPError:
+        return denied(Denial.PROVIDER_HTTP_FAILED)
+    except (InvalidToken, ValueError, TypeError, KeyError):
+        return denied(Denial.TOKEN_RESPONSE_INVALID)
     identity = db.execute("""SELECT i.id,i.user_id,i.is_operator,u.email FROM oidc_identities i
         JOIN users u ON u.id=i.user_id WHERE i.issuer=%s AND i.subject=%s AND i.status='active'
         AND u.status='active'""", (config.issuer, claims["sub"])).fetchone()
     if not identity:
-        return denied()
+        return denied(Denial.IDENTITY_UNAVAILABLE)
     uid = identity["user_id"]
     db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("auth-email:" + identity["email"],))
     user_context(db, uid)

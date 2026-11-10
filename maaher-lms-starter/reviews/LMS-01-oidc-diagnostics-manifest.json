@@ -1,0 +1,76 @@
+{
+  "base_commit": "ec98cbe4267e2e9c1e993a4e0edfdedb2e5d92bb",
+  "generated_at": "2026-11-10T14:50:09.414756+00:00",
+  "scope": "Opt-in fixed-code local callback diagnostics; no Auth0 policy/binding/schema changes",
+  "files": [
+    {
+      "path": ".github/workflows/lms-auth0.yml",
+      "bytes": 6059,
+      "sha256": "2b4c6291fafcb0001510f71213e2e6bf2bdc707a75f5842a34fe1ac5b23078be"
+    },
+    {
+      "path": "maaher-lms-starter/.env.example",
+      "bytes": 1713,
+      "sha256": "0cf7223fa80759e18e1f75b8dd93539d0df1e7c8c3ebc2bdcba78b8364b14e76"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/oidc.py",
+      "bytes": 11490,
+      "sha256": "894fa72faf008f924a94a4adf4747ba42ddfaad72f4ed24e12219b50b501d6ad"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/oidc_diagnostics.py",
+      "bytes": 2437,
+      "sha256": "07eee9b460272301a4e8d9c5c0d5f057d7388716a55c4be0349d123173fb1d4b"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_oidc.py",
+      "bytes": 25225,
+      "sha256": "c8a31eaaedc6b06355d632aced10856c82ab9b333ed02d59974ec6c5447bdb6e"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_oidc_diagnostics.py",
+      "bytes": 2666,
+      "sha256": "fbc4ad0066f0765e731337f4532f62e118e4f916ee7e6dfc0143c87ec2cafd02"
+    },
+    {
+      "path": "maaher-lms-starter/docker-compose.yml",
+      "bytes": 3013,
+      "sha256": "ff77cb03c6f477d79f63c681d39d5faad39171a2d965f932de6807aab02b8244"
+    },
+    {
+      "path": "maaher-lms-starter/docs/AUTH0-DEV-TOTP.md",
+      "bytes": 25263,
+      "sha256": "1a849536e4ac19fa55287c4485be6a178fbe430095d32189e6a00d06035ea325"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-01-OIDC-DIAGNOSTICS-HANDOFF.md",
+      "bytes": 5500,
+      "sha256": "4acd510cd9e6b424676278f04d9a61e3035a653e6eef01d6bf627779fb10e566"
+    },
+    {
+      "path": "maaher-lms-starter/docs/tickets/LMS-01-OIDC.md",
+      "bytes": 3466,
+      "sha256": "a8bc6095c68d22f77f50269ea7c25ceefeabbbc0ec35cf254acc8434a1f9de17"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/read-auth0-diagnostics.py",
+      "bytes": 2330,
+      "sha256": "33e44f26fc46e4a2fff93add8f03c0dfd44892f97048eb8b3565bb0d5e77650a"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/tests/test_oidc_diagnostic_reader.py",
+      "bytes": 2163,
+      "sha256": "f0901b91ecbeb0cc0807cd808f59e3da484d3cb36d4fc6534b32a2a3fee65b0b"
+    }
+  ],
+  "patch_sha256": "6009a6995b1b78d37ec3cf54417e88b91f009d630ed08eac8cd81600b1a47f58",
+  "validation": {
+    "api_unit_passed": 170,
+    "script_unit_passed": 12,
+    "signed_dev_oidc_browser_passed": 1,
+    "skipped": 0,
+    "live_auth0": "NOT TESTED",
+    "independent_review": "PENDING"
+  }
+}

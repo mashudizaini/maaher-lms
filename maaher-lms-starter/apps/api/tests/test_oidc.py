@@ -290,6 +290,48 @@ def use_dev_totp(monkeypatch):
     monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp")
 
 
+@pytest.mark.parametrize("stage,expected", [
+    ("owner", "OIDC_OWNER_APPROVAL_REQUIRED"),
+    ("unknown_provider_error", "OIDC_PROVIDER_DENIED"),
+    ("assurance", "OIDC_ASSURANCE_MISMATCH"),
+    ("mfa", "OIDC_MFA_MISSING"),
+    ("binding", "OIDC_IDENTITY_UNAVAILABLE"),
+    ("encrypted", "OIDC_FLOW_PAYLOAD_INVALID"),
+    ("nonce", "OIDC_ID_TOKEN_INVALID"),
+    ("exchange", "OIDC_CODE_EXCHANGE_REJECTED"),
+])
+def test_callback_reports_only_a_safe_local_stage_and_keeps_the_public_error_generic(identity, provider, monkeypatch, caplog, stage, expected):
+    use_dev_totp(monkeypatch)
+    monkeypatch.setenv("AUTH0_LOCAL_DIAGNOSTICS", "true")
+    sentinel = "private-token-and-email-sentinel@example.invalid"
+    claims = {oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE}
+    if stage == "assurance": claims[oidc.ASSURANCE_CLAIM] = sentinel
+    if stage == "mfa": claims["amr"] = ["pwd"]
+    if stage == "nonce": claims["nonce"] = sentinel
+    with TestClient(app, base_url=os.environ["APP_ORIGIN"]) as client:
+        flow = begin(client, provider, claims=claims, error=(stage == "exchange"))
+        if stage in {"owner", "unknown_provider_error"}:
+            flow.pop("code")
+            flow.update(error="access_denied", error_description=("Owner approval for synthetic development is required" if stage == "owner" else sentinel))
+        if stage == "encrypted":
+            with psycopg.connect(identity[1]) as db:
+                db.execute("UPDATE oidc_login_flows SET encrypted_state=%s WHERE state_hash=%s",
+                           (sentinel, token_digest(flow["state"])))
+        response = client.get("/auth/oidc/callback", params=flow)
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Login Auth0 tidak berlaku atau tidak diizinkan"}
+        assert not client.cookies.get("maaher_session")
+        messages = [record.getMessage() for record in caplog.records if record.name == "maaher.auth.oidc"]
+        assert messages == ["MAAHER_AUTH0_DIAGNOSTIC code=" + expected]
+        assert sentinel not in " ".join(messages) and SECRET not in " ".join(messages)
+        assert flow["state"] not in " ".join(messages)
+        if "code" in flow: assert flow["code"] not in " ".join(messages)
+        # A denied callback still consumes the state and cannot be replayed.
+        assert client.get("/auth/oidc/callback", params=flow).status_code == 400
+        with psycopg.connect(identity[1]) as db:
+            assert db.execute("SELECT count(*) FROM sessions WHERE user_id=%s", (identity[2],)).fetchone()[0] == 0
+
+
 def test_dev_totp_uses_a_distinct_session_and_checks_tenant_and_policy_on_every_request(identity, provider, monkeypatch):
     use_dev_totp(monkeypatch)
     bind(identity)

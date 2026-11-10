@@ -266,6 +266,88 @@ tenant live. Jangan menghapus pemeriksaan MFA/assurance atau menyalin approval
 ke akun lain tanpa verifikasi pemilik. Tes sintetis tidak menggantikan log dan
 enrollment nyata ini.
 
+## Pesan LMS generik: diagnosis satu percobaan login
+
+Pesan `Login Auth0 gagal atau tidak diizinkan` tidak membedakan penolakan
+provider, state/cookie, token/assurance dan identity binding. Jika QR/OTP belum
+pernah diminta, jangan membuat binding untuk melewati kegagalan itu. Respons
+`/api/auth/oidc/config` yang enabled dan dev-totp juga tidak membuktikan Action
+sudah menjalankan enrollment.
+
+Source terbaru menambahkan diagnosis API yang **default off**. Pada development
+Mac saja, set `AUTH0_LOCAL_DIAGNOSTICS=true` di `.env` sambil mempertahankan field
+dan secret lain. API hanya mencatat kode tetap bila APP_ENV=local dan origin
+loopback; flag tidak mengaktifkan diagnostic di produksi/nonloopback. Rebuild/
+restart hanya API development melalui workflow yang sedang digunakan agar source
+dan flag termuat. Pertahankan database/container dan jangan source dotenv sebagai
+shell. Untuk uvicorn, gunakan `--no-access-log`; jangan mengaktifkan debug/log
+HTTP body atau membagikan request callback.
+
+Pemilik melakukan **satu login baru** di browser Mac dan memasukkan password/OTP
+sendiri. Codex lokal kemudian membaca kode melalui salah satu cara berikut:
+
+```sh
+# Jika API dijalankan melalui Compose proyek ini:
+.venv/bin/python scripts/read-auth0-diagnostics.py --compose
+
+# Jika API memakai proses lokal dengan file log yang sudah diketahui:
+.venv/bin/python scripts/read-auth0-diagnostics.py --log-file /path/to/private-api.log
+```
+
+Reader hanya mencetak kode allowlist terbaru. Raw stdout/stderr Compose,
+exception, path file dan isi log lain tidak ditampilkan. Tidak perlu mengunggah
+log, `.env`, URL callback, cookie atau token. Reader read-only dan dibatasi 200
+entri Compose/10 menit atau 1 MiB terakhir file. Jika service memakai project/file
+Compose khusus, gunakan konteks proses yang benar melalui Codex lokal; jangan
+mencoba project/container lain. Exit 0 = kode ditemukan, **bukan login lulus**;
+exit 1 = gagal membaca log; exit 2 = belum ada kode, bukan bukti sukses.
+
+| Kode | Langkah pemeriksaan |
+|---|---|
+| OIDC_OWNER_APPROVAL_REQUIRED | app_metadata boolean true pada user yang benar-benar login, termasuk akun email baru |
+| OIDC_DEV_POLICY_UNCONFIGURED | Nama secret Action MAAHER_DEV_CLIENT_ID pada versi yang sudah Deploy |
+| OIDC_FIDO2_POLICY_ACTIVE / OIDC_STAFF_POLICY_UNCONFIGURED | Action FIDO2 lama ikut menargetkan aplikasi Development; periksa scope tanpa mengubah produksi |
+| OIDC_PROVIDER_DENIED | Error provider belum dikenali; periksa Action/OTP/entitlement dan pesan error Auth0 yang disamarkan |
+| OIDC_ASSURANCE_MISMATCH | Claim development tidak cocok/hilang; periksa deployed source, trigger binding dan Client ID pada secret Action |
+| OIDC_MFA_MISSING | Token tidak membawa amr=mfa; periksa enrollment/challenge provider, pertahankan validasi MFA |
+| OIDC_CLIENT_AUTH_FAILED | Client ID/Secret API serta Basic token-endpoint authentication pada aplikasi |
+| OIDC_CODE_EXCHANGE_REJECTED | Code ditolak provider; mulai flow baru, periksa callback/PKCE dan konfigurasi aplikasi |
+| OIDC_INVALID_CALLBACK / OIDC_FLOW_UNAVAILABLE | Cookie/origin, callback baru dan masa berlaku flow; gunakan 127.0.0.1 secara konsisten |
+| OIDC_FLOW_CONFIG_CHANGED / OIDC_FLOW_PAYLOAD_INVALID | Flow dibuat sebelum perubahan config/key atau payload tidak dapat dibaca; mulai flow baru dengan konfigurasi konsisten |
+| OIDC_PROVIDER_HTTP_FAILED / OIDC_PROVIDER_PROTOCOL_ERROR / OIDC_ID_TOKEN_INVALID / OIDC_TOKEN_RESPONSE_INVALID | Koneksi/protokol/validasi token; diagnosis lokal tanpa raw token/exception |
+| OIDC_AUTH_TIME_INVALID / OIDC_SUBJECT_INVALID | Freshness/subject tidak memenuhi validasi; periksa provider dan waktu server |
+| OIDC_IDENTITY_UNAVAILABLE | Identitas aktif yang terikat belum ditemukan; lanjut binding **hanya setelah** enrollment milik pemilik diverifikasi |
+
+Kode dari `error_description` callback hanya memetakan **pesan exact** yang
+dikenal ke kode tetap. Callback error itu belum terautentikasi; hasilnya petunjuk
+untuk diperiksa, bukan bukti setting tenant atau proof yang mengizinkan binding.
+Unknown message menjadi OIDC_PROVIDER_DENIED tanpa menyalin isinya. Respons/UI
+tetap generik; tidak ada policy, session atau akses yang dilonggarkan.
+
+Jika tidak ada kode, cek apakah API terbaru/flag sudah termuat dan callback
+mencapai API. Error konfigurasi/DB sebelum handler callback dapat memerlukan
+diagnosis service lokal tersendiri. Jangan menyimpulkan binding adalah penyebab
+hanya karena DB menunjukkan nol binding. Sesudah diagnosis selesai, kembalikan
+AUTH0_LOCAL_DIAGNOSTICS=false dan restart API development.
+
+Prompt siap tempel untuk kasus pesan gagal generik:
+
+```text
+Login Auth0 masih gagal dan belum pernah meminta QR/OTP. Profile API sudah
+enabled=true, assurance=maaher-dev-totp-v1. Ambil source terbaru branch
+feat/LMS-01-auth0-development tanpa menimpa perubahan lokal atau konfigurasi saya.
+Baca bagian diagnosis callback pada docs/AUTH0-DEV-TOTP.md. Pertahankan seluruh
+data/secret. Aktifkan AUTH0_LOCAL_DIAGNOSTICS=true hanya pada API development
+local/loopback, rebuild/restart proses yang benar sesuai workflow existing.
+Matikan access log callback; jangan cetak raw log/URL/exception/token/secret.
+Buka /auth dan beri saya waktu menyelesaikan satu login sendiri. Setelah itu
+jalankan read-auth0-diagnostics.py --compose atau --log-file sesuai proses API
+yang benar. Laporkan hanya kode allowlist terbaru dan langkah yang sesuai.
+Jangan membuat binding sampai saya memverifikasi enrollment OTP milik saya.
+Jika akses baca Auth0 tersedia, verifikasi setting relevan read-only; tandai
+SKIP bila tidak tersedia. Jangan melemahkan MFA, merge atau deploy.
+```
+
 ## 5. Verifikasi teknis dan hasil nyata
 
 Jalankan checker dari folder source terbaru:

@@ -1,0 +1,614 @@
+diff --git a/.github/workflows/lms-auth0.yml b/.github/workflows/lms-auth0.yml
+index fa2d12d..23af91d 100644
+--- a/.github/workflows/lms-auth0.yml
++++ b/.github/workflows/lms-auth0.yml
+@@ -49,7 +49,7 @@ jobs:
+                   db.execute(f'CREATE ROLE {login} LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS IN ROLE {group}')
+           PY
+       - run: python -m pytest -q apps/api/tests
+-      - run: python -m pytest -q scripts/tests/test_auth0_preflight.py
++      - run: python -m pytest -q scripts/tests/test_auth0_preflight.py scripts/tests/test_oidc_diagnostic_reader.py
+       - run: python -m compileall -q apps/api/app
+       - run: python scripts/audit-api-dependencies.py
+       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+diff --git a/maaher-lms-starter/.env.example b/maaher-lms-starter/.env.example
+index e87ac11..1cb8071 100644
+--- a/maaher-lms-starter/.env.example
++++ b/maaher-lms-starter/.env.example
+@@ -37,3 +37,6 @@ AUTH0_CLIENT_SECRET=
+ # Default: fido2. dev-totp requires APP_ENV=local, loopback origin and an actual
+ # maaher_test_* database. Never use dev-totp with real users or production.
+ AUTH0_ASSURANCE_PROFILE=fido2
++# Temporary fixed-code diagnostics on API logs; only local + loopback, default off.
++# No callback, exception text, token, cookie, user identity or secret is logged.
++AUTH0_LOCAL_DIAGNOSTICS=false
+diff --git a/maaher-lms-starter/apps/api/app/oidc.py b/maaher-lms-starter/apps/api/app/oidc.py
+index a87eeee..fdaaf30 100644
+--- a/maaher-lms-starter/apps/api/app/oidc.py
++++ b/maaher-lms-starter/apps/api/app/oidc.py
+@@ -24,6 +24,7 @@ from .auth_support import cipher, reserve_session_slot, security_event
+ from .database import auth_transaction, user_context
+ from .security import new_token, token_digest
+ from .oidc_policy import FIDO2_ASSURANCE, DEV_TOTP_ASSURANCE, configured_assurance
++from .oidc_diagnostics import Denial, log_denial, provider_denial
+ 
+ router = APIRouter(prefix="/auth/oidc")
+ FLOW_COOKIE = "maaher_oidc_flow"
+@@ -98,7 +99,8 @@ def clear_flow(response):
+     response.delete_cookie(FLOW_COOKIE, path="/", secure=secure_cookie(), httponly=True, samesite="lax")
+ 
+ 
+-def denied():
++def denied(code):
++    log_denial(code)
+     response = JSONResponse({"detail": "Login Auth0 tidak berlaku atau tidak diizinkan"}, status_code=400)
+     clear_flow(response)
+     return response
+@@ -154,14 +156,19 @@ async def callback(request: Request, response: Response, config=Depends(settings
+             or not 20 <= len(query.get("state", "")) <= 256
+             or len(query.get("code", "")) > 4096
+             or not 32 <= len(request.cookies.get(FLOW_COOKIE, "")) <= 128):
+-        return denied()
++        return denied(Denial.INVALID_CALLBACK)
+     flow = consume_flow(request.cookies[FLOW_COOKIE], query["state"])
+-    if not flow or flow["config_hash"] != config.fingerprint:
+-        return denied()
++    if not flow:
++        return denied(Denial.FLOW_UNAVAILABLE)
++    if flow["config_hash"] != config.fingerprint:
++        return denied(Denial.FLOW_CONFIG_CHANGED)
+     if query.get("error") or not query.get("code"):
+-        return denied()
++        return denied(provider_denial(query.get("error_description", "")) if query.get("error") else Denial.INVALID_CALLBACK)
+     try:
+         request.scope["session"] = json.loads(cipher().decrypt(flow["encrypted_state"].encode()).decode())
++    except (InvalidToken, ValueError, TypeError, KeyError):
++        return denied(Denial.FLOW_PAYLOAD_INVALID)
++    try:
+         token = await make_client(config).authorize_access_token(
+             request, leeway=0,
+             claims_options={"iss": {"essential": True, "value": config.issuer},
+@@ -170,20 +177,32 @@ async def callback(request: Request, response: Response, config=Depends(settings
+         )
+         claims = token.get("userinfo")
+         now = time.time()
+-        if (not claims or claims.get(ASSURANCE_CLAIM) != config.assurance
+-                or "mfa" not in claims.get("amr", [])
+-                or isinstance(claims.get("auth_time"), bool)
++        if not claims:
++            return denied(Denial.TOKEN_RESPONSE_INVALID)
++        if claims.get(ASSURANCE_CLAIM) != config.assurance:
++            return denied(Denial.ASSURANCE_MISMATCH)
++        if "mfa" not in claims.get("amr", []):
++            return denied(Denial.MFA_MISSING)
++        if (isinstance(claims.get("auth_time"), bool)
+                 or not isinstance(claims.get("auth_time"), (int, float))
+-                or not now - FLOW_SECONDS <= claims["auth_time"] <= now + 30
+-                or not isinstance(claims.get("sub"), str) or not 1 <= len(claims["sub"]) <= 255):
+-            return denied()
+-    except (OAuthError, JoseError, HTTPError, InvalidToken, ValueError, TypeError, KeyError):
+-        return denied()
++                or not now - FLOW_SECONDS <= claims["auth_time"] <= now + 30):
++            return denied(Denial.AUTH_TIME_INVALID)
++        if not isinstance(claims.get("sub"), str) or not 1 <= len(claims["sub"]) <= 255:
++            return denied(Denial.SUBJECT_INVALID)
++    except OAuthError as error:
++        return denied({"invalid_client": Denial.CLIENT_AUTH_FAILED,
++                       "invalid_grant": Denial.CODE_EXCHANGE_REJECTED}.get(error.error, Denial.PROVIDER_PROTOCOL_ERROR))
++    except JoseError:
++        return denied(Denial.ID_TOKEN_INVALID)
++    except HTTPError:
++        return denied(Denial.PROVIDER_HTTP_FAILED)
++    except (InvalidToken, ValueError, TypeError, KeyError):
++        return denied(Denial.TOKEN_RESPONSE_INVALID)
+     identity = db.execute("""SELECT i.id,i.user_id,i.is_operator,u.email FROM oidc_identities i
+         JOIN users u ON u.id=i.user_id WHERE i.issuer=%s AND i.subject=%s AND i.status='active'
+         AND u.status='active'""", (config.issuer, claims["sub"])).fetchone()
+     if not identity:
+-        return denied()
++        return denied(Denial.IDENTITY_UNAVAILABLE)
+     uid = identity["user_id"]
+     db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("auth-email:" + identity["email"],))
+     user_context(db, uid)
+diff --git a/maaher-lms-starter/apps/api/app/oidc_diagnostics.py b/maaher-lms-starter/apps/api/app/oidc_diagnostics.py
+new file mode 100644
+index 0000000..ce0d4da
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/oidc_diagnostics.py
+@@ -0,0 +1,55 @@
++"""Opt-in local diagnostics: fixed codes only, never callback/token contents."""
++from enum import Enum
++import logging
++import os
++from urllib.parse import urlsplit
++
++logger = logging.getLogger("maaher.auth.oidc")
++
++
++class Denial(Enum):
++    INVALID_CALLBACK = "OIDC_INVALID_CALLBACK"
++    FLOW_UNAVAILABLE = "OIDC_FLOW_UNAVAILABLE"
++    FLOW_CONFIG_CHANGED = "OIDC_FLOW_CONFIG_CHANGED"
++    PROVIDER_DENIED = "OIDC_PROVIDER_DENIED"
++    OWNER_APPROVAL_REQUIRED = "OIDC_OWNER_APPROVAL_REQUIRED"
++    DEV_POLICY_UNCONFIGURED = "OIDC_DEV_POLICY_UNCONFIGURED"
++    FIDO2_POLICY_ACTIVE = "OIDC_FIDO2_POLICY_ACTIVE"
++    STAFF_POLICY_UNCONFIGURED = "OIDC_STAFF_POLICY_UNCONFIGURED"
++    FLOW_PAYLOAD_INVALID = "OIDC_FLOW_PAYLOAD_INVALID"
++    CLIENT_AUTH_FAILED = "OIDC_CLIENT_AUTH_FAILED"
++    CODE_EXCHANGE_REJECTED = "OIDC_CODE_EXCHANGE_REJECTED"
++    PROVIDER_PROTOCOL_ERROR = "OIDC_PROVIDER_PROTOCOL_ERROR"
++    PROVIDER_HTTP_FAILED = "OIDC_PROVIDER_HTTP_FAILED"
++    ID_TOKEN_INVALID = "OIDC_ID_TOKEN_INVALID"
++    TOKEN_RESPONSE_INVALID = "OIDC_TOKEN_RESPONSE_INVALID"
++    ASSURANCE_MISMATCH = "OIDC_ASSURANCE_MISMATCH"
++    MFA_MISSING = "OIDC_MFA_MISSING"
++    AUTH_TIME_INVALID = "OIDC_AUTH_TIME_INVALID"
++    SUBJECT_INVALID = "OIDC_SUBJECT_INVALID"
++    IDENTITY_UNAVAILABLE = "OIDC_IDENTITY_UNAVAILABLE"
++
++
++def log_denial(code: Denial):
++    if os.environ.get("AUTH0_LOCAL_DIAGNOSTICS") != "true" or os.environ.get("APP_ENV") != "local":
++        return
++    try:
++        origin = urlsplit(os.environ.get("APP_ORIGIN", ""))
++        origin.port
++    except ValueError:
++        return
++    if (origin.scheme not in {"http", "https"} or origin.hostname not in {"localhost", "127.0.0.1"}
++            or origin.username or origin.password or origin.path or origin.query or origin.fragment):
++        return
++    logger.warning("MAAHER_AUTH0_DIAGNOSTIC code=%s", code.value)
++
++
++def provider_denial(description):
++    # Untrusted callback text selects an exact allowlisted hint, never a log
++    # string or an authorization decision. Unknown descriptions stay generic.
++    return {
++        "Owner approval for synthetic development is required": Denial.OWNER_APPROVAL_REQUIRED,
++        "Development login policy is not configured": Denial.DEV_POLICY_UNCONFIGURED,
++        "Verified staff enrollment is required": Denial.FIDO2_POLICY_ACTIVE,
++        "Staff login policy is not configured": Denial.STAFF_POLICY_UNCONFIGURED,
++    }.get(description, Denial.PROVIDER_DENIED)
+diff --git a/maaher-lms-starter/apps/api/tests/test_oidc.py b/maaher-lms-starter/apps/api/tests/test_oidc.py
+index 68683e6..b62e7ba 100644
+--- a/maaher-lms-starter/apps/api/tests/test_oidc.py
++++ b/maaher-lms-starter/apps/api/tests/test_oidc.py
+@@ -290,6 +290,48 @@ def use_dev_totp(monkeypatch):
+     monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp")
+ 
+ 
++@pytest.mark.parametrize("stage,expected", [
++    ("owner", "OIDC_OWNER_APPROVAL_REQUIRED"),
++    ("unknown_provider_error", "OIDC_PROVIDER_DENIED"),
++    ("assurance", "OIDC_ASSURANCE_MISMATCH"),
++    ("mfa", "OIDC_MFA_MISSING"),
++    ("binding", "OIDC_IDENTITY_UNAVAILABLE"),
++    ("encrypted", "OIDC_FLOW_PAYLOAD_INVALID"),
++    ("nonce", "OIDC_ID_TOKEN_INVALID"),
++    ("exchange", "OIDC_CODE_EXCHANGE_REJECTED"),
++])
++def test_callback_reports_only_a_safe_local_stage_and_keeps_the_public_error_generic(identity, provider, monkeypatch, caplog, stage, expected):
++    use_dev_totp(monkeypatch)
++    monkeypatch.setenv("AUTH0_LOCAL_DIAGNOSTICS", "true")
++    sentinel = "private-token-and-email-sentinel@example.invalid"
++    claims = {oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE}
++    if stage == "assurance": claims[oidc.ASSURANCE_CLAIM] = sentinel
++    if stage == "mfa": claims["amr"] = ["pwd"]
++    if stage == "nonce": claims["nonce"] = sentinel
++    with TestClient(app, base_url=os.environ["APP_ORIGIN"]) as client:
++        flow = begin(client, provider, claims=claims, error=(stage == "exchange"))
++        if stage in {"owner", "unknown_provider_error"}:
++            flow.pop("code")
++            flow.update(error="access_denied", error_description=("Owner approval for synthetic development is required" if stage == "owner" else sentinel))
++        if stage == "encrypted":
++            with psycopg.connect(identity[1]) as db:
++                db.execute("UPDATE oidc_login_flows SET encrypted_state=%s WHERE state_hash=%s",
++                           (sentinel, token_digest(flow["state"])))
++        response = client.get("/auth/oidc/callback", params=flow)
++        assert response.status_code == 400
++        assert response.json() == {"detail": "Login Auth0 tidak berlaku atau tidak diizinkan"}
++        assert not client.cookies.get("maaher_session")
++        messages = [record.getMessage() for record in caplog.records if record.name == "maaher.auth.oidc"]
++        assert messages == ["MAAHER_AUTH0_DIAGNOSTIC code=" + expected]
++        assert sentinel not in " ".join(messages) and SECRET not in " ".join(messages)
++        assert flow["state"] not in " ".join(messages)
++        if "code" in flow: assert flow["code"] not in " ".join(messages)
++        # A denied callback still consumes the state and cannot be replayed.
++        assert client.get("/auth/oidc/callback", params=flow).status_code == 400
++        with psycopg.connect(identity[1]) as db:
++            assert db.execute("SELECT count(*) FROM sessions WHERE user_id=%s", (identity[2],)).fetchone()[0] == 0
++
++
+ def test_dev_totp_uses_a_distinct_session_and_checks_tenant_and_policy_on_every_request(identity, provider, monkeypatch):
+     use_dev_totp(monkeypatch)
+     bind(identity)
+diff --git a/maaher-lms-starter/apps/api/tests/test_oidc_diagnostics.py b/maaher-lms-starter/apps/api/tests/test_oidc_diagnostics.py
+new file mode 100644
+index 0000000..d7596fb
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_oidc_diagnostics.py
+@@ -0,0 +1,50 @@
++import logging
++
++import pytest
++
++from app.oidc_diagnostics import Denial, log_denial, provider_denial
++
++
++@pytest.mark.parametrize("enabled,environment,origin,logged", [
++    ("true", "local", "http://127.0.0.1:3000", True),
++    ("true", "local", "https://localhost", True),
++    ("false", "local", "http://127.0.0.1:3000", False),
++    ("", "local", "http://127.0.0.1:3000", False),
++    ("true", "production", "http://127.0.0.1:3000", False),
++    ("true", "test", "http://127.0.0.1:3000", False),
++    ("true", "local", "https://lms.example.invalid", False),
++    ("true", "local", "http://user@localhost", False),
++    ("true", "local", "http://localhost/", False),
++    ("true", "local", "http://localhost?debug=1", False),
++    ("true", "local", "http://localhost#debug", False),
++    ("true", "local", "http://localhost:bad", False),
++    ("true", "local", "https://[broken", False),
++])
++def test_diagnostic_log_is_opt_in_and_local_loopback_only(monkeypatch, caplog, enabled, environment, origin, logged):
++    monkeypatch.setenv("AUTH0_LOCAL_DIAGNOSTICS", enabled)
++    monkeypatch.setenv("APP_ENV", environment)
++    monkeypatch.setenv("APP_ORIGIN", origin)
++    with caplog.at_level(logging.WARNING, logger="maaher.auth.oidc"):
++        log_denial(Denial.PROVIDER_DENIED)
++    messages = [record.getMessage() for record in caplog.records if record.name == "maaher.auth.oidc"]
++    assert messages == (["MAAHER_AUTH0_DIAGNOSTIC code=OIDC_PROVIDER_DENIED"] if logged else [])
++
++
++@pytest.mark.parametrize("description,expected", [
++    ("Owner approval for synthetic development is required", Denial.OWNER_APPROVAL_REQUIRED),
++    ("Development login policy is not configured", Denial.DEV_POLICY_UNCONFIGURED),
++    ("Verified staff enrollment is required", Denial.FIDO2_POLICY_ACTIVE),
++    ("Staff login policy is not configured", Denial.STAFF_POLICY_UNCONFIGURED),
++    ("untrusted-private-email@example.invalid\nBearer private-token-sentinel", Denial.PROVIDER_DENIED),
++    ("Owner approval for synthetic development is required private-sentinel", Denial.PROVIDER_DENIED),
++])
++def test_provider_error_text_only_selects_an_exact_fixed_hint(monkeypatch, caplog, description, expected):
++    monkeypatch.setenv("AUTH0_LOCAL_DIAGNOSTICS", "true")
++    monkeypatch.setenv("APP_ENV", "local")
++    monkeypatch.setenv("APP_ORIGIN", "http://localhost:3000")
++    code = provider_denial(description)
++    assert code is expected
++    with caplog.at_level(logging.WARNING, logger="maaher.auth.oidc"):
++        log_denial(code)
++    messages = [record.getMessage() for record in caplog.records if record.name == "maaher.auth.oidc"]
++    assert messages == ["MAAHER_AUTH0_DIAGNOSTIC code=" + expected.value]
+diff --git a/maaher-lms-starter/docker-compose.yml b/maaher-lms-starter/docker-compose.yml
+index ced1ede..b2da484 100644
+--- a/maaher-lms-starter/docker-compose.yml
++++ b/maaher-lms-starter/docker-compose.yml
+@@ -34,6 +34,7 @@ services:
+       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-}
+       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
+       AUTH0_ASSURANCE_PROFILE: ${AUTH0_ASSURANCE_PROFILE:-fido2}
++      AUTH0_LOCAL_DIAGNOSTICS: ${AUTH0_LOCAL_DIAGNOSTICS:-false}
+     networks: [internal]
+   web:
+     build: ./apps/web
+diff --git a/maaher-lms-starter/docs/AUTH0-DEV-TOTP.md b/maaher-lms-starter/docs/AUTH0-DEV-TOTP.md
+index fdf67c7..b9f09ca 100644
+--- a/maaher-lms-starter/docs/AUTH0-DEV-TOTP.md
++++ b/maaher-lms-starter/docs/AUTH0-DEV-TOTP.md
+@@ -266,6 +266,88 @@ tenant live. Jangan menghapus pemeriksaan MFA/assurance atau menyalin approval
+ ke akun lain tanpa verifikasi pemilik. Tes sintetis tidak menggantikan log dan
+ enrollment nyata ini.
+ 
++## Pesan LMS generik: diagnosis satu percobaan login
++
++Pesan `Login Auth0 gagal atau tidak diizinkan` tidak membedakan penolakan
++provider, state/cookie, token/assurance dan identity binding. Jika QR/OTP belum
++pernah diminta, jangan membuat binding untuk melewati kegagalan itu. Respons
++`/api/auth/oidc/config` yang enabled dan dev-totp juga tidak membuktikan Action
++sudah menjalankan enrollment.
++
++Source terbaru menambahkan diagnosis API yang **default off**. Pada development
++Mac saja, set `AUTH0_LOCAL_DIAGNOSTICS=true` di `.env` sambil mempertahankan field
++dan secret lain. API hanya mencatat kode tetap bila APP_ENV=local dan origin
++loopback; flag tidak mengaktifkan diagnostic di produksi/nonloopback. Rebuild/
++restart hanya API development melalui workflow yang sedang digunakan agar source
++dan flag termuat. Pertahankan database/container dan jangan source dotenv sebagai
++shell. Untuk uvicorn, gunakan `--no-access-log`; jangan mengaktifkan debug/log
++HTTP body atau membagikan request callback.
++
++Pemilik melakukan **satu login baru** di browser Mac dan memasukkan password/OTP
++sendiri. Codex lokal kemudian membaca kode melalui salah satu cara berikut:
++
++```sh
++# Jika API dijalankan melalui Compose proyek ini:
++.venv/bin/python scripts/read-auth0-diagnostics.py --compose
++
++# Jika API memakai proses lokal dengan file log yang sudah diketahui:
++.venv/bin/python scripts/read-auth0-diagnostics.py --log-file /path/to/private-api.log
++```
++
++Reader hanya mencetak kode allowlist terbaru. Raw stdout/stderr Compose,
++exception, path file dan isi log lain tidak ditampilkan. Tidak perlu mengunggah
++log, `.env`, URL callback, cookie atau token. Reader read-only dan dibatasi 200
++entri Compose/10 menit atau 1 MiB terakhir file. Jika service memakai project/file
++Compose khusus, gunakan konteks proses yang benar melalui Codex lokal; jangan
++mencoba project/container lain. Exit 0 = kode ditemukan, **bukan login lulus**;
++exit 1 = gagal membaca log; exit 2 = belum ada kode, bukan bukti sukses.
++
++| Kode | Langkah pemeriksaan |
++|---|---|
++| OIDC_OWNER_APPROVAL_REQUIRED | app_metadata boolean true pada user yang benar-benar login, termasuk akun email baru |
++| OIDC_DEV_POLICY_UNCONFIGURED | Nama secret Action MAAHER_DEV_CLIENT_ID pada versi yang sudah Deploy |
++| OIDC_FIDO2_POLICY_ACTIVE / OIDC_STAFF_POLICY_UNCONFIGURED | Action FIDO2 lama ikut menargetkan aplikasi Development; periksa scope tanpa mengubah produksi |
++| OIDC_PROVIDER_DENIED | Error provider belum dikenali; periksa Action/OTP/entitlement dan pesan error Auth0 yang disamarkan |
++| OIDC_ASSURANCE_MISMATCH | Claim development tidak cocok/hilang; periksa deployed source, trigger binding dan Client ID pada secret Action |
++| OIDC_MFA_MISSING | Token tidak membawa amr=mfa; periksa enrollment/challenge provider, pertahankan validasi MFA |
++| OIDC_CLIENT_AUTH_FAILED | Client ID/Secret API serta Basic token-endpoint authentication pada aplikasi |
++| OIDC_CODE_EXCHANGE_REJECTED | Code ditolak provider; mulai flow baru, periksa callback/PKCE dan konfigurasi aplikasi |
++| OIDC_INVALID_CALLBACK / OIDC_FLOW_UNAVAILABLE | Cookie/origin, callback baru dan masa berlaku flow; gunakan 127.0.0.1 secara konsisten |
++| OIDC_FLOW_CONFIG_CHANGED / OIDC_FLOW_PAYLOAD_INVALID | Flow dibuat sebelum perubahan config/key atau payload tidak dapat dibaca; mulai flow baru dengan konfigurasi konsisten |
++| OIDC_PROVIDER_HTTP_FAILED / OIDC_PROVIDER_PROTOCOL_ERROR / OIDC_ID_TOKEN_INVALID / OIDC_TOKEN_RESPONSE_INVALID | Koneksi/protokol/validasi token; diagnosis lokal tanpa raw token/exception |
++| OIDC_AUTH_TIME_INVALID / OIDC_SUBJECT_INVALID | Freshness/subject tidak memenuhi validasi; periksa provider dan waktu server |
++| OIDC_IDENTITY_UNAVAILABLE | Identitas aktif yang terikat belum ditemukan; lanjut binding **hanya setelah** enrollment milik pemilik diverifikasi |
++
++Kode dari `error_description` callback hanya memetakan **pesan exact** yang
++dikenal ke kode tetap. Callback error itu belum terautentikasi; hasilnya petunjuk
++untuk diperiksa, bukan bukti setting tenant atau proof yang mengizinkan binding.
++Unknown message menjadi OIDC_PROVIDER_DENIED tanpa menyalin isinya. Respons/UI
++tetap generik; tidak ada policy, session atau akses yang dilonggarkan.
++
++Jika tidak ada kode, cek apakah API terbaru/flag sudah termuat dan callback
++mencapai API. Error konfigurasi/DB sebelum handler callback dapat memerlukan
++diagnosis service lokal tersendiri. Jangan menyimpulkan binding adalah penyebab
++hanya karena DB menunjukkan nol binding. Sesudah diagnosis selesai, kembalikan
++AUTH0_LOCAL_DIAGNOSTICS=false dan restart API development.
++
++Prompt siap tempel untuk kasus pesan gagal generik:
++
++```text
++Login Auth0 masih gagal dan belum pernah meminta QR/OTP. Profile API sudah
++enabled=true, assurance=maaher-dev-totp-v1. Ambil source terbaru branch
++feat/LMS-01-auth0-development tanpa menimpa perubahan lokal atau konfigurasi saya.
++Baca bagian diagnosis callback pada docs/AUTH0-DEV-TOTP.md. Pertahankan seluruh
++data/secret. Aktifkan AUTH0_LOCAL_DIAGNOSTICS=true hanya pada API development
++local/loopback, rebuild/restart proses yang benar sesuai workflow existing.
++Matikan access log callback; jangan cetak raw log/URL/exception/token/secret.
++Buka /auth dan beri saya waktu menyelesaikan satu login sendiri. Setelah itu
++jalankan read-auth0-diagnostics.py --compose atau --log-file sesuai proses API
++yang benar. Laporkan hanya kode allowlist terbaru dan langkah yang sesuai.
++Jangan membuat binding sampai saya memverifikasi enrollment OTP milik saya.
++Jika akses baca Auth0 tersedia, verifikasi setting relevan read-only; tandai
++SKIP bila tidak tersedia. Jangan melemahkan MFA, merge atau deploy.
++```
++
+ ## 5. Verifikasi teknis dan hasil nyata
+ 
+ Jalankan checker dari folder source terbaru:
+diff --git a/maaher-lms-starter/docs/LMS-01-OIDC-DIAGNOSTICS-HANDOFF.md b/maaher-lms-starter/docs/LMS-01-OIDC-DIAGNOSTICS-HANDOFF.md
+new file mode 100644
+index 0000000..28f8411
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-01-OIDC-DIAGNOSTICS-HANDOFF.md
+@@ -0,0 +1,87 @@
++# LMS-01 — diagnosis callback Auth0 development
++
++10 November 2026. Base delta ini: `ec98cbe`. Pemilik melaporkan pesan generik
++LMS setelah menyesuaikan Action, serta mengonfirmasi QR maupun permintaan OTP
++belum muncul. Respons API lokal yang dibagikan pemilik adalah enabled=true dan
++assurance=maaher-dev-totp-v1. Ini membuktikan profile lokal, bukan setting IdP.
++Root cause live belum terbukti; binding belum boleh dipakai untuk melewati
++enrollment yang belum diselesaikan.
++
++## Perubahan
++
++- `apps/api/app/oidc_diagnostics.py`: enum kode tetap dan logger opt-in
++  AUTH0_LOCAL_DIAGNOSTICS=true, hanya APP_ENV=local + origin loopback valid.
++  Default off. Mapping exact empat pesan policy Action ke kode allowlist;
++  teks callback lain tetap generic, tidak dicetak. Callback error belum
++  terautentikasi: kode mapping adalah petunjuk, bukan proof IdP/approval.
++- `apps/api/app/oidc.py`: denial mengeluarkan kode tahap hanya pada log privat
++  development. State/cookie/config, provider, token/assurance/MFA/freshness dan
++  identity binding dibedakan. Response/URL/UI tetap generik; tidak ada code,
++  token, subject, email, exception atau secret yang masuk diagnostic.
++  Konsumsi state, verifikasi token, session/grant dan membership tetap berlaku.
++- `.env.example` / Compose: flag API baru dengan default false, tidak ke web.
++- `scripts/read-auth0-diagnostics.py`: membaca log Compose proyek (200 entri,
++  10 menit, stdout+stderr ditangkap) atau 1 MiB terakhir file API lokal. Hanya
++  kode allowlist terakhir yang dicetak. Raw log, path, error subprocess dan
++  output lainnya tidak dikirim ke stdout/chat. Exit 0 berarti kode ditemukan,
++  bukan login lulus; exit 1 gagal baca; exit 2 belum ada code/SKIP.
++- Tes guard/log redaction, mapping exact dan callback bertanda tangan ditambah;
++  reader ditambahkan ke CI root. Panduan diagnosis Mac dan ticket diperbarui.
++
++## Validasi pada source final
++
++| Pemeriksaan | Hasil |
++|---|---|
++| `PYTHONPATH=apps/api python -m pytest -q -x --tb=short apps/api/tests` | **170 passed**, 0 skip, 68.11s |
++| `python -m pytest -q apps/api/tests/test_oidc_diagnostics.py scripts/tests/test_oidc_diagnostic_reader.py scripts/tests/test_auth0_preflight.py` | **31 passed**, 0 skip (19 sudah termasuk suite API; 12 tes scripts) |
++| `python scripts/test-lms01-browser.py --oidc --dev-totp` | **1 passed**, Chromium, signed synthetic provider |
++| Reader smoke dari warning proses Python nyata ke file privat | **PASS**, hanya OIDC_PROVIDER_DENIED yang tercetak |
++| compileall app/reader, starter verifier, git whitespace check | **PASS** |
++
++Tes callback memverifikasi reason owner/unknown provider, assurance, MFA,
++binding, payload, nonce dan exchange; error publik tetap sama, token/session
++tidak terbit, state tidak dapat direplay dan sentinel/cookie-state/code/secret
++tidak ada pada log diagnosis. Unit tests memeriksa flag default off, produksi,
++nonloopback, URL invalid, exact match serta guard reader semua enum termasuk
++kode FIDO2. Suite API juga mencakup roundtrip migrasi 0001–0005 dan regresi
++privilege/tenant/review sebelumnya.
++
++Run API pertama berhenti pada regresi key rotation karena tes diagnosis baru
++sengaja merusak seluruh baris flow. Tes diperbaiki agar hanya merusak flow milik
++tes itu sendiri melalui state_hash. Run final di DB kosong baru seluruhnya lulus;
++tidak ada bypass/skip atau perubahan key rotation untuk membuatnya lulus.
++
++Database hasil yang dipertahankan: `maaher_test_oidc_diag_20261110` (awal),
++`maaher_test_oidc_diag_final_20261110` (final), dan
++`maaher_test_oidc_diag_browser_20261110` (browser). Container cloud milik sesi
++`maaher-cloud-review-20261109`, port saat tes 127.0.0.1:32771, dihentikan sesudah
++validasi. DB/container/source Mac tidak diakses atau diubah oleh cloud.
++
++Frontend, Action Auth0, dependency dan migration tidak berubah. Build/typecheck,
++audit dependency, suite Action dan delapan browser lain tidak diulang pada delta
++ini; hasil historis tetap snapshot sebagaimana handoff dev-totp. Dua warning
++deprecation httpx/Authlib tetap ada. Remote CI/review Claude belum diverifikasi.
++
++## Kelanjutan Mac dan rollback
++
++Ambil source terbaru dengan mempertahankan perubahan lokal. Ikuti bagian
++diagnosis pada [AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md): flag true hanya development,
++restart/rebuild API yang benar, owner melakukan satu login baru, reader mencetak
++kode aman dan Codex lokal menindaklanjuti dengan bukti. Jangan mencetak raw API
++log/callback atau meminta password/OTP/QR/token pada agent/chat. Jangan membuat
++binding sebelum enrollment milik pemilik diverifikasi; jangan menghapus validasi.
++
++Tidak ada migrasi baru. Kembalikan flag false dan restart API setelah diagnosis.
++Rollback source tidak memerlukan perubahan data/schema. Tidak ada perubahan
++policy tenant Auth0, provisioning, merge atau deploy dari sesi cloud ini.
++Login nyata/OTP enrollment serta akar masalah Mac tetap menunggu bukti live.
++Gate H1 produksi dan review independen tetap terbuka.
++
++Reviewer: periksa diff delta `ec98cbe..HEAD` untuk logger/reader; review keseluruhan
++Auth0 melalui `git diff main...HEAD`. Pastikan generic public error, opt-in local
++guards, tidak ada raw provider/exception/secret log atau jalur auth yang dilonggarkan.
++Laporan Claude awal tetap utuh, SHA256
++`004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce`.
++Manifest/patch lama adalah snapshot historis, gunakan snapshot diagnostics untuk
++delta ini. Jangan mengubah source sebagai bagian review atau menyatakan synthetic
++provider sebagai pengujian Auth0 nyata.
+diff --git a/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md b/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md
+index 83c17b7..6bf2124 100644
+--- a/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md
++++ b/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md
+@@ -40,3 +40,17 @@ offline setelah verifikasi pemilik; tenant/RLS tetap terjaga. Migrasi roundtrip
+ Tes Action mencakup enrollment awal, login kedua, metadata palsu dan client lain;
+ browser positif sintetis dijalankan untuk kedua profile. Tidak ada real Auth0
+ policy change, binding Mac, merge/deploy oleh sesi cloud ini.
++
++## Diagnosis callback development — 10 November 2026
++
++Dalam troubleshooting yang diminta pemilik, login tetap ditolak dengan pesan
++umum dan QR/OTP belum muncul. Lingkup tambahan: kode diagnosis tetap pada log
++API, opt-in AUTH0_LOCAL_DIAGNOSTICS=true hanya APP_ENV=local + origin loopback,
++pemetaan exact pesan Action yang dikenal, panduan Mac dan tes redaksi/guard.
++Kode tidak masuk response/URL/browser, tidak memuat callback/token/secret/PII
++atau teks exception. Pesan callback mentah tidak dicetak; kode dari error
++callback hanya petunjuk yang belum terautentikasi, bukan bukti setting IdP.
++Default off, tanpa perubahan policy, binding, schema, grant atau UI generik.
++Tes mencakup setiap tahap denial, redaksi sentinel, tidak ada diagnostic di
++produksi/nonloopback, single-use state, sesi tetap tidak terbit saat gagal,
++serta regresi API dan browser OIDC sintetis yang relevan.
+diff --git a/maaher-lms-starter/scripts/read-auth0-diagnostics.py b/maaher-lms-starter/scripts/read-auth0-diagnostics.py
+new file mode 100644
+index 0000000..54a91b1
+--- /dev/null
++++ b/maaher-lms-starter/scripts/read-auth0-diagnostics.py
+@@ -0,0 +1,58 @@
++"""Read local API logs and print only allowlisted OIDC codes, never raw logs."""
++import argparse
++from pathlib import Path
++import re
++import subprocess
++import sys
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "apps/api"))
++from app.oidc_diagnostics import Denial
++
++CODES = {code.value for code in Denial}
++PATTERN = re.compile(r"(?:^|\s)MAAHER_AUTH0_DIAGNOSTIC code=(OIDC_[A-Z0-9_]+)\s*$")
++MAX_BYTES = 1024 * 1024
++
++
++def extract_codes(raw):
++    result = []
++    for line in raw.splitlines():
++        match = PATTERN.search(line)
++        if match and match[1] in CODES:
++            result.append(match[1])
++    return result
++
++
++def main(argv=None):
++    parser = argparse.ArgumentParser(description=__doc__)
++    source = parser.add_mutually_exclusive_group(required=True)
++    source.add_argument("--compose", action="store_true", help="Capture last 200 API log entries from this project's Compose")
++    source.add_argument("--log-file", type=Path, help="Existing API log file; contents/path are never printed")
++    args = parser.parse_args(argv)
++    try:
++        if args.compose:
++            run = subprocess.run(["docker", "compose", "logs", "--no-color", "--since", "10m", "--tail", "200", "api"],
++                                 cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=20, check=False)
++            if run.returncode:
++                print("FAIL: log Compose belum dapat dibaca; stderr/raw log tidak ditampilkan")
++                return 1
++            data = run.stdout[-MAX_BYTES:]
++        else:
++            with args.log_file.open("rb") as stream:
++                stream.seek(0, 2)
++                stream.seek(max(0, stream.tell() - MAX_BYTES))
++                data = stream.read(MAX_BYTES)
++    except (OSError, subprocess.TimeoutExpired):
++        print("FAIL: log API belum dapat dibaca; path/exception/raw log tidak ditampilkan")
++        return 1
++    codes = extract_codes(data.decode("utf-8", errors="replace"))
++    if not codes:
++        print("SKIP: belum ada kode diagnosis; periksa source/flag API dan lakukan satu percobaan login baru")
++        return 2
++    print("Latest local diagnostic: " + codes[-1])
++    print("Kode ini petunjuk tahap kegagalan, bukan verifikasi setting Auth0 atau izin binding.")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/maaher-lms-starter/scripts/tests/test_oidc_diagnostic_reader.py b/maaher-lms-starter/scripts/tests/test_oidc_diagnostic_reader.py
+new file mode 100644
+index 0000000..f3da36c
+--- /dev/null
++++ b/maaher-lms-starter/scripts/tests/test_oidc_diagnostic_reader.py
+@@ -0,0 +1,42 @@
++from pathlib import Path
++import runpy
++import subprocess
++
++module = runpy.run_path(str(Path(__file__).resolve().parents[1] / "read-auth0-diagnostics.py"))
++SENTINEL = "private-token-email-and-url-sentinel"
++
++
++def test_reader_extracts_only_complete_allowlisted_codes():
++    assert module["extract_codes"](f"{SENTINEL}\napi | MAAHER_AUTH0_DIAGNOSTIC code=OIDC_OWNER_APPROVAL_REQUIRED\n"
++                                   f"MAAHER_AUTH0_DIAGNOSTIC code=OIDC_{SENTINEL}\n"
++                                   "MAAHER_AUTH0_DIAGNOSTIC code=OIDC_PROVIDER_DENIED extra-private-text\n") == ["OIDC_OWNER_APPROVAL_REQUIRED"]
++    for code in module["CODES"]:
++        assert module["extract_codes"]("api | MAAHER_AUTH0_DIAGNOSTIC code=" + code) == [code]
++
++
++def test_file_output_omits_raw_text_and_prints_only_the_latest_code(tmp_path, capsys):
++    path = tmp_path / "api.log"
++    path.write_text(f"{SENTINEL}\nMAAHER_AUTH0_DIAGNOSTIC code=OIDC_PROVIDER_DENIED\n"
++                    "MAAHER_AUTH0_DIAGNOSTIC code=OIDC_ASSURANCE_MISMATCH\n")
++    assert module["main"](["--log-file", str(path)]) == 0
++    output = capsys.readouterr().out
++    assert SENTINEL not in output and str(path) not in output
++    assert "OIDC_ASSURANCE_MISMATCH" in output and "OIDC_PROVIDER_DENIED" not in output
++
++
++def test_compose_failure_never_prints_stderr_or_a_raw_response(monkeypatch, capsys):
++    def run(command, **kwargs):
++        assert command == ["docker", "compose", "logs", "--no-color", "--since", "10m", "--tail", "200", "api"]
++        assert kwargs["stdout"] == subprocess.PIPE and kwargs["stderr"] == subprocess.STDOUT
++        assert kwargs["timeout"] == 20
++        return subprocess.CompletedProcess(command, 1, SENTINEL.encode(), SENTINEL.encode())
++    monkeypatch.setattr(module["subprocess"], "run", run)
++    assert module["main"](["--compose"]) == 1
++    assert SENTINEL not in capsys.readouterr().out
++
++
++def test_no_diagnostic_is_not_reported_as_a_success(tmp_path, capsys):
++    path = tmp_path / "api.log"; path.write_text(SENTINEL)
++    assert module["main"](["--log-file", str(path)]) == 2
++    output = capsys.readouterr().out
++    assert SENTINEL not in output and "SKIP" in output

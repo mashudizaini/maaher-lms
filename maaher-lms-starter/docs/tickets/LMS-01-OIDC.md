@@ -40,3 +40,17 @@ offline setelah verifikasi pemilik; tenant/RLS tetap terjaga. Migrasi roundtrip
 Tes Action mencakup enrollment awal, login kedua, metadata palsu dan client lain;
 browser positif sintetis dijalankan untuk kedua profile. Tidak ada real Auth0
 policy change, binding Mac, merge/deploy oleh sesi cloud ini.
+
+## Diagnosis callback development — 10 November 2026
+
+Dalam troubleshooting yang diminta pemilik, login tetap ditolak dengan pesan
+umum dan QR/OTP belum muncul. Lingkup tambahan: kode diagnosis tetap pada log
+API, opt-in AUTH0_LOCAL_DIAGNOSTICS=true hanya APP_ENV=local + origin loopback,
+pemetaan exact pesan Action yang dikenal, panduan Mac dan tes redaksi/guard.
+Kode tidak masuk response/URL/browser, tidak memuat callback/token/secret/PII
+atau teks exception. Pesan callback mentah tidak dicetak; kode dari error
+callback hanya petunjuk yang belum terautentikasi, bukan bukti setting IdP.
+Default off, tanpa perubahan policy, binding, schema, grant atau UI generik.
+Tes mencakup setiap tahap denial, redaksi sentinel, tidak ada diagnostic di
+produksi/nonloopback, single-use state, sesi tetap tidak terbit saat gagal,
+serta regresi API dan browser OIDC sintetis yang relevan.
