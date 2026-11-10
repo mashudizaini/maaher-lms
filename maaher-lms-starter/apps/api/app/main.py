@@ -7,7 +7,9 @@ from .auth_lifecycle import router as lifecycle_router
 from .mfa import router as mfa_router
 from .oidc import router as oidc_router
 from .courses import router as courses_router
-from .course_limits import admit_course_write
+from .course_ingress import CourseIngress
+from .enrollment import router as enrollment_router
+from .learning import router as learning_router
 from .traffic import ANONYMOUS_PATHS, admit
 from .auth_support import limited
 
@@ -17,27 +19,12 @@ app.include_router(lifecycle_router)
 app.include_router(mfa_router)
 app.include_router(oidc_router)
 app.include_router(courses_router)
+app.include_router(enrollment_router)
+app.include_router(learning_router)
 
 
 @app.middleware("http")
 async def private_responses(request, call_next):
-    if request.method == 'POST' and (request.url.path == '/courses' or request.url.path.startswith('/courses/')):
-        try:
-            allowed = await run_in_threadpool(admit_course_write, request)
-        except HTTPException as error:
-            return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers={'Cache-Control': 'no-store'})
-        except DatabaseError:
-            return JSONResponse({'detail': 'Layanan penyimpanan sementara tidak tersedia'}, status_code=503, headers={'Cache-Control': 'no-store'})
-        if not allowed:
-            return JSONResponse({'detail': 'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi'}, status_code=429,
-                                headers={'Retry-After': '60', 'Cache-Control': 'no-store'})
-        body = bytearray()
-        async for chunk in request.stream():
-            body.extend(chunk)
-            if len(body) > 262144:
-                return JSONResponse({'detail': 'Permintaan terlalu besar'}, status_code=413,
-                                    headers={'Cache-Control': 'no-store'})
-        request._body = bytes(body)
     if request.method == 'POST' and request.url.path in ANONYMOUS_PATHS:
         try:
             allowed = await run_in_threadpool(admit, request)
@@ -54,6 +41,9 @@ async def private_responses(request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     return response
+
+
+app.add_middleware(CourseIngress)
 
 
 @app.get("/healthz")

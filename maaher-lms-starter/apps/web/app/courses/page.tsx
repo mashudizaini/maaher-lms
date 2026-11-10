@@ -116,7 +116,7 @@ export default function Courses() {
 
   return <main className="courses-page">
     <header className="studio-header"><div><p className="eyebrow">MAAHER LMS / PENGELOLAAN</p><h1>Kursus &amp; materi</h1><p>Susun langkah belajar coding, satu pelajaran pada satu waktu.</p></div>
-      <nav aria-label="Navigasi utama"><a href="/">Beranda</a><a href="/auth">Akun &amp; keluar</a></nav></header>
+      <nav aria-label="Navigasi utama"><a href="/">Beranda</a><a href="/enrollments">Cohort &amp; enrollment</a><a href="/auth">Akun &amp; keluar</a></nav></header>
     <div className="studio-toolbar"><label>Organisasi <select aria-label="Organisasi kursus" value={tenant} disabled={busy} onChange={event => switchContext(() => selectTenant(event.target.value))}>
       <option value="">Pilih organisasi</option>{memberships.map(row => <option key={row.tenant_id} value={row.tenant_id}>{row.name}</option>)}</select></label>
       <button type="button" disabled={busy || !tenant} onClick={() => switchContext(async () => { setLesson(null); if (course) await openCourse(course.id); await list(); })}>Muat ulang kursus</button></div>

@@ -1,5 +1,12 @@
 # LMS-02 — status development dan review
 
+**Pembaruan 11 November:** pemilik menyampaikan re-review fe54142 dengan verdict
+**APPROVED_WITH_NOTES untuk delta kursus**. Koreksi delapan LOW: tujuh FIXED,
+request._body masih OPEN saat direview. Lihat [relay re-review](../reviews/LMS-02-rereview-relay-20261111.md).
+Kelanjutan ASGI/worker berada pada branch LMS-03 dan menunggu review sendiri;
+tabel/status pending di bawah adalah snapshot sebelum laporan re-review tersebut.
+Auth parent belum direview penuh dan tidak dicakup verdict ini.
+
 Source awal yang UAT Mac: **f38c231**. Laporan Mac/manual dari pemilik direkam pada
 [UAT development](LMS-02-DEV-UAT-20261110.md). Dokumen ini membedakan bukti
 otomatis, laporan manual dan pekerjaan yang masih pending. Delta review setelah

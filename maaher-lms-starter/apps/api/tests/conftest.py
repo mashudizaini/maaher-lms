@@ -60,7 +60,7 @@ def database():
         with pytest.raises(RuntimeError, match='allow_course_data_loss'):
             command.downgrade(config, "0005_dev_totp")
         with psycopg.connect(owner_url) as db:
-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0007_course_review'
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0008_enrollment'
             assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
         config.cmd_opts = SimpleNamespace(x=['allow_course_data_loss=yes'])
         try:
@@ -117,11 +117,11 @@ def database():
                           "invitations", "password_resets", "mfa_factors", "auth_events", "auth_mail_outbox",
                           "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit",
                           "oidc_identities", "oidc_login_flows", "oidc_sessions",
-                          "courses", "courses_teachers", "course_modules", "course_lessons", "course_write_limits"):
+                          "courses", "courses_teachers", "course_modules", "course_lessons", "course_write_limits", "cohorts", "enrollments"):
                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
         command.upgrade(config, "head")
         with psycopg.connect(owner_url) as db:
-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0007_course_review"
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_enrollment"
         yield owner_url
     finally:
         if previous is None:

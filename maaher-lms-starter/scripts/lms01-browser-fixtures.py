@@ -38,6 +38,11 @@ def main():
             db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'unused-synthetic-password')",(uid,email))
             db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,%s)",(uuid4(),payload['tenant'],uid,role))
             result={'user':str(uid),'email':email}
+        elif operation == 'student-seed':
+            uid=uuid4();email=f'{uid}@example.invalid';password='Synthetic student password 123!'
+            db.execute('INSERT INTO users(id,email,password_hash) VALUES(%s,%s,%s)',(uid,email,passwords.hash(password)))
+            db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'student')",(uuid4(),payload['tenant'],uid))
+            result={'user':str(uid),'email':email,'password':password}
         elif operation == 'course-budget':
             # Test-only owner bridge; never part of the API/runtime image.
             assert payload['mode'] in {'exhaust','expire'}

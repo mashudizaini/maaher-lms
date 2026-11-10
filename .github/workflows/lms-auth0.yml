@@ -2,7 +2,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, feat/LMS-01-auth0-development, feat/LMS-02-course-management]
+    branches: [main, feat/LMS-01-auth0-development, feat/LMS-02-course-management, feat/LMS-03-enrollment]
 permissions:
   contents: read
 
@@ -118,6 +118,20 @@ jobs:
           TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_courses_browser_ci
           TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_courses_browser_ci
         run: python scripts/test-lms01-browser.py --oidc --dev-totp --courses
+      - name: Create separate enrollment browser test database
+        run: |
+          python - <<'PYTEST'
+          import os,psycopg
+          with psycopg.connect(os.environ['TEST_MIGRATION_DATABASE_URL'],autocommit=True) as db:
+              db.execute('CREATE DATABASE maaher_test_enrollment_browser_ci')
+          PYTEST
+      - name: Enrollment and student access browser regression
+        env:
+          TEST_MIGRATION_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/maaher_test_enrollment_browser_ci
+          TEST_DATABASE_URL: postgresql://maaher_api@127.0.0.1:5432/maaher_test_enrollment_browser_ci
+          TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_enrollment_browser_ci
+          TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_enrollment_browser_ci
+        run: python scripts/test-lms01-browser.py --oidc --dev-totp --enrollment
   web:
     runs-on: ubuntu-latest
     steps:

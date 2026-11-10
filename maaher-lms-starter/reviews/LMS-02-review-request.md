@@ -1,5 +1,10 @@
 # Permintaan re-review independen LMS-02
 
+**Status historis:** re-review fe54142 kini dilaporkan APPROVED_WITH_NOTES oleh
+pemilik; lihat LMS-02-rereview-relay-20261111.md. Prompt di bawah berasal dari
+sebelum hasil tersebut dan HEAD di dalamnya merujuk branch LMS-02, bukan LMS-03.
+Untuk delta enrollment/ASGI baru gunakan LMS-03-review-request.md, base fe54142.
+
 Disiapkan **author Codex**, bukan laporan Claude. Pemilik menyampaikan review
 awal dengan tujuh LOW tanpa BLOCKER/HIGH/MEDIUM; ringkasannya dicatat dengan
 provenance pada [review relay](LMS-02-review-relay-20261110.md). Verdict formal

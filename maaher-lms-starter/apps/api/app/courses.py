@@ -53,7 +53,17 @@ class Resource(Input):
 class Lesson(Title, Version):
     content: str = Field(default="", max_length=30000)
     resources: list[Resource] = Field(default_factory=list, max_length=10)
-    _markdown = field_validator("content")(validate_markdown)
+
+
+
+def validate_lesson_content(body):
+    # Called inside synchronous endpoints, which FastAPI runs in a worker.
+    # CommonMark adversarial input must not block the ASGI event loop.
+    try:
+        validate_markdown(body.content)
+    except ValueError:
+        raise HTTPException(422, [{"type":"value_error", "loc":["body","content"],
+            "msg":"Materi hanya boleh memakai tautan HTTPS publik tanpa karakter tersembunyi"}]) from None
 
 
 class Teacher(Version):
@@ -271,6 +281,7 @@ def delete_module(cid: UUID, mid: UUID, body: Version, actor=Depends(manager), d
 
 @router.post("/{cid}/modules/{mid}/lessons", dependencies=[Depends(verify_origin)], status_code=201)
 def create_lesson(cid: UUID, mid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
+    validate_lesson_content(body)
     locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid)
     count = db.execute("SELECT count(*) AS n FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s", (actor.tenant_id, cid, mid)).fetchone()["n"]
     if count >= 50: raise HTTPException(409, "Batas 50 pelajaran per modul telah tercapai")
@@ -290,6 +301,7 @@ def lesson_detail(cid: UUID, mid: UUID, lid: UUID, actor=Depends(manager), db=De
 
 @router.post("/{cid}/modules/{mid}/lessons/{lid}", dependencies=[Depends(verify_origin)])
 def edit_lesson(cid: UUID, mid: UUID, lid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
+    validate_lesson_content(body)
     locked(db, actor, cid, body.version); draft(db, actor, cid)
     row = db.execute("UPDATE course_lessons SET title=%s,content=%s,resources=%s WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id",
         (body.title, body.content, Jsonb([r.model_dump() for r in body.resources]), actor.tenant_id, cid, mid, lid)).fetchone()

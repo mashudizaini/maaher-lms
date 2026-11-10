@@ -55,7 +55,10 @@ def main():
     parser.add_argument('--oidc', action='store_true', help='Use the test-only signed OIDC provider probe')
     parser.add_argument('--dev-totp', action='store_true', help='Exercise local synthetic TOTP assurance with --oidc')
     parser.add_argument('--courses', action='store_true', help='Run course authoring after synthetic OIDC login')
+    parser.add_argument('--enrollment', action='store_true', help='Run enrollment and student access browser tests with --oidc')
     args = parser.parse_args()
+    if args.enrollment and not args.oidc:
+        parser.error('--enrollment requires --oidc')
     if args.dev_totp and not args.oidc:
         parser.error('--dev-totp requires --oidc')
     if args.courses and not args.oidc:
@@ -88,6 +91,8 @@ def main():
         test_file = 'oidc.spec.ts'
         if args.courses:
             test_file = 'courses.spec.ts'
+        if args.enrollment:
+            test_file = 'enrollment.spec.ts'
         env.update(AUTH0_DOMAIN='browser-tests.us.auth0.com', AUTH0_CLIENT_ID='synthetic-browser-client',
                    AUTH0_CLIENT_SECRET='synthetic-browser-client-secret-not-a-real-credential',
                    PYTHONPATH=os.pathsep.join((str(ROOT/'apps/api'),str(ROOT/'apps/api/tests'))))

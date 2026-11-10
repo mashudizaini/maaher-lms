@@ -127,9 +127,9 @@ def test_m6_definers_are_nonlogin_nonsuperuser_minimum_privilege(identity):
                     WHERE a.grantee=0 AND a.privilege_type='EXECUTE') AS public_execute
              FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
              WHERE n.nspname='public' AND p.prosecdef""").fetchall()
-        assert len(rows) == 11
+        assert len(rows) == 14
         assert {row['proname'] for row in rows} == {'resolve_session','tenant_admin','list_members','change_member',
-            'reset_password','accept_invitation','authorize_mfa_request','retain_auth_data','runtime_identity','course_member_role','course_assignment_guard'}
+            'reset_password','accept_invitation','authorize_mfa_request','retain_auth_data','runtime_identity','course_member_role','course_assignment_guard','course_student_access','enrollment_lock_student','enrollment_guard'}
         for row in rows:
             assert row['rolname']=='maaher_definer'
             assert not any(row[k] for k in ('rolsuper','rolcanlogin','rolcreaterole','public_execute'))
