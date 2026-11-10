@@ -123,6 +123,42 @@ tanpa faktor alternatif. Claim yang diterbitkan adalah
    untuk dibagikan; API memverifikasi signature, issuer/audience/nonce,
    auth_time yang fresh, `amr=mfa` dan assurance development sendiri.
 
+## Membuat akun email/password saat belum pernah mendaftar
+
+Akun aplikasi Auth0 dapat dibuat oleh pemilik Dashboard; tidak perlu menunggu
+tautan Sign up pada halaman login. Login Google mempunyai profil/sub sendiri
+dan tidak otomatis menyediakan password untuk login email.
+
+1. Pilih tenant Development Maaher pada Dashboard. Buka **Authentication →
+   Database**, pilih connection database yang digunakan (default biasanya
+   **Username-Password-Authentication**), lalu tab **Applications** dan aktifkan
+   **Maaher LMS Development**. Pada beberapa tampilan, connection juga dapat
+   diaktifkan dari tab Connections aplikasi. Jika belum ada database connection,
+   buat connection jenis Database untuk aplikasi Development ini.
+2. Buka **User Management → Users → Create User**. Pilih database connection
+   tadi, isi email akun uji milik sendiri dan password yang kuat, lalu Create.
+   Pemilik mengisi password sendiri; tidak mengirimkannya ke agent/chat.
+3. Buka user yang baru dibuat dan tambahkan boolean
+   `"maaher_dev_totp_approved": true` pada **app_metadata**, pertahankan field
+   lain, lalu Save. User ID database biasanya berawalan `auth0|`.
+4. Pastikan OTP enabled serta Action **Maaher Development TOTP** yang sudah
+   Deploy dipasang pada Login flow dengan Client ID Development yang benar,
+   sebagaimana bagian 3 di atas. Akun email tetap memerlukan policy tersebut
+   agar QR/enrollment dapat diminta.
+5. Buka LMS `/auth` → **Masuk dengan Auth0**. Pada halaman Auth0, isi email dan
+   password akun yang baru dibuat, lalu Continue/Login. Gunakan form pada
+   halaman Auth0; form email/password lokal LMS memakai sistem identitas lain.
+   Lanjutkan QR/OTP sesuai bagian 4, kemudian binding setelah pemilik memverifikasi
+   enrollment. Callback pertama tanpa binding tetap dapat ditolak.
+
+Email Gmail yang sama dapat digunakan untuk akun database, tetapi sub profilnya
+dapat berbeda dari login Google. Persetujuan dan binding harus merujuk ke user
+yang benar-benar digunakan; jangan auto-link berdasarkan kesamaan email.
+Nama menu dapat berbeda antar tampilan/peran Dashboard. Jika Create User tidak
+tersedia, periksa akses pengelola tenant; public Sign up hanya dapat digunakan
+jika database connection memang mengizinkannya. Jangan mengaktifkan signup
+publik atau melonggarkan policy demi melewati masalah konfigurasi.
+
 ## Jika login Google kembali ke LMS tanpa QR
 
 Persetujuan **Authorize** Google adalah tahap login/consent identitas; enrollment
