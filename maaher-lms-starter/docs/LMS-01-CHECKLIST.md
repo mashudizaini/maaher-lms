@@ -1,5 +1,12 @@
 # LMS-01 — checklist setelah review independen Claude
 
+**Status terbaru 10 November 2026:** pemilik meneruskan hasil Codex Mac bahwa
+login Auth0 dev-TOTP, pemilihan organisasi dan logout berhasil, dengan 0 session
+tersisa. Lihat [catatan UAT lokal](LMS-01-DEV-UAT-20261110.md). Head source auth
+0005; hasil cloud terbaru 170 API/unit, 12 tes scripts dan satu browser OIDC
+dev-TOTP pada delta diagnosis. Bagian-bagian di bawah adalah snapshot historis.
+Produksi/review independen tetap belum ditutup oleh UAT development ini.
+
 Tahap Auth0/OIDC terbaru ada di [handoff Auth0](LMS-01-AUTH0-HANDOFF.md):
 migration 0004, binding identity, session staff dan guard fallback. Provider
 disetujui pemilik tetapi tenant live/first-root/recovery belum tersedia.
