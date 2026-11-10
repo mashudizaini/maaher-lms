@@ -123,6 +123,56 @@ tanpa faktor alternatif. Claim yang diterbitkan adalah
    untuk dibagikan; API memverifikasi signature, issuer/audience/nonce,
    auth_time yang fresh, `amr=mfa` dan assurance development sendiri.
 
+## Jika login Google kembali ke LMS tanpa QR
+
+Persetujuan **Authorize** Google adalah tahap login/consent identitas; enrollment
+OTP Auth0 merupakan langkah berikutnya. Login Google didukung Action Post Login.
+QR yang tidak tampil belum menunjukkan bug API atau bahwa login MFA berhasil.
+Binding kosong memang menolak callback akhir, tetapi tidak mencegah Auth0
+menampilkan enrollment QR sebelumnya. Jangan membuat binding untuk mengatasi
+enrollment yang belum pernah diselesaikan.
+
+1. Buka Dashboard Auth0 dan pilih tenant
+   `dev-hl2un81cojtbhbv4.us.auth0.com`. Di **User Management → Users**, buka
+   profil yang baru dipakai **login Google ke LMS**; User ID biasanya berawalan
+   `google-oauth2|`. Cocokkan connection dan waktu login. Profil email/password
+   dengan email yang sama dapat mempunyai User ID berbeda; approval tidak
+   otomatis dibagikan dan akun tidak boleh di-auto-link berdasarkan email.
+2. Pada **app_metadata** profil Google sintetis milik Anda itu, tambahkan
+   `"maaher_dev_totp_approved": true` sebagai boolean. Pertahankan field lain dan
+   Save. Nilai string `"true"` atau flag di user_metadata tidak diterima.
+3. Periksa versi **Maaher Development TOTP** sudah Deploy, dipasang pada
+   **Actions → Flows → Login** dan perubahan flow sudah Apply. Secret Action
+   **MAAHER_DEV_CLIENT_ID** harus sama dengan Client ID aplikasi Development.
+   Periksa OTP aktif. Bila Action FIDO2 lama masih menargetkan aplikasi
+   Development yang sama, ikuti langkah 3.4 di atas; produksi tetap terpisah.
+4. Periksa apakah akun sudah memiliki faktor OTP. QR hanya untuk enrollment
+   baru; akun yang sudah enrolled seharusnya diminta kode OTP. Bila faktor yang
+   tercatat tidak Anda kenal, hentikan proses dan periksa kepemilikan akun;
+   jangan menghapus faktor atau membuat binding hanya agar login lolos.
+5. Setelah konfigurasi disimpan, mulai login baru lewat tombol LMS, bukan
+   memakai URL callback/authorization lama. Gunakan akun Google yang sama.
+   Selesaikan QR/OTP sendiri dan periksa enrollment sebelum binding offline.
+
+Jika masih kembali tanpa QR maupun challenge OTP, **Monitoring → Logs** →
+percobaan terakhir untuk aplikasi Development. Catat hanya Type dan
+Description/pesan error Action yang telah disamarkan. Jangan membagikan JSON
+log lengkap, email/nama, URL callback, token, QR atau kode OTP.
+
+| Pesan yang ada pada source Action | Pemeriksaan yang sesuai |
+|---|---|
+| `Owner approval for synthetic development is required` | Flag app_metadata boolean pada **profil yang benar-benar login**, termasuk profil Google |
+| `Development login policy is not configured` | Secret Action MAAHER_DEV_CLIENT_ID tersedia pada versi yang sudah Deploy |
+| `Verified staff enrollment is required` | Action FIDO2 lama masih berjalan; periksa flow/Client ID Development |
+| `Staff login policy is not configured` | Action FIDO2 lama berjalan dengan konfigurasinya belum lengkap |
+| Pesan faktor/fitur tidak tersedia | OTP enabled dan entitlement Action enrollment/challenge; catat pesan sebenarnya |
+| Log login sukses tetapi LMS menolak | Keberhasilan IdP belum membuktikan MFA/binding; periksa Action, klaim wajib dan callback lokal tanpa mencetak nilainya |
+
+Tabel ini menghubungkan pesan dengan pemeriksaan, bukan bukti penyebab pada
+tenant live. Jangan menghapus pemeriksaan MFA/assurance atau menyalin approval
+ke akun lain tanpa verifikasi pemilik. Tes sintetis tidak menggantikan log dan
+enrollment nyata ini.
+
 ## 5. Verifikasi teknis dan hasil nyata
 
 Jalankan checker dari folder source terbaru:
