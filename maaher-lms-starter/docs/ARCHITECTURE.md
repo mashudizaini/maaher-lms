@@ -29,8 +29,39 @@ All tenant-owned relations carry tenant_id; enforce composite FK where possible 
 4. Tenant scope in job payloads, object storage keys/policies, signed download URLs, cache keys and logs. No cross-tenant object ID lookup.
 5. Integration tests: cross-tenant reads/writes/downloads denied with direct identifiers; membership revocation stops access; teacher cannot grade unassigned course.
 
-## Auth design decision pending
-For initial implementation, select vetted OIDC or secure server-managed session auth with cookie `HttpOnly`, `Secure`, `SameSite` and CSRF protection where needed. Do not implement custom crypto or ad-hoc JWT authentication. Require MFA for operator/admin. Identity provider and transactional email service need a separate ADR after server audit.
+## Auth implementation and external decisions
+Pemilik menyetujui Auth0/OIDC untuk admin/operator pada 10 November 2026.
+Implementasi development tahap 1 dan batas produksinya dijelaskan pada
+[ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada
+[AUTH0-SETUP](AUTH0-SETUP.md). Keputusan provider ini menggantikan status
+"belum dipilih" di catatan historis, tanpa membuka gate produksi/operator.
+
+LMS-01 implements PostgreSQL-backed opaque sessions with `HttpOnly`, `Secure`,
+`SameSite=Lax` cookies and exact Origin checks on mutations. Argon2 hashing,
+PyOTP TOTP and Fernet encryption use maintained libraries; no custom crypto or
+ad-hoc JWT. See [ADR-001](adr/001-auth-lifecycle.md) for implementation, scope,
+secret management and remaining external decisions.
+Independent review hardening is specified in
+[ADR-002](adr/002-auth-security-review.md): the tenant runtime role cannot
+read password hashes or mint sessions; a separate restricted auth credential
+holds verifier privileges. Tenant RLS binds to a validated session capability,
+and definer functions have a dedicated NOLOGIN non-superuser owner with fixed
+search_path and minimum grants. COMMIT precedes successful responses/cookies.
+
+MFA is mandatory for tenant-admin operations and every newly authenticated
+admin session. An enrolled user's other tenant operations also require MFA.
+There is no platform-operator API or global role in this implementation;
+offline provisioning is local-development only. **Operator access still requires
+MFA on the host/identity/credential-management workflow before use outside local
+synthetic development. This requirement is not satisfied by admin TOTP alone.**
+Operator identity, recovery controls and transactional email provider require
+server audit, configuration and end-to-end verification. Until those gates and
+independent review pass, LMS-01 is not complete or approved for real learners.
+Password/email possession cannot bootstrap or replace MFA. The implemented
+operator authorization/recovery adapter is deliberately restricted to synthetic
+test databases. Auth0/OIDC is now selected; production enrollment, root trust,
+recovery and operator workflow still require implementation/verification and
+independent review. Existing password-only enrollments are not automatically trusted.
 
 ## Coding lab / auto-grader: high-risk system
 - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.

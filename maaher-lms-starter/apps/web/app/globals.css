@@ -1,0 +1,8 @@
+body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 760px; padding: 0 1rem; }
+fieldset { border: 0; padding: 0; }
+input, select, button { max-width: 100%; padding: .45rem; }
+input[readonly] { width: 90%; }
+section { margin-block: 1.5rem; }
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: .4rem; text-align: left; border-bottom: 1px solid #888; overflow-wrap: anywhere; }
+:focus-visible { outline: 3px solid #2458a6; outline-offset: 2px; }

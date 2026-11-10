@@ -1,0 +1,551 @@
+{
+  "date_wib": "2026-11-10",
+  "phase": "LMS-01-OIDC development, Auth0 choice explicitly approved; tenant/application not yet created",
+  "previous_cloud_archive_sha256": "7e306471ec06402887d79671c4aa1af35b93cbe76adb560c7a3a565213423993",
+  "owner_input_archive_sha256": "638a2f79784a19da26d5f107c43b0b5f80158066604909e6b1dc04654d51f24a",
+  "original_claude_report_sha256": "004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce",
+  "incremental_from_previous_cloud_source": {
+    "path": "reviews/LMS-01-auth0-oidc.patch",
+    "sha256": "acf3d8cd7b0b280f132270551a58fb3a20c867757a70950a2d3016166632b973",
+    "files": [
+      {
+        "path": ".env.example",
+        "before_sha256": "36033ae2513e1adb1269b235dff9b513327bcee0c95dea96b716739a19680242",
+        "after_sha256": "43333246faac417974dd1cf691b14f2a8c35982b5a2c211dc4566256f625edb2"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "before_sha256": "35a8fd17d1e3d1e962603a08ffbd46aa1994bd53251b0983b25fe833311c058f",
+        "after_sha256": "d6fd88a27c441413e40f2726eca526b683da468109c48ebdb8956cc95632d166"
+      },
+      {
+        "path": "README.md",
+        "before_sha256": "10dc32867d8b1c3673566d22392d3bf3e9a33c63dbd67e1c940cd23745fccbc5",
+        "after_sha256": "dcb2abf52fef11bf82d32d32ca9f5c52d011c73c39f43eec0a7a04d02022a345"
+      },
+      {
+        "path": "apps/api/app/auth.py",
+        "before_sha256": "48045881ed888764816873cea07f55164659a1075ddd44d824a232d2a589c1ce",
+        "after_sha256": "f41371610d3dc389627f0578e6aeb207273fa43855c231f23b76bd7e103d29d8"
+      },
+      {
+        "path": "apps/api/app/auth_lifecycle.py",
+        "before_sha256": "2136c2abc51012fabd5689ea238d66625e63a156c8a052e7d2a01d5939194912",
+        "after_sha256": "2eddad723ca8b4214cfa89f4c1c2f64548bfe9f3f75d62c27be48decaafa49d5"
+      },
+      {
+        "path": "apps/api/app/database.py",
+        "before_sha256": "ea0a1c07602d4cca55012678b189a84b4ab9e613a66a1e260fb65944731b03e5",
+        "after_sha256": "400e8077e6c7008c7246344991e313db12a1dabcee14ed7398fc3c4a17d510ae"
+      },
+      {
+        "path": "apps/api/app/key_rotation.py",
+        "before_sha256": "a51941bd3fe753ae586fb7ca07115ea38a37be9cf6d80c6aa12f0dc66095110c",
+        "after_sha256": "8c012f277aca173320ff917c037cb70fcf4562a77e240d371bb33ed5fa7bed92"
+      },
+      {
+        "path": "apps/api/app/main.py",
+        "before_sha256": "a72fbb98dea43c5b9cd605dd7aabf0af888eb50ddf4fcbd935c95922af08f022",
+        "after_sha256": "96e7ba00fd4193d19bdfeaa7ce1d283cc1d1e4ec5d8cae61eb218eadeaed8f80"
+      },
+      {
+        "path": "apps/api/app/mfa.py",
+        "before_sha256": "7b8eb81a5046c5aba6734fe702d1e1f53180b6799fa8187a517a8ce369e60f12",
+        "after_sha256": "36b1362590e414b775da6dc0b1976aa5871ad2e915bf67928e95fb84c611549e"
+      },
+      {
+        "path": "apps/api/app/oidc.py",
+        "before_sha256": null,
+        "after_sha256": "f132877b4d20c0d7a7a939e1a491f645ce795015dadbb3732de6e8a39f5abb3c"
+      },
+      {
+        "path": "apps/api/app/oidc_provision.py",
+        "before_sha256": null,
+        "after_sha256": "d623e5d9ef3dbbc6c8a295be8454b0db7ae48c52b75188d7dd6b205b7190711a"
+      },
+      {
+        "path": "apps/api/app/traffic.py",
+        "before_sha256": "3f26cbec2bb79e21f9c2808bf73ab6563cb7df4744910f305aa2b8242d228079",
+        "after_sha256": "4e3b28df605930bd14ba210a885b7b1867275a3a5907123d9c18faa834efaff7"
+      },
+      {
+        "path": "apps/api/migrations/auth0_oidc.sql",
+        "before_sha256": null,
+        "after_sha256": "c691bafdc439824cecffb3b1fdd176778bdd4db74574922ab12d1d24673f62d9"
+      },
+      {
+        "path": "apps/api/migrations/versions/0004_auth0_oidc.py",
+        "before_sha256": null,
+        "after_sha256": "56e6e6fc42c51340ccc6c8324c2a422935eae2cba7f7fe780c6369ad98aee881"
+      },
+      {
+        "path": "apps/api/requirements-dev.lock",
+        "before_sha256": "058ebeea38849c66330a9587bb07a0e39197ebb0b2cc404062f168278be24826",
+        "after_sha256": "15b8b2581c783340bb1edb6321c1875e0f89a85794921f3264f72b6475d8f500"
+      },
+      {
+        "path": "apps/api/requirements.lock",
+        "before_sha256": "94a37b7c549dda97a94e50876572e6143bc8a57bb3a9e2645673e643b6b53b42",
+        "after_sha256": "b2dbc569db789b5b397945f0b2cad56617b310a76520098a13496ca7f4363cf9"
+      },
+      {
+        "path": "apps/api/requirements.txt",
+        "before_sha256": "ab6bcd96fa6a4629b69ce0af6f6b8816341e2828b7563bb6b5e7275f95892e2c",
+        "after_sha256": "d59b3c0a8d97fc9a6d012e85c677d41c68c04c3728aac2afef629537855595f3"
+      },
+      {
+        "path": "apps/api/tests/conftest.py",
+        "before_sha256": "48f59e93bc89c081b95001b004f7e20280c2a9278e94750e846d724e5af9f7da",
+        "after_sha256": "231245a4de5d9b87ac2d19c9e763e2973eddb41d6421667992eaab9d98e658a3"
+      },
+      {
+        "path": "apps/api/tests/oidc_browser_probe.py",
+        "before_sha256": null,
+        "after_sha256": "c8a05981827768f188cc9e9d52386dd5574a43e8cb945ce915c530bbc0381718"
+      },
+      {
+        "path": "apps/api/tests/test_oidc.py",
+        "before_sha256": null,
+        "after_sha256": "fa373a1f780d7a5ed1146528464d61a963a701ca04078feddf4314616fa944fa"
+      },
+      {
+        "path": "apps/api/tests/test_review_regressions.py",
+        "before_sha256": "a40c4cc80db324f90529b61e0505031e96ba2d10e5312134bb95d72ed7d0a75a",
+        "after_sha256": "762bcc7ad9ba181a303435fa3f36b79479a9b62d1f18005fcb94e465565cbd5d"
+      },
+      {
+        "path": "apps/web/app/api/auth/[...path]/route.ts",
+        "before_sha256": "78ccb350c2c4ec11ce860b8f88e3ff01cedc6cc4d9cab8230b1ded7fbee6ccd4",
+        "after_sha256": "04b7cd95f447f885e21bb6132db28693101f39277e3e46654e0cd5b35654dd64"
+      },
+      {
+        "path": "apps/web/app/auth/page.tsx",
+        "before_sha256": "fc9ba171f2d5d91f0b6ff1c3c32c58dc483647de1aaad2ea5dea6dbd6d56d0ab",
+        "after_sha256": "30c6b16414cb894c0f87ae25ac9920c8e6e94f877fb8982388943e9830904751"
+      },
+      {
+        "path": "apps/web/tests/auth.spec.ts",
+        "before_sha256": "461966c7634d7a8147ccee3c1b95c68978f1b945779bf92303837a99ab05ed58",
+        "after_sha256": "dbed4c293876098b14bd97fd02641a85ba9ffcb46f077d8246ba132a1c3c90bf"
+      },
+      {
+        "path": "apps/web/tests/oidc.spec.ts",
+        "before_sha256": null,
+        "after_sha256": "904654244a939307d4e79685b072cb89e85ca165f7856b8a391821ac701b29b0"
+      },
+      {
+        "path": "docker-compose.yml",
+        "before_sha256": "af91b030163ffbdf7ab638de38f71cd2a17f40cb3a6825d403b2c4473f17c74c",
+        "after_sha256": "921192c82753f78416fc334670bf606ce914cf49eb08a2b325898468c5e8d059"
+      },
+      {
+        "path": "docs/ARCHITECTURE.md",
+        "before_sha256": "9e9fab8e2c6ea3a0a0ef5d8e2b40383d7d255886e876b1cc9383f1cc6fdc8837",
+        "after_sha256": "dea4321e40abe48309a393dd2ed37e9baf1a00d6657523f7f5a4d7b0c17ce752"
+      },
+      {
+        "path": "docs/AUTH0-SETUP.md",
+        "before_sha256": null,
+        "after_sha256": "6fe8a7a91cb86f9cae12597194f02d92060382efeb9879ef97741694eaf1671b"
+      },
+      {
+        "path": "docs/LMS-01-AUTH0-HANDOFF.md",
+        "before_sha256": null,
+        "after_sha256": "00d7f366b5bba2c1825007e3d1dcd7a7bd7cf80ff103bea429c6cb6b1f7b7f5b"
+      },
+      {
+        "path": "docs/LMS-01-CHECKLIST.md",
+        "before_sha256": "ac5bac741b17d4d9f2c5f9281a6f8304fd4784494bcac1a627719b993d819ae1",
+        "after_sha256": "5157929c3890b2ee684e0723053e1946ef964715ec980a10de4c1385f31b0870"
+      },
+      {
+        "path": "docs/LMS-01-HANDOFF.md",
+        "before_sha256": "7132282ef54107e72f501aef21a10b97035d1ee0d22efb4c2f37ec10ce4dac6d",
+        "after_sha256": "d676e02983e81a69a82c79ddc32ac4d7a00806acaf672dda5a98649f13d0a784"
+      },
+      {
+        "path": "docs/adr/003-production-identity-recommendation.md",
+        "before_sha256": null,
+        "after_sha256": "e55f559acb4cfce535e3ff87bab327ad6a411b8cde9d920ffefc2ffe4082d727"
+      },
+      {
+        "path": "docs/adr/004-auth0-development-login.md",
+        "before_sha256": null,
+        "after_sha256": "2fecc16cc13fdb97836c01e52d174974bbe1774569d74f149cf1bfe188c4a8f4"
+      },
+      {
+        "path": "docs/tickets/LMS-01-OIDC.md",
+        "before_sha256": null,
+        "after_sha256": "28d5b57fc045f55b43899571d882800db7ceb39b514517dd46f5befdc37eaf97"
+      },
+      {
+        "path": "infra/auth0/staff-post-login.cjs",
+        "before_sha256": null,
+        "after_sha256": "f0a6462be665546dac97749f66511019af290e1c62a66f96ee8f22455be7689b"
+      },
+      {
+        "path": "infra/auth0/staff-post-login.test.cjs",
+        "before_sha256": null,
+        "after_sha256": "56f3a256e39aef0d0328473ae5060895c0e67cf432acd833f67fc582523a1723"
+      },
+      {
+        "path": "scripts/lms01-browser-fixtures.py",
+        "before_sha256": "3480465038a4304d60c0dac59cf9b2da83cdee5b6c562f42a6935e79250af913",
+        "after_sha256": "75dbe5a5ee3d752134a9c777de6f7477fb467ee6e71b83bd69c272862eb7d372"
+      },
+      {
+        "path": "scripts/test-lms01-browser.py",
+        "before_sha256": "fdd9322e2e8fcec1e2ca6d8ae330aa1d40f809a1e1996a97a7b9ce1bb892d1c3",
+        "after_sha256": "ce4c09d4fa2e37af4fe3aaae361c96b92e475f77b0de867ff14a02f107e27d9e"
+      }
+    ]
+  },
+  "cumulative_from_owner_review_zip": {
+    "path": "reviews/LMS-01-auth0-cumulative.patch",
+    "sha256": "3319f753de070bd26608f25cc7189370275a4499884343a7744545ef035e351b",
+    "files": [
+      {
+        "path": ".env.example",
+        "before_sha256": "36033ae2513e1adb1269b235dff9b513327bcee0c95dea96b716739a19680242",
+        "after_sha256": "43333246faac417974dd1cf691b14f2a8c35982b5a2c211dc4566256f625edb2"
+      },
+      {
+        "path": ".github/workflows/ci.yml",
+        "before_sha256": "35a8fd17d1e3d1e962603a08ffbd46aa1994bd53251b0983b25fe833311c058f",
+        "after_sha256": "d6fd88a27c441413e40f2726eca526b683da468109c48ebdb8956cc95632d166"
+      },
+      {
+        "path": "README.md",
+        "before_sha256": "10dc32867d8b1c3673566d22392d3bf3e9a33c63dbd67e1c940cd23745fccbc5",
+        "after_sha256": "dcb2abf52fef11bf82d32d32ca9f5c52d011c73c39f43eec0a7a04d02022a345"
+      },
+      {
+        "path": "apps/api/app/auth.py",
+        "before_sha256": "48045881ed888764816873cea07f55164659a1075ddd44d824a232d2a589c1ce",
+        "after_sha256": "f41371610d3dc389627f0578e6aeb207273fa43855c231f23b76bd7e103d29d8"
+      },
+      {
+        "path": "apps/api/app/auth_lifecycle.py",
+        "before_sha256": "2136c2abc51012fabd5689ea238d66625e63a156c8a052e7d2a01d5939194912",
+        "after_sha256": "2eddad723ca8b4214cfa89f4c1c2f64548bfe9f3f75d62c27be48decaafa49d5"
+      },
+      {
+        "path": "apps/api/app/database.py",
+        "before_sha256": "ea0a1c07602d4cca55012678b189a84b4ab9e613a66a1e260fb65944731b03e5",
+        "after_sha256": "400e8077e6c7008c7246344991e313db12a1dabcee14ed7398fc3c4a17d510ae"
+      },
+      {
+        "path": "apps/api/app/key_rotation.py",
+        "before_sha256": "a51941bd3fe753ae586fb7ca07115ea38a37be9cf6d80c6aa12f0dc66095110c",
+        "after_sha256": "8c012f277aca173320ff917c037cb70fcf4562a77e240d371bb33ed5fa7bed92"
+      },
+      {
+        "path": "apps/api/app/main.py",
+        "before_sha256": "a72fbb98dea43c5b9cd605dd7aabf0af888eb50ddf4fcbd935c95922af08f022",
+        "after_sha256": "96e7ba00fd4193d19bdfeaa7ce1d283cc1d1e4ec5d8cae61eb218eadeaed8f80"
+      },
+      {
+        "path": "apps/api/app/mfa.py",
+        "before_sha256": "2260ad4fa00424dfd68ef4cebe30f7a5410dc7a89628e171a36739094bd4839f",
+        "after_sha256": "36b1362590e414b775da6dc0b1976aa5871ad2e915bf67928e95fb84c611549e"
+      },
+      {
+        "path": "apps/api/app/oidc.py",
+        "before_sha256": null,
+        "after_sha256": "f132877b4d20c0d7a7a939e1a491f645ce795015dadbb3732de6e8a39f5abb3c"
+      },
+      {
+        "path": "apps/api/app/oidc_provision.py",
+        "before_sha256": null,
+        "after_sha256": "d623e5d9ef3dbbc6c8a295be8454b0db7ae48c52b75188d7dd6b205b7190711a"
+      },
+      {
+        "path": "apps/api/app/traffic.py",
+        "before_sha256": "3f26cbec2bb79e21f9c2808bf73ab6563cb7df4744910f305aa2b8242d228079",
+        "after_sha256": "4e3b28df605930bd14ba210a885b7b1867275a3a5907123d9c18faa834efaff7"
+      },
+      {
+        "path": "apps/api/migrations/auth0_oidc.sql",
+        "before_sha256": null,
+        "after_sha256": "c691bafdc439824cecffb3b1fdd176778bdd4db74574922ab12d1d24673f62d9"
+      },
+      {
+        "path": "apps/api/migrations/versions/0004_auth0_oidc.py",
+        "before_sha256": null,
+        "after_sha256": "56e6e6fc42c51340ccc6c8324c2a422935eae2cba7f7fe780c6369ad98aee881"
+      },
+      {
+        "path": "apps/api/requirements-dev.lock",
+        "before_sha256": "058ebeea38849c66330a9587bb07a0e39197ebb0b2cc404062f168278be24826",
+        "after_sha256": "15b8b2581c783340bb1edb6321c1875e0f89a85794921f3264f72b6475d8f500"
+      },
+      {
+        "path": "apps/api/requirements.lock",
+        "before_sha256": "94a37b7c549dda97a94e50876572e6143bc8a57bb3a9e2645673e643b6b53b42",
+        "after_sha256": "b2dbc569db789b5b397945f0b2cad56617b310a76520098a13496ca7f4363cf9"
+      },
+      {
+        "path": "apps/api/requirements.txt",
+        "before_sha256": "ab6bcd96fa6a4629b69ce0af6f6b8816341e2828b7563bb6b5e7275f95892e2c",
+        "after_sha256": "d59b3c0a8d97fc9a6d012e85c677d41c68c04c3728aac2afef629537855595f3"
+      },
+      {
+        "path": "apps/api/tests/conftest.py",
+        "before_sha256": "48f59e93bc89c081b95001b004f7e20280c2a9278e94750e846d724e5af9f7da",
+        "after_sha256": "231245a4de5d9b87ac2d19c9e763e2973eddb41d6421667992eaab9d98e658a3"
+      },
+      {
+        "path": "apps/api/tests/oidc_browser_probe.py",
+        "before_sha256": null,
+        "after_sha256": "c8a05981827768f188cc9e9d52386dd5574a43e8cb945ce915c530bbc0381718"
+      },
+      {
+        "path": "apps/api/tests/test_mfa_expiry_regressions.py",
+        "before_sha256": null,
+        "after_sha256": "879a8ac6c17f738849df24d3dd7623692d98afe521877ed1d687c84ae3f59210"
+      },
+      {
+        "path": "apps/api/tests/test_oidc.py",
+        "before_sha256": null,
+        "after_sha256": "fa373a1f780d7a5ed1146528464d61a963a701ca04078feddf4314616fa944fa"
+      },
+      {
+        "path": "apps/api/tests/test_review_regressions.py",
+        "before_sha256": "a40c4cc80db324f90529b61e0505031e96ba2d10e5312134bb95d72ed7d0a75a",
+        "after_sha256": "762bcc7ad9ba181a303435fa3f36b79479a9b62d1f18005fcb94e465565cbd5d"
+      },
+      {
+        "path": "apps/web/app/api/auth/[...path]/route.ts",
+        "before_sha256": "78ccb350c2c4ec11ce860b8f88e3ff01cedc6cc4d9cab8230b1ded7fbee6ccd4",
+        "after_sha256": "04b7cd95f447f885e21bb6132db28693101f39277e3e46654e0cd5b35654dd64"
+      },
+      {
+        "path": "apps/web/app/auth/page.tsx",
+        "before_sha256": "fc9ba171f2d5d91f0b6ff1c3c32c58dc483647de1aaad2ea5dea6dbd6d56d0ab",
+        "after_sha256": "30c6b16414cb894c0f87ae25ac9920c8e6e94f877fb8982388943e9830904751"
+      },
+      {
+        "path": "apps/web/playwright.config.ts",
+        "before_sha256": "11ed50901e84cdcca15e4d30f0ee41c7138242a8d91b12e88618f39569b6df65",
+        "after_sha256": "c273cc3a71a5f443839648ad0230a715f9574ccf30bfb52d2bed7c3d8dfe5bb8"
+      },
+      {
+        "path": "apps/web/tests/auth.spec.ts",
+        "before_sha256": "461966c7634d7a8147ccee3c1b95c68978f1b945779bf92303837a99ab05ed58",
+        "after_sha256": "dbed4c293876098b14bd97fd02641a85ba9ffcb46f077d8246ba132a1c3c90bf"
+      },
+      {
+        "path": "apps/web/tests/oidc.spec.ts",
+        "before_sha256": null,
+        "after_sha256": "904654244a939307d4e79685b072cb89e85ca165f7856b8a391821ac701b29b0"
+      },
+      {
+        "path": "docker-compose.yml",
+        "before_sha256": "af91b030163ffbdf7ab638de38f71cd2a17f40cb3a6825d403b2c4473f17c74c",
+        "after_sha256": "921192c82753f78416fc334670bf606ce914cf49eb08a2b325898468c5e8d059"
+      },
+      {
+        "path": "docs/ARCHITECTURE.md",
+        "before_sha256": "9e9fab8e2c6ea3a0a0ef5d8e2b40383d7d255886e876b1cc9383f1cc6fdc8837",
+        "after_sha256": "dea4321e40abe48309a393dd2ed37e9baf1a00d6657523f7f5a4d7b0c17ce752"
+      },
+      {
+        "path": "docs/AUTH0-SETUP.md",
+        "before_sha256": null,
+        "after_sha256": "6fe8a7a91cb86f9cae12597194f02d92060382efeb9879ef97741694eaf1671b"
+      },
+      {
+        "path": "docs/LMS-01-AUTH0-HANDOFF.md",
+        "before_sha256": null,
+        "after_sha256": "00d7f366b5bba2c1825007e3d1dcd7a7bd7cf80ff103bea429c6cb6b1f7b7f5b"
+      },
+      {
+        "path": "docs/LMS-01-CHECKLIST.md",
+        "before_sha256": "dba217a2f5f81bc72268748674c204903877723cfdbb9348bff17279c99727f3",
+        "after_sha256": "5157929c3890b2ee684e0723053e1946ef964715ec980a10de4c1385f31b0870"
+      },
+      {
+        "path": "docs/LMS-01-CLOUD-APPLY.md",
+        "before_sha256": null,
+        "after_sha256": "2fecdf4514a8703d8676e105cc4ad60d6e8075b6213e1b1e259aded583a49132"
+      },
+      {
+        "path": "docs/LMS-01-HANDOFF.md",
+        "before_sha256": "4283e39b3abd84402797ea2ec42be106f9b059f7ec13021455afcbf6e6267305",
+        "after_sha256": "d676e02983e81a69a82c79ddc32ac4d7a00806acaf672dda5a98649f13d0a784"
+      },
+      {
+        "path": "docs/adr/003-production-identity-recommendation.md",
+        "before_sha256": null,
+        "after_sha256": "e55f559acb4cfce535e3ff87bab327ad6a411b8cde9d920ffefc2ffe4082d727"
+      },
+      {
+        "path": "docs/adr/004-auth0-development-login.md",
+        "before_sha256": null,
+        "after_sha256": "2fecc16cc13fdb97836c01e52d174974bbe1774569d74f149cf1bfe188c4a8f4"
+      },
+      {
+        "path": "docs/tickets/LMS-01-OIDC.md",
+        "before_sha256": null,
+        "after_sha256": "28d5b57fc045f55b43899571d882800db7ceb39b514517dd46f5befdc37eaf97"
+      },
+      {
+        "path": "infra/auth0/staff-post-login.cjs",
+        "before_sha256": null,
+        "after_sha256": "f0a6462be665546dac97749f66511019af290e1c62a66f96ee8f22455be7689b"
+      },
+      {
+        "path": "infra/auth0/staff-post-login.test.cjs",
+        "before_sha256": null,
+        "after_sha256": "56f3a256e39aef0d0328473ae5060895c0e67cf432acd833f67fc582523a1723"
+      },
+      {
+        "path": "reviews/LMS-01-cloud-validation.md",
+        "before_sha256": null,
+        "after_sha256": "937aa32286272e560634d8d74eb952f49674eabd356af6e6b439e41befc5997a"
+      },
+      {
+        "path": "scripts/lms01-browser-fixtures.py",
+        "before_sha256": "3480465038a4304d60c0dac59cf9b2da83cdee5b6c562f42a6935e79250af913",
+        "after_sha256": "75dbe5a5ee3d752134a9c777de6f7477fb467ee6e71b83bd69c272862eb7d372"
+      },
+      {
+        "path": "scripts/test-lms01-browser.py",
+        "before_sha256": "fdd9322e2e8fcec1e2ca6d8ae330aa1d40f809a1e1996a97a7b9ce1bb892d1c3",
+        "after_sha256": "ce4c09d4fa2e37af4fe3aaae361c96b92e475f77b0de867ff14a02f107e27d9e"
+      }
+    ]
+  },
+  "restored_input_files_not_in_feature_patch": [
+    ".agents/skills/lms-feature-delivery/SKILL.md",
+    ".agents/skills/rea-discovery/SKILL.md",
+    ".claude/skills/lms-security-review/SKILL.md",
+    ".claude/skills/rea-discovery/SKILL.md",
+    ".gitignore"
+  ],
+  "validation": {
+    "api": "123 passed; 2 deprecation warnings; no skips; 140.15s",
+    "browser_baseline": "7 passed; 22.0s",
+    "browser_signed_oidc_transport": "1 passed; 5.6s; real browser/API/BFF, synthetic IdP transport and RS256 signature",
+    "auth0_action_unit": "8 passed",
+    "typecheck_and_build": "passed",
+    "migration": "0004 head and partial/full roundtrips; 18 tables removed at base; OIDC sessions revoked on downgrade",
+    "pypi_runtime_advisories": "39 pins; 0 findings/errors",
+    "npm_production_audit": "0 vulnerabilities",
+    "pip_check_compileall_starter": "passed",
+    "patches": "check + temporary apply + output hashes passed for both baselines"
+  },
+  "limits": [
+    "No real Auth0 tenant/key challenge/enrollment/recovery tested",
+    "No global operator approval API or full recovery for other users",
+    "No production release/H1 closure; independent Claude re-review pending",
+    "No Mac/GitHub changes or deployment",
+    "Historical author patches/manifests/review retained unchanged"
+  ],
+  "source_files": {
+    ".agents/skills/lms-feature-delivery/SKILL.md": "dc7c08f18cd66219d7e50fafb36c39396c58a6594ca111e04d5bb9e7bc5d9f28",
+    ".agents/skills/rea-discovery/SKILL.md": "02548620e53130226d755a22e3b5c8c172943c0b4a3ad6634dc55ea481f9efd3",
+    ".claude/skills/lms-security-review/SKILL.md": "435caf8f3c26f727df7d8439f4d473a71ec9ea3a7bc87196744997aa64968452",
+    ".claude/skills/rea-discovery/SKILL.md": "4990865d82fceae73d71d6395ae5ddcf88401e030e2ea5ba45d93656fdd92c54",
+    ".env.example": "43333246faac417974dd1cf691b14f2a8c35982b5a2c211dc4566256f625edb2",
+    ".github/pull_request_template.md": "8103ca42e0d4e71bc6ff5bf2f03f33b0ed6ed743a6b2b888ba3066f3ef44572a",
+    ".github/workflows/ci.yml": "d6fd88a27c441413e40f2726eca526b683da468109c48ebdb8956cc95632d166",
+    ".gitignore": "63a7a694591ff218eee6d81563cb29326ed0b82b228a77d4b8e3b63d775596b5",
+    "AGENTS.md": "8cd2c11ba9bc1bbfe3bdbc25276102f1a92efe5a207331ac5bbc59f6fde6e5df",
+    "CLAUDE.md": "a6ec02cedfb897415ff8275421146dd67f2d031e96f1b2b4e81c0cf269c56adb",
+    "README.md": "dcb2abf52fef11bf82d32d32ca9f5c52d011c73c39f43eec0a7a04d02022a345",
+    "apps/api/.dockerignore": "760528ed4c5417ee7d22d995130f9ff6ea7dc232259c5d737a6d7dbc23af30f4",
+    "apps/api/Dockerfile": "415d3e788ddaa66d3224f5114139b28086457e76239036a57efb475b038906f1",
+    "apps/api/alembic.ini": "4be35c86b24192bde1327811488c4fcbc1f446b8c1e688fbbcba8f27640a252b",
+    "apps/api/app/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "apps/api/app/auth.py": "f41371610d3dc389627f0578e6aeb207273fa43855c231f23b76bd7e103d29d8",
+    "apps/api/app/auth_lifecycle.py": "2eddad723ca8b4214cfa89f4c1c2f64548bfe9f3f75d62c27be48decaafa49d5",
+    "apps/api/app/auth_support.py": "a62469ad79761b2577a0fe2e534efc1502cc92947db7cb236a78a6b8d17d41fe",
+    "apps/api/app/database.py": "400e8077e6c7008c7246344991e313db12a1dabcee14ed7398fc3c4a17d510ae",
+    "apps/api/app/key_rotation.py": "8c012f277aca173320ff917c037cb70fcf4562a77e240d371bb33ed5fa7bed92",
+    "apps/api/app/mail_worker.py": "f81f38043301372a2ec59fd9e9a9eb6f8a8d38c7eb7cfbdc5dddf5c9a4932f2d",
+    "apps/api/app/main.py": "96e7ba00fd4193d19bdfeaa7ce1d283cc1d1e4ec5d8cae61eb218eadeaed8f80",
+    "apps/api/app/maintenance.py": "ebca1e6355ad91e41480ee54e907de79a21cb34facc6a899971fdf1d199156bd",
+    "apps/api/app/mfa.py": "36b1362590e414b775da6dc0b1976aa5871ad2e915bf67928e95fb84c611549e",
+    "apps/api/app/mfa_operator.py": "c0b8b9b3807d0486afdbe5ae2f224aa164c3461c98cb39ea91c8fbc73f25e580",
+    "apps/api/app/oidc.py": "f132877b4d20c0d7a7a939e1a491f645ce795015dadbb3732de6e8a39f5abb3c",
+    "apps/api/app/oidc_provision.py": "d623e5d9ef3dbbc6c8a295be8454b0db7ae48c52b75188d7dd6b205b7190711a",
+    "apps/api/app/provision.py": "3c3dff0675e240a55746be16019b297f5a095821a6d43c2395b9cc9f92b9b40b",
+    "apps/api/app/security.py": "1f77dac63235a413c6f3178946a5e7294489d3d6ea90c0b073aa9301d91b02f1",
+    "apps/api/app/traffic.py": "4e3b28df605930bd14ba210a885b7b1867275a3a5907123d9c18faa834efaff7",
+    "apps/api/migrations/auth0_oidc.sql": "c691bafdc439824cecffb3b1fdd176778bdd4db74574922ab12d1d24673f62d9",
+    "apps/api/migrations/auth_lifecycle.sql": "cd7486875f591f1b1665570901cc155f58df448ef2b0084198379ca615accc7f",
+    "apps/api/migrations/env.py": "5c8cb1f120210b83e870f4b7ea3dd20d542bfa5c39b0120781970c50b26fe87c",
+    "apps/api/migrations/identity.sql": "35430f4f4785160833af1a0904df524f7c124a3e8dc7d7fccfcbb888fe92b1e9",
+    "apps/api/migrations/security_review.sql": "7906ac682fc9c5c123c5e07d93c34f0696fc92b1631a79d32db7f3c59b9f8a46",
+    "apps/api/migrations/security_review_rollback.sql": "7217f5eaf4de125f45384c5d2699cbc8c3ebd3acf16a30563ccd41bed2507a3d",
+    "apps/api/migrations/versions/0001_identity.py": "7e7dc3bc9ef2faaeab38ef5decb3dbee798780a85849163869be49afafa55b15",
+    "apps/api/migrations/versions/0002_auth_lifecycle.py": "98a127b08d4de59b355411f37308201e74677dbabb84a8ba2265ee11ccc44769",
+    "apps/api/migrations/versions/0003_security_review.py": "5cb5e131865b417b360c16b302b51bb7925a1a03d3d7dae822b1e825c44166c3",
+    "apps/api/migrations/versions/0004_auth0_oidc.py": "56e6e6fc42c51340ccc6c8324c2a422935eae2cba7f7fe780c6369ad98aee881",
+    "apps/api/pytest.ini": "b160d82f7811555051f8966d8e02750a985227c1d022208c784e606946f2eada",
+    "apps/api/requirements-dev.lock": "15b8b2581c783340bb1edb6321c1875e0f89a85794921f3264f72b6475d8f500",
+    "apps/api/requirements-dev.txt": "cd704ee23ea4171c534e5aa4fb6722d8ab4c78c1033cf4bf34a90b033627a6d7",
+    "apps/api/requirements.lock": "b2dbc569db789b5b397945f0b2cad56617b310a76520098a13496ca7f4363cf9",
+    "apps/api/requirements.txt": "d59b3c0a8d97fc9a6d012e85c677d41c68c04c3728aac2afef629537855595f3",
+    "apps/api/tests/auth_helpers.py": "de72c0c1d60b278b876247e8173965dc9b7b433396bf50cc84870c281acb24a5",
+    "apps/api/tests/commit_probe_app.py": "d2ab2f7dc8eacda16ebe8a69f60449defb51fa74477bee01109007b88721c900",
+    "apps/api/tests/conftest.py": "231245a4de5d9b87ac2d19c9e763e2973eddb41d6421667992eaab9d98e658a3",
+    "apps/api/tests/oidc_browser_probe.py": "c8a05981827768f188cc9e9d52386dd5574a43e8cb945ce915c530bbc0381718",
+    "apps/api/tests/test_health.py": "611b1ae81a1435a4ab6e8a059232245ae7566b56375d15d5bc530b02d166306f",
+    "apps/api/tests/test_identity_postgres.py": "73c09e31d490d61203e15fb0344b0e9e78234e7fdc32d97df3a098a7867fa261",
+    "apps/api/tests/test_mfa_expiry_regressions.py": "879a8ac6c17f738849df24d3dd7623692d98afe521877ed1d687c84ae3f59210",
+    "apps/api/tests/test_oidc.py": "fa373a1f780d7a5ed1146528464d61a963a701ca04078feddf4314616fa944fa",
+    "apps/api/tests/test_review_regressions.py": "762bcc7ad9ba181a303435fa3f36b79479a9b62d1f18005fcb94e465565cbd5d",
+    "apps/api/tests/test_security_unit.py": "8cfee9cea78437059b38df423c9045c0bc272b2ff21a07cf1d3f0dde343443ae",
+    "apps/web/.dockerignore": "602fb53a954ac02c1a7d7519345bcd7f9e82bd5fd798d23ace05d22d5a38dc25",
+    "apps/web/Dockerfile": "cd12c0ad636decb275c54d40abc11659bd9909dc35ac96e4f85076d9834daec4",
+    "apps/web/app/api/auth/[...path]/route.ts": "04b7cd95f447f885e21bb6132db28693101f39277e3e46654e0cd5b35654dd64",
+    "apps/web/app/api/health/route.ts": "49e7a13ef7318d69d0ce631b975f3378146411dd2cbe0df38d883e714a7c2d36",
+    "apps/web/app/auth/page.tsx": "30c6b16414cb894c0f87ae25ac9920c8e6e94f877fb8982388943e9830904751",
+    "apps/web/app/globals.css": "8733a2d31ba0e1baf016e44ed631ff0a4019cd351ac48960bc9969dbed626ea8",
+    "apps/web/app/layout.tsx": "0545dc3d2dc22fd2cf806a5929d0018011ffa9365903f4c696b294daf89dc8dd",
+    "apps/web/app/page.tsx": "95b93f37c878ce7e39f5e6107eaf79a88e9e261e78cb56e24d2ba9bb3f445396",
+    "apps/web/next-env.d.ts": "1862ac4bbbc5192d4bf562161df66ea547ed3e67173100656ab606ae9797db2b",
+    "apps/web/next.config.ts": "a28da15dd009ca1b1f15296c271bbd7f9e718b57d22b452100bdc2c4cca55249",
+    "apps/web/package-lock.json": "627aee83811cc453c9cee74fab65c22be962228b47767140dbc32bf780397866",
+    "apps/web/package.json": "60a5a5491fa4e435788bba03373144a9b3cc8daaeb6661ea5d39fd44585bf866",
+    "apps/web/playwright.config.ts": "c273cc3a71a5f443839648ad0230a715f9574ccf30bfb52d2bed7c3d8dfe5bb8",
+    "apps/web/proxy.ts": "e53bcc24fc09769199c35bc1bd6c13aebc5641ccf5a5655ed1caf22ce155b4bd",
+    "apps/web/tests/auth.spec.ts": "dbed4c293876098b14bd97fd02641a85ba9ffcb46f077d8246ba132a1c3c90bf",
+    "apps/web/tests/oidc.spec.ts": "904654244a939307d4e79685b072cb89e85ca165f7856b8a391821ac701b29b0",
+    "apps/web/tsconfig.json": "6bf102b8ecab1f3d366d415e0ea89bb95b2f90036570e40703a2175cd62f10b7",
+    "docker-compose.yml": "921192c82753f78416fc334670bf606ce914cf49eb08a2b325898468c5e8d059",
+    "docs/AGENT-WORKFLOW.md": "f14e35af455a71bce41b5ba5bf489379c27358d53663fd2b7cf68a00f79ff1d4",
+    "docs/ARCHITECTURE.md": "dea4321e40abe48309a393dd2ed37e9baf1a00d6657523f7f5a4d7b0c17ce752",
+    "docs/AUTH0-SETUP.md": "6fe8a7a91cb86f9cae12597194f02d92060382efeb9879ef97741694eaf1671b",
+    "docs/LMS-01-AUTH0-HANDOFF.md": "00d7f366b5bba2c1825007e3d1dcd7a7bd7cf80ff103bea429c6cb6b1f7b7f5b",
+    "docs/LMS-01-CHECKLIST.md": "5157929c3890b2ee684e0723053e1946ef964715ec980a10de4c1385f31b0870",
+    "docs/LMS-01-CLOUD-APPLY.md": "2fecdf4514a8703d8676e105cc4ad60d6e8075b6213e1b1e259aded583a49132",
+    "docs/LMS-01-HANDOFF.md": "d676e02983e81a69a82c79ddc32ac4d7a00806acaf672dda5a98649f13d0a784",
+    "docs/PROJECT-SPEC.md": "9bd83b5a61a4e4e986b4613da952bd49055db5974082ac284b849212816c123e",
+    "docs/REA-FINDINGS.md": "faa61ec7b25d51f912dcc7aaee75a24376c9a0a5bee71864f6378d94cae34652",
+    "docs/REA-SETUP-CODEX.md": "ee47c9422b52ef9b5923b76a6ff32f1ce0ffb5d371fc8714ae9bb990e99214cf",
+    "docs/SETUP-DEPLOY.md": "363d3a5bf18c02fe4de1ba17ec84c791c823da2ab52583356106670e83d52940",
+    "docs/adr/001-auth-lifecycle.md": "9e448892616ed12050e721b3d2aa6216f2d7606b1970e360e799cc2d7902645f",
+    "docs/adr/002-auth-security-review.md": "4c7cd3586e1ac0b483bd4d179a80cf7a83e41a620e3ea6e83d91967851c6fd1b",
+    "docs/adr/003-production-identity-recommendation.md": "e55f559acb4cfce535e3ff87bab327ad6a411b8cde9d920ffefc2ffe4082d727",
+    "docs/adr/004-auth0-development-login.md": "2fecc16cc13fdb97836c01e52d174974bbe1774569d74f149cf1bfe188c4a8f4",
+    "docs/tickets/LMS-01-OIDC.md": "28d5b57fc045f55b43899571d882800db7ceb39b514517dd46f5befdc37eaf97",
+    "docs/tickets/LMS-01.md": "d7a6f60a136a02d2eedebbe4ff5e2545fa513a6490a9e7d982dfd2d62e0df7a1",
+    "infra/Dockerfile.lms01-test": "34c25f0a7ded39535a7662e517c80827cad65161fb65d9a3477f433a03c819fb",
+    "infra/auth0/staff-post-login.cjs": "f0a6462be665546dac97749f66511019af290e1c62a66f96ee8f22455be7689b",
+    "infra/auth0/staff-post-login.test.cjs": "56f3a256e39aef0d0328473ae5060895c0e67cf432acd833f67fc582523a1723",
+    "infra/development-roles.sql": "3b52355a85f3db7482ca7c5b34161dc1ecf85e0df8a460cc497cb10fb94054fd",
+    "reviews/LMS-01-author-response.md": "8b73052aead43456fe4fbda624d4240f5182ffe87bd48ed62045daa0bd5d5f4c",
+    "reviews/LMS-01-claude.md": "004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce",
+    "reviews/LMS-01-cloud-validation.md": "937aa32286272e560634d8d74eb952f49674eabd356af6e6b439e41befc5997a",
+    "scripts/audit-api-dependencies.py": "b93facfcbb10a5362e08e8bceb82a0203e3196489a8ab9036a2a450a961f4864",
+    "scripts/audit-server.sh": "a3120d3de20ad0b0b9d1e15a110f98113a6cfaf86a95c0697a6824fa40753a93",
+    "scripts/build-lms01-review.py": "debe1518d88a40e438055e84516e164bc4dbc2adeaea59838def2f51e80b8fc8",
+    "scripts/lms01-browser-fixtures.py": "75dbe5a5ee3d752134a9c777de6f7477fb467ee6e71b83bd69c272862eb7d372",
+    "scripts/preflight.sh": "96848eb7f5bca68bd5bc51b5f2c367f90aef7439fe54176a3ab09851cdcc5cc0",
+    "scripts/test-lms01-browser.py": "ce4c09d4fa2e37af4fe3aaae361c96b92e475f77b0de867ff14a02f107e27d9e",
+    "scripts/verify-starter.py": "d67e1671206279364a73e0d69f39930d04ca75a776ebbd2a3f1aea965e7340aa"
+  }
+}

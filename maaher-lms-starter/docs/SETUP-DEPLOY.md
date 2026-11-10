@@ -1,5 +1,11 @@
 # 04 — Mac Intel, Tailscale server audit, GitHub & Cloudflare
 
+LMS-01 kini membutuhkan konfigurasi role API/migrasi/mail terpisah, encryption
+key dan origin browser. Baca [ADR-001](adr/001-auth-lifecycle.md),
+[checklist LMS-01](LMS-01-CHECKLIST.md) dan [handoff](LMS-01-HANDOFF.md) sebelum
+memakai instruksi deployment umum di bawah. Belum ada izin deploy/merge;
+pengiriman email nyata, operator MFA dan review independen masih menjadi gate.
+
 ## A. Mac Intel prerequisites
 Use Homebrew: Git, GitHub CLI (`gh`), Node.js LTS, Python supported by FastAPI, Docker Desktop **Intel/amd64 build**, Codex CLI, Claude Code CLI. Validate with:
 ```bash
@@ -66,5 +72,9 @@ Pre-release DB snapshot and restore rehearsal, version-tagged images and migrati
 - https://tailscale.com/docs/concepts/tailscale-ip-addresses
 - https://docs.docker.com/engine/security/
 
-## Pending package lock (mandatory before public deployment)
-On Mac with trusted npm registry access run `cd apps/web && npm install`, inspect dependencies and commit `package-lock.json`. Switch `apps/web/Dockerfile` and `.github/workflows/ci.yml` from `npm install` to `npm ci` in that PR. No lockfile can be reliably generated in this offline workspace; do **not** call the current dependency setup reproducible.
+## Dependency snapshots
+`apps/web/package-lock.json` kini tersedia; Dockerfile dan CI memakai `npm ci`.
+API memiliki `requirements.lock` dan `requirements-dev.lock`. Lihat handoff
+untuk hasil nyata instalasi, audit advisori dan pengujian platform. Snapshot
+versi bukan jaminan bebas kerentanan; audit ulang sebelum release. Jangan
+mengikuti klaim offline historis pada handoff sebagai status pengujian terbaru.

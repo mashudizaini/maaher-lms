@@ -1,6 +1,14 @@
 # 02 — REA evidence register & authorized scope
 
 ## Current evidence status
+- **LOCAL AUDIT 2026-11-09:** pencarian file termasuk tersembunyi tidak menemukan
+  rekaman observasi browser REA, screenshot tersanitasi, atau log interaksi yang
+  membuktikan alur login. REA-001 di bawah adalah template, bukan evidence nyata.
+  Pernyataan lima screenshot adalah catatan historis owner-supplied; berkasnya
+  tidak tersedia untuk diverifikasi dalam workspace/sesi ini.
+- **MCP UNKNOWN/PENDING:** REA belum terhubung. `codex mcp list` kosong;
+  instalasi terhalang runtime Node yang belum kompatibel dan akses paket.
+  Lihat `REA-SETUP-CODEX.md`. Tidak ada login atau perubahan data Timedoor.
 - **PUBLIC:** `https://lms.timedooracademy.com/` responds, but the public web extractor did not yield authenticated LMS UI content. Nothing about its private DB/API can be inferred reliably.
 - **OWNER-SUPPLIED:** five screenshots were shared in chat. They serve as a visual reference; retain only redacted, authorized copies outside repository or in a secured asset store. **Screen-specific interpretation and click outcomes are not verified here.**
 - **PENDING:** owner-guided, authorized authenticated navigation on a local browser session.

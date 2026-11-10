@@ -2,6 +2,10 @@
 
 **Status:** engineering scaffold / NOT a completed LMS / NOT production-ready.
 
+Auth0/OIDC untuk admin/operator kini memiliki implementasi development:
+[panduan setup](docs/AUTH0-SETUP.md) dan [handoff](docs/LMS-01-AUTH0-HANDOFF.md).
+Tenant Auth0 nyata, root trust, recovery dan review independen masih diperlukan.
+
 - Original LMS inspired by permitted observations of `https://lms.timedooracademy.com/`.
 - Codex = AUTHOR; Claude Code = independent READ-ONLY REVIEWER; human merge/release approval.
 - Mac Intel development; dev host via Tailscale `100.127.103.49` (audit required); GitHub owner `mashudizaini` (repo name proposal `maaher-lms`); UAT hostname `maaherlms.aimz.my.id` through Cloudflare.

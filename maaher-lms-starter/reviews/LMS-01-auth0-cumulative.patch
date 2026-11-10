@@ -1,0 +1,2451 @@
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@ -11,7 +11,7 @@
+ MAIL_DATABASE_URL=
+ MFA_OPERATOR_DATABASE_URL=
+ MAINTENANCE_DATABASE_URL=
+-APP_ORIGIN=http://localhost:3000
++APP_ORIGIN=http://127.0.0.1:3000
+ API_BASE_URL=http://127.0.0.1:8000
+ # Generate with cryptography.fernet.Fernet.generate_key(); keep a backed-up secret.
+ AUTH_ENCRYPTION_KEY=
+@@ -29,3 +29,8 @@
+ SMTP_FROM=
+ # Set true only with APP_ENV=local for explicit HTTP development.
+ LOCAL_INSECURE_COOKIES=false
++# Optional Auth0 development staff login. Use canonical domain without scheme/path.
++# No client secret is exposed to Next.js/browser; API only. Keep real values local.
++AUTH0_DOMAIN=
++AUTH0_CLIENT_ID=
++AUTH0_CLIENT_SECRET=
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -50,6 +50,7 @@
+       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+         with:
+           node-version: '22'
++      - run: node --test infra/auth0/staff-post-login.test.cjs
+       - run: npm ci --no-audit --no-fund
+         working-directory: apps/web
+       - run: npm run build
+@@ -70,6 +71,20 @@
+           TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_browser_ci
+           TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_browser_ci
+         run: python scripts/test-lms01-browser.py
++      - name: Create separate signed OIDC browser test database
++        run: |
++          python - <<'PY'
++          import os,psycopg
++          with psycopg.connect(os.environ['TEST_MIGRATION_DATABASE_URL'],autocommit=True) as db:
++              db.execute('CREATE DATABASE maaher_test_oidc_browser_ci')
++          PY
++      - name: Signed OIDC browser regression
++        env:
++          TEST_MIGRATION_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/maaher_test_oidc_browser_ci
++          TEST_DATABASE_URL: postgresql://maaher_api@127.0.0.1:5432/maaher_test_oidc_browser_ci
++          TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_oidc_browser_ci
++          TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_oidc_browser_ci
++        run: python scripts/test-lms01-browser.py --oidc
+   web:
+     runs-on: ubuntu-latest
+     steps:
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,6 +1,10 @@
+ # Maaher LMS — project-specific starter (v0.1)
+ 
+ **Status:** engineering scaffold / NOT a completed LMS / NOT production-ready.
++
++Auth0/OIDC untuk admin/operator kini memiliki implementasi development:
++[panduan setup](docs/AUTH0-SETUP.md) dan [handoff](docs/LMS-01-AUTH0-HANDOFF.md).
++Tenant Auth0 nyata, root trust, recovery dan review independen masih diperlukan.
+ 
+ - Original LMS inspired by permitted observations of `https://lms.timedooracademy.com/`.
+ - Codex = AUTHOR; Claude Code = independent READ-ONLY REVIEWER; human merge/release approval.
+diff --git a/apps/api/app/auth.py b/apps/api/app/auth.py
+--- a/apps/api/app/auth.py
++++ b/apps/api/app/auth.py
+@@ -9,7 +9,7 @@
+ from pwdlib import PasswordHash
+ from psycopg import Error as DatabaseError
+ 
+-from .database import transaction,auth_transaction,user_context,tenant_context,session_context
++from .database import transaction,auth_transaction,user_context,tenant_context,session_context,external_managed
+ from .security import Principal,authorize,new_token,token_digest
+ from .auth_support import security_event,throttle,reset_throttle,limited,password_slot,reserve_session_slot
+ 
+@@ -96,7 +96,7 @@
+     # Resource budgets run before Argon2. Account failures never veto a correct
+     # password: an attacker cannot lock an account by knowing its email address.
+     valid=passwords.verify(body.password,user['password_hash'] if user else dummy_hash)
+-    if not valid or not user or user['status']!='active':
++    if not valid or not user or user['status']!='active' or external_managed(db,user['id']):
+         security_event(db,user['id'] if user else None,'login.failed')
+         if not allowed:
+             return limited()
+diff --git a/apps/api/app/auth_lifecycle.py b/apps/api/app/auth_lifecycle.py
+--- a/apps/api/app/auth_lifecycle.py
++++ b/apps/api/app/auth_lifecycle.py
+@@ -10,7 +10,7 @@
+ from .auth import connection, auth_connection, passwords, principal, session_user, verify_origin
+ from .auth_support import cipher, enqueue, limited, security_event, tenant_event, throttle, password_slot
+ from .security import Principal, new_token, token_digest
+-from .database import user_context, tenant_context
++from .database import user_context, tenant_context, external_managed
+ 
+ router = APIRouter(prefix="/auth")
+ 
+@@ -107,7 +107,7 @@
+     token = new_token()
+     db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("auth-email:"+body.email,))
+     user = db.execute("SELECT id,status FROM users WHERE email=%s", (body.email,)).fetchone()
+-    if allowed and user and user["status"] == "active":
++    if allowed and user and user["status"] == "active" and not external_managed(db, user["id"]):
+         db.execute("DELETE FROM password_resets WHERE user_id=%s", (user["id"],))
+         db.execute("INSERT INTO password_resets(token_hash,user_id,expires_at) VALUES (%s,%s,now()+interval '1 hour')",
+                    (token_digest(token), user["id"]))
+diff --git a/apps/api/app/database.py b/apps/api/app/database.py
+--- a/apps/api/app/database.py
++++ b/apps/api/app/database.py
+@@ -44,3 +44,8 @@
+ 
+ def session_context(db, token_hash):
+     db.execute("SELECT set_config('app.session_hash',%s,true)",(token_hash,))
++
++
++def external_managed(db, user_id):
++    # A revoked binding must not silently re-enable the old local credentials.
++    return db.execute('SELECT 1 FROM oidc_identities WHERE user_id=%s LIMIT 1', (user_id,)).fetchone() is not None
+diff --git a/apps/api/app/key_rotation.py b/apps/api/app/key_rotation.py
+--- a/apps/api/app/key_rotation.py
++++ b/apps/api/app/key_rotation.py
+@@ -15,6 +15,7 @@
+     count=0
+     for table,key,column in (('mfa_factors','user_id','encrypted_secret'),
+                              ('mfa_enrollments','session_hash','encrypted_secret'),
++                             ('oidc_login_flows','browser_hash','encrypted_state'),
+                              ('auth_mail_outbox','id','encrypted_token')):
+         # Identifiers are a fixed allowlist; a bad row aborts the whole rotation.
+         for identity,value in db.execute(f'SELECT {key},{column} FROM {table} WHERE {column} IS NOT NULL FOR UPDATE').fetchall():
+diff --git a/apps/api/app/main.py b/apps/api/app/main.py
+--- a/apps/api/app/main.py
++++ b/apps/api/app/main.py
+@@ -5,6 +5,7 @@
+ from .auth import router
+ from .auth_lifecycle import router as lifecycle_router
+ from .mfa import router as mfa_router
++from .oidc import router as oidc_router
+ from .traffic import ANONYMOUS_PATHS, admit
+ from .auth_support import limited
+ 
+@@ -12,6 +13,7 @@
+ app.include_router(router)
+ app.include_router(lifecycle_router)
+ app.include_router(mfa_router)
++app.include_router(oidc_router)
+ 
+ 
+ @app.middleware("http")
+diff --git a/apps/api/app/mfa.py b/apps/api/app/mfa.py
+--- a/apps/api/app/mfa.py
++++ b/apps/api/app/mfa.py
+@@ -11,6 +11,7 @@
+ from .auth import COOKIE,SESSION_SECONDS,auth_connection,passwords,secure_cookie,session_user,verify_origin
+ from .auth_support import cipher,limited,security_event,throttle,reset_throttle,reserve_session_slot
+ from .security import new_token,token_digest
++from .database import external_managed
+ 
+ router=APIRouter(prefix='/auth/mfa',dependencies=[Depends(verify_origin)])
+ 
+@@ -36,25 +37,31 @@
+ def request_authorization(body: RequestAuthorization,request: Request,
+                           db=Depends(auth_connection,scope='function')):
+     uid=session_user(request,db,require_mfa=False)
++    if external_managed(db,uid):
++        raise HTTPException(403,'Kelola faktor akun staff melalui Auth0')
+     digest=token_digest(request.cookies[COOKIE])
+-    # A request gives no authority. At most one per session/purpose; it cannot
+-    # overwrite/revoke another device's authorized request or active factor.
+-    row=db.execute("""SELECT id FROM mfa_requests WHERE session_hash=%s AND purpose=%s""",
+-                   (digest,body.purpose)).fetchone()
+-    if row:
+-        return {'request_id':row['id']}
+     factor=db.execute('SELECT confirmed FROM mfa_factors WHERE user_id=%s',(uid,)).fetchone()
+     if body.purpose=='bootstrap' and factor and factor['confirmed']:
+         raise HTTPException(409,'MFA sudah aktif; gunakan pemulihan terverifikasi')
++    # Renew expired requests without reviving their approval. The independent
++    # operator audit is retained separately and does not reference this row by FK.
++    db.execute("""DELETE FROM mfa_requests WHERE session_hash=%s AND purpose=%s
++                  AND expires_at<=now()""",(digest,body.purpose))
+     rid=uuid4()
+-    db.execute("""INSERT INTO mfa_requests(id,user_id,session_hash,purpose,expires_at)
+-                  VALUES(%s,%s,%s,%s,now()+interval '10 minutes')""",(rid,uid,digest,body.purpose))
+-    return {'request_id':rid}
++    # Concurrent retries share the existing unexpired ID and preserve any grant.
++    # A request alone still grants no authority and cannot affect another session.
++    row=db.execute("""INSERT INTO mfa_requests(id,user_id,session_hash,purpose,expires_at)
++                  VALUES(%s,%s,%s,%s,now()+interval '10 minutes')
++                  ON CONFLICT(session_hash,purpose) DO UPDATE SET id=mfa_requests.id
++                  RETURNING id""",(rid,uid,digest,body.purpose)).fetchone()
++    return {'request_id':row['id']}
+ 
+ 
+ @router.post('/enroll')
+ def enroll(body: Enrollment,request: Request,db=Depends(auth_connection,scope='function')):
+     uid=session_user(request,db,require_mfa=False)
++    if external_managed(db,uid):
++        raise HTTPException(403,'Kelola faktor akun staff melalui Auth0')
+     encryption=cipher()
+     digest=token_digest(request.cookies[COOKIE])
+     authorization=db.execute("""SELECT * FROM mfa_requests WHERE user_id=%s AND session_hash=%s
+@@ -89,6 +96,8 @@
+ @router.post('/verify')
+ def verify(body: Verification,request: Request,response: Response,db=Depends(auth_connection,scope='function')):
+     uid=session_user(request,db,require_mfa=False)
++    if external_managed(db,uid):
++        raise HTTPException(403,'Kelola faktor akun staff melalui Auth0')
+     email=db.execute('SELECT email FROM users WHERE id=%s',(uid,)).fetchone()['email']
+     # Same order as login/password reset: a concurrent old-password login cannot
+     # recreate an attacker session after recovery has revoked all sessions.
+@@ -98,7 +107,8 @@
+     digest=token_digest(request.cookies[COOKIE])
+     # Serialize enrollment completion and code replay across sessions.
+     db.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('factor:'+str(uid),))
+-    pending=db.execute('SELECT * FROM mfa_enrollments WHERE session_hash=%s FOR UPDATE',(digest,)).fetchone()
++    # An abandoned setup must not shadow an existing trusted authenticator.
++    pending=db.execute('SELECT * FROM mfa_enrollments WHERE session_hash=%s AND expires_at>now() FOR UPDATE',(digest,)).fetchone()
+     active=db.execute('SELECT * FROM mfa_factors WHERE user_id=%s FOR UPDATE',(uid,)).fetchone()
+     if active and not (active['confirmed'] and active['trust_verified']):
+         active=None
+diff --git a/apps/api/app/oidc.py b/apps/api/app/oidc.py
+new file mode 100644
+--- /dev/null
++++ b/apps/api/app/oidc.py
+@@ -0,0 +1,204 @@
++"""Auth0 staff login using Authlib OIDC and private, one-use database state.
++
++No email linking, provider token persistence, public provisioning or operator
++recovery approval is exposed here. Bound staff have no local-auth fallback.
++"""
++from dataclasses import dataclass, field
++from datetime import datetime, timedelta, timezone
++import json
++import os
++import re
++import time
++from urllib.parse import urlsplit
++from uuid import uuid4
++
++from authlib.integrations.starlette_client import OAuth, OAuthError
++from cryptography.fernet import InvalidToken
++from fastapi import APIRouter, Depends, HTTPException, Request, Response
++from fastapi.responses import JSONResponse
++from httpx import HTTPError
++from joserfc.errors import JoseError
++
++from .auth import COOKIE, SESSION_SECONDS, auth_connection, secure_cookie, session_user, verify_origin
++from .auth_support import cipher, reserve_session_slot, security_event
++from .database import auth_transaction, user_context
++from .security import new_token, token_digest
++
++router = APIRouter(prefix="/auth/oidc")
++FLOW_COOKIE = "maaher_oidc_flow"
++FLOW_SECONDS = 300
++STAFF_SESSION_SECONDS = 30 * 60
++ASSURANCE_CLAIM = "https://maaherlms.aimz.my.id/assurance"
++ASSURANCE = "maaher-fido2-uv-v1"
++
++
++@dataclass(frozen=True)
++class Settings:
++    issuer: str
++    client_id: str
++    client_secret: str = field(repr=False)
++    origin: str
++
++    @property
++    def callback(self):
++        return self.origin + "/api/auth/oidc/callback"
++
++    @property
++    def fingerprint(self):
++        return token_digest(json.dumps([self.issuer, self.client_id, self.callback, ASSURANCE]))
++
++
++def settings():
++    domain = os.environ.get("AUTH0_DOMAIN", "")
++    client_id = os.environ.get("AUTH0_CLIENT_ID", "")
++    secret = os.environ.get("AUTH0_CLIENT_SECRET", "")
++    origin = os.environ.get("APP_ORIGIN", "")
++    try:
++        parsed = urlsplit(origin)
++        parsed.port
++    except ValueError:
++        raise HTTPException(503, "Login Auth0 belum dikonfigurasi") from None
++    local = os.environ.get("APP_ENV") == "local" and parsed.hostname in {"127.0.0.1", "localhost"}
++    if (not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+auth0\.com", domain)
++            or len(domain) > 253 or not 3 <= len(client_id) <= 128
++            or not client_id.isascii() or any(c.isspace() for c in client_id) or not secret
++            or not parsed.hostname or parsed.username or parsed.password or parsed.path
++            or parsed.query or parsed.fragment
++            or not (parsed.scheme == "https" or (local and parsed.scheme == "http"))):
++        raise HTTPException(503, "Login Auth0 belum dikonfigurasi")
++    return Settings("https://" + domain + "/", client_id, secret, origin)
++
++
++def make_client(config):
++    # Pin Auth0 endpoints/issuer/RS256. Never discover URLs from tokens or clients.
++    # A new client avoids sharing mutable state across concurrent requests.
++    return OAuth().register(
++        "auth0", client_id=config.client_id, client_secret=config.client_secret,
++        authorize_url=config.issuer + "authorize",
++        access_token_url=config.issuer + "oauth/token",
++        issuer=config.issuer, jwks_uri=config.issuer + ".well-known/jwks.json",
++        id_token_signing_alg_values_supported=["RS256"],
++        client_kwargs={"scope": "openid", "code_challenge_method": "S256",
++                       "token_endpoint_auth_method": "client_secret_basic",
++                       "timeout": 10, "follow_redirects": False},
++    )
++
++
++def clear_flow(response):
++    response.delete_cookie(FLOW_COOKIE, path="/", secure=secure_cookie(), httponly=True, samesite="lax")
++
++
++def denied():
++    response = JSONResponse({"detail": "Login Auth0 tidak berlaku atau tidak diizinkan"}, status_code=400)
++    clear_flow(response)
++    return response
++
++
++@router.get("/config")
++def configuration():
++    try:
++        settings()
++    except HTTPException:
++        return {"enabled": False}
++    return {"enabled": True}
++
++
++@router.post("/login", dependencies=[Depends(verify_origin)])
++async def start(request: Request, response: Response, config=Depends(settings),
++                db=Depends(auth_connection, scope="function")):
++    client = make_client(config)
++    data = await client.create_authorization_url(config.callback, nonce=new_token(), prompt="login", max_age="0")
++    request.scope["session"] = {}
++    await client.save_authorize_data(request, redirect_uri=config.callback, **data)
++    encrypted = cipher().encrypt(json.dumps(request.session).encode()).decode()
++    browser = new_token()
++    db.execute("DELETE FROM oidc_login_flows WHERE expires_at<=now() OR browser_hash=%s",
++               (token_digest(request.cookies.get(FLOW_COOKIE, "")),))
++    db.execute("""INSERT INTO oidc_login_flows(browser_hash,state_hash,encrypted_state,config_hash,expires_at)
++                  VALUES(%s,%s,%s,%s,now()+interval '5 minutes')""",
++               (token_digest(browser), token_digest(data["state"]), encrypted, config.fingerprint))
++    response.set_cookie(FLOW_COOKIE, browser, max_age=FLOW_SECONDS, httponly=True,
++                        secure=secure_cookie(), samesite="lax", path="/")
++    return {"authorization_url": data["url"]}
++
++
++def consume_flow(browser, state):
++    # Commit consumption before the token exchange: retries/replays cannot redeem
++    # the same state even if the provider or the final app transaction fails.
++    with auth_transaction() as db:
++        row = db.execute("""DELETE FROM oidc_login_flows WHERE browser_hash=%s AND state_hash=%s
++                          AND expires_at>now() RETURNING encrypted_state,config_hash""",
++                         (token_digest(browser), token_digest(state))).fetchone()
++    return row
++
++
++@router.get("/callback")
++async def callback(request: Request, response: Response, config=Depends(settings),
++                   db=Depends(auth_connection, scope="function")):
++    query = request.query_params
++    if (any(len(query.getlist(k)) != 1 for k in query)
++            or set(query) - {"state", "code", "error", "error_description", "iss"}
++            or ("iss" in query and query["iss"] != config.issuer)
++            or not 20 <= len(query.get("state", "")) <= 256
++            or len(query.get("code", "")) > 4096
++            or not 32 <= len(request.cookies.get(FLOW_COOKIE, "")) <= 128):
++        return denied()
++    flow = consume_flow(request.cookies[FLOW_COOKIE], query["state"])
++    if not flow or flow["config_hash"] != config.fingerprint:
++        return denied()
++    if query.get("error") or not query.get("code"):
++        return denied()
++    try:
++        request.scope["session"] = json.loads(cipher().decrypt(flow["encrypted_state"].encode()).decode())
++        token = await make_client(config).authorize_access_token(
++            request, leeway=0,
++            claims_options={"iss": {"essential": True, "value": config.issuer},
++                            "aud": {"essential": True, "values": [config.client_id]},
++                            "auth_time": {"essential": True}},
++        )
++        claims = token.get("userinfo")
++        now = time.time()
++        if (not claims or claims.get(ASSURANCE_CLAIM) != ASSURANCE
++                or "mfa" not in claims.get("amr", [])
++                or isinstance(claims.get("auth_time"), bool)
++                or not isinstance(claims.get("auth_time"), (int, float))
++                or not now - FLOW_SECONDS <= claims["auth_time"] <= now + 30
++                or not isinstance(claims.get("sub"), str) or not 1 <= len(claims["sub"]) <= 255):
++            return denied()
++    except (OAuthError, JoseError, HTTPError, InvalidToken, ValueError, TypeError, KeyError):
++        return denied()
++    identity = db.execute("""SELECT i.id,i.user_id,i.is_operator,u.email FROM oidc_identities i
++        JOIN users u ON u.id=i.user_id WHERE i.issuer=%s AND i.subject=%s AND i.status='active'
++        AND u.status='active'""", (config.issuer, claims["sub"])).fetchone()
++    if not identity:
++        return denied()
++    uid = identity["user_id"]
++    db.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))", ("auth-email:" + identity["email"],))
++    user_context(db, uid)
++    if not reserve_session_slot(db, uid, verified=True):
++        raise HTTPException(503, "Kapasitas session terotorisasi sementara penuh")
++    opaque = new_token()
++    lifetime = min(SESSION_SECONDS, STAFF_SESSION_SECONDS)
++    db.execute("DELETE FROM sessions WHERE token_hash=%s", (token_digest(request.cookies.get(COOKIE, "")),))
++    db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES(%s,%s,%s,true)",
++               (token_digest(opaque), uid, datetime.now(timezone.utc) + timedelta(seconds=lifetime)))
++    db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES(%s,%s,%s,%s)",
++               (token_digest(opaque), identity["id"], datetime.fromtimestamp(claims["auth_time"], timezone.utc), ASSURANCE))
++    security_event(db, uid, "login.succeeded")
++    response.set_cookie(COOKIE, opaque, max_age=lifetime, httponly=True,
++                        secure=secure_cookie(), samesite="lax", path="/")
++    clear_flow(response)
++    return {"message": "Berhasil masuk melalui Auth0", "is_operator": identity["is_operator"]}
++
++
++@router.get("/session")
++def provider_session(request: Request, db=Depends(auth_connection, scope="function")):
++    uid = session_user(request, db)
++    row = db.execute("""SELECT i.is_operator,o.authenticated_at FROM oidc_sessions o
++                       JOIN oidc_identities i ON i.id=o.identity_id
++                       WHERE o.token_hash=%s AND i.user_id=%s AND i.status='active'""",
++                     (token_digest(request.cookies[COOKIE]), uid)).fetchone()
++    if not row:
++        raise HTTPException(403, "Session Auth0 diperlukan")
++    return {"provider": "auth0", "is_operator": row["is_operator"],
++            "authenticated_at": row["authenticated_at"]}
+diff --git a/apps/api/app/oidc_provision.py b/apps/api/app/oidc_provision.py
+new file mode 100644
+--- /dev/null
++++ b/apps/api/app/oidc_provision.py
+@@ -0,0 +1,50 @@
++"""Offline binding of a verified Auth0 subject to an existing synthetic user.
++
++There is no HTTP/email linking route. Real infrastructure provisioning requires
++an independently reviewed operator runbook; this CLI targets development only.
++"""
++import os
++from uuid import UUID, uuid4
++from urllib.parse import urlsplit
++
++import psycopg
++
++
++def bind_identity(db, user_id, issuer, subject, is_operator, reference):
++    name = db.execute('SELECT current_database()').fetchone()[0]
++    if not name.startswith('maaher_test_'):
++        raise ValueError('Development binding requires a disposable maaher_test_* database')
++    parsed = urlsplit(issuer)
++    if (parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith('.auth0.com')
++            or parsed.netloc != parsed.hostname or parsed.path != '/' or parsed.query or parsed.fragment
++            or not 1 <= len(subject) <= 255 or not 8 <= len(reference) <= 120):
++        raise ValueError('Canonical issuer, exact subject and verification reference required')
++    user = db.execute("SELECT email FROM users WHERE id=%s AND status='active'", (user_id,)).fetchone()
++    if not user:
++        raise ValueError('Existing active user required; email is not an identity binding')
++    if not is_operator and not db.execute("SELECT 1 FROM memberships WHERE user_id=%s AND role='admin' AND status='active'", (user_id,)).fetchone():
++        raise ValueError('A tenant admin membership or explicit operator binding is required')
++    db.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))', ('auth-email:' + user[0],))
++    identifier = uuid4()
++    db.execute('''INSERT INTO oidc_identities(id,user_id,issuer,subject,is_operator,provision_reference)
++                  VALUES(%s,%s,%s,%s,%s,%s)''', (identifier,user_id,issuer,subject,is_operator,reference))
++    db.execute('DELETE FROM sessions WHERE user_id=%s', (user_id,))
++    db.execute('DELETE FROM password_resets WHERE user_id=%s', (user_id,))
++    return identifier
++
++
++def main():
++    if os.environ.get('APP_ENV') != 'local':
++        raise SystemExit('Development binding only; production operator review is pending')
++    user = UUID(input('ID user sintetis yang sudah ada: ').strip())
++    issuer = input('Issuer Auth0 HTTPS canonical (akhiri /): ').strip()
++    subject = input('Auth0 User ID (sub) yang diverifikasi independen: ').strip()
++    operator = input('Operator platform, bukan sekadar admin tenant? [yes/no]: ').strip() == 'yes'
++    reference = input('Referensi verifikasi non-PII (8-120 karakter): ').strip()
++    with psycopg.connect(os.environ['MIGRATION_DATABASE_URL']) as db:
++        identifier = bind_identity(db,user,issuer,subject,operator,reference)
++    print('Development identity binding committed:', identifier)
++
++
++if __name__ == '__main__':
++    main()
+diff --git a/apps/api/app/traffic.py b/apps/api/app/traffic.py
+--- a/apps/api/app/traffic.py
++++ b/apps/api/app/traffic.py
+@@ -8,7 +8,7 @@
+ from .auth_support import throttle
+ 
+ ANONYMOUS_PATHS={'/auth/login','/auth/password-reset/request','/auth/password-reset/confirm','/auth/invitations/accept',
+-                 '/auth/mfa/request','/auth/mfa/enroll','/auth/mfa/verify'}
++                 '/auth/mfa/request','/auth/mfa/enroll','/auth/mfa/verify','/auth/oidc/login'}
+ 
+ 
+ def client_identity(request):
+diff --git a/apps/api/migrations/auth0_oidc.sql b/apps/api/migrations/auth0_oidc.sql
+new file mode 100644
+--- /dev/null
++++ b/apps/api/migrations/auth0_oidc.sql
+@@ -0,0 +1,101 @@
++CREATE TABLE oidc_identities (
++    id uuid PRIMARY KEY, user_id uuid NOT NULL REFERENCES users(id),
++    issuer text NOT NULL, subject text NOT NULL CHECK (length(subject) BETWEEN 1 AND 255),
++    is_operator boolean NOT NULL DEFAULT false,
++    status text NOT NULL DEFAULT 'active' CHECK (status IN ('active','revoked')),
++    provision_reference text NOT NULL CHECK (length(provision_reference) BETWEEN 8 AND 120),
++    created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(issuer,subject)
++);
++-- statement
++CREATE INDEX oidc_identities_user ON oidc_identities(user_id);
++-- statement
++CREATE TABLE oidc_login_flows (
++    browser_hash text PRIMARY KEY, state_hash text UNIQUE NOT NULL,
++    encrypted_state text NOT NULL, config_hash text NOT NULL,
++    created_at timestamptz NOT NULL DEFAULT now(), expires_at timestamptz NOT NULL
++);
++-- statement
++CREATE TABLE oidc_sessions (
++    token_hash text PRIMARY KEY REFERENCES sessions(token_hash) ON DELETE CASCADE,
++    identity_id uuid NOT NULL REFERENCES oidc_identities(id),
++    authenticated_at timestamptz NOT NULL,
++    assurance text NOT NULL CHECK (assurance='maaher-fido2-uv-v1')
++);
++-- statement
++REVOKE ALL ON oidc_identities,oidc_login_flows,oidc_sessions FROM PUBLIC,maaher_runtime;
++-- statement
++GRANT SELECT ON oidc_identities TO maaher_auth,maaher_definer;
++-- statement
++GRANT SELECT,INSERT,DELETE ON oidc_login_flows TO maaher_auth;
++-- statement
++GRANT DELETE ON oidc_login_flows TO maaher_definer;
++-- statement
++GRANT SELECT(expires_at) ON oidc_login_flows TO maaher_definer;
++-- statement
++GRANT SELECT,INSERT ON oidc_sessions TO maaher_auth;
++-- statement
++GRANT SELECT ON oidc_sessions TO maaher_definer;
++-- statement
++CREATE OR REPLACE FUNCTION resolve_session(p_hash text)
++RETURNS TABLE(id uuid,mfa_verified boolean,mfa_required boolean,factor_confirmed boolean)
++LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
++    SELECT u.id,s.mfa_verified,
++      EXISTS(SELECT 1 FROM public.oidc_identities i WHERE i.user_id=u.id)
++      OR EXISTS(SELECT 1 FROM public.mfa_factors f WHERE f.user_id=u.id AND f.confirmed)
++      OR EXISTS(SELECT 1 FROM public.memberships m JOIN public.tenants t ON t.id=m.tenant_id
++                WHERE m.user_id=u.id AND m.role='admin' AND m.status='active' AND t.status='active'),
++      CASE WHEN EXISTS(SELECT 1 FROM public.oidc_identities i WHERE i.user_id=u.id)
++        THEN EXISTS(SELECT 1 FROM public.oidc_sessions o JOIN public.oidc_identities i ON i.id=o.identity_id
++                    WHERE o.token_hash=s.token_hash AND i.user_id=u.id AND i.status='active')
++        ELSE EXISTS(SELECT 1 FROM public.mfa_factors f WHERE f.user_id=u.id AND f.confirmed AND f.trust_verified)
++      END
++    FROM public.sessions s JOIN public.users u ON u.id=s.user_id
++    WHERE s.token_hash=p_hash AND s.expires_at>now() AND u.status='active'
++      AND (NOT EXISTS(SELECT 1 FROM public.oidc_identities i WHERE i.user_id=u.id)
++           OR EXISTS(SELECT 1 FROM public.oidc_sessions o JOIN public.oidc_identities i ON i.id=o.identity_id
++                     WHERE o.token_hash=s.token_hash AND i.user_id=u.id AND i.status='active'))
++$$;
++-- statement
++CREATE OR REPLACE FUNCTION tenant_admin(p_hash text,p_tenant uuid) RETURNS uuid
++LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
++    SELECT r.id FROM public.resolve_session(p_hash) r JOIN public.memberships m ON m.user_id=r.id
++      JOIN public.tenants t ON t.id=m.tenant_id
++    WHERE r.mfa_verified AND r.factor_confirmed
++      AND m.tenant_id=p_tenant AND m.status='active' AND m.role='admin' AND t.status='active'
++$$;
++-- statement
++CREATE OR REPLACE FUNCTION reset_password(p_token text,p_password text) RETURNS boolean
++LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
++DECLARE uid uuid;
++BEGIN
++    SELECT user_id INTO uid FROM public.password_resets WHERE token_hash=p_token;
++    IF NOT FOUND THEN RETURN false; END IF;
++    PERFORM pg_advisory_xact_lock(hashtextextended('auth-email:'||(SELECT email FROM public.users WHERE id=uid),0));
++    PERFORM 1 FROM public.users WHERE id=uid AND status='active' FOR UPDATE;
++    IF NOT FOUND OR EXISTS(SELECT 1 FROM public.oidc_identities WHERE user_id=uid) THEN RETURN false; END IF;
++    UPDATE public.password_resets SET consumed_at=now()
++        WHERE token_hash=p_token AND consumed_at IS NULL AND expires_at>now();
++    IF NOT FOUND THEN RETURN false; END IF;
++    UPDATE public.users SET password_hash=p_password WHERE id=uid;
++    DELETE FROM public.sessions WHERE user_id=uid;
++    DELETE FROM public.password_resets WHERE user_id=uid;
++    INSERT INTO public.auth_events(id,user_id,action) VALUES(gen_random_uuid(),uid,'password.reset');
++    RETURN true;
++END $$;
++-- statement
++CREATE OR REPLACE FUNCTION retain_auth_data() RETURNS void
++LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
++BEGIN
++    DELETE FROM public.oidc_login_flows WHERE expires_at<=now();
++    DELETE FROM public.sessions WHERE expires_at<=now();
++    DELETE FROM public.password_resets WHERE expires_at<=now() OR consumed_at IS NOT NULL;
++    DELETE FROM public.mfa_requests WHERE expires_at<=now() OR consumed_at<now()-interval '1 day';
++    DELETE FROM public.mfa_enrollments WHERE expires_at<=now();
++    DELETE FROM public.login_attempts WHERE window_start<now()-interval '1 day';
++    DELETE FROM public.auth_rate_buckets WHERE window_start<now()-interval '1 day';
++    DELETE FROM public.auth_events WHERE created_at<now()-interval '30 days';
++    DELETE FROM public.audit_events WHERE created_at<now()-interval '365 days';
++    DELETE FROM public.mfa_operator_audit WHERE created_at<now()-interval '365 days';
++    DELETE FROM public.invitations WHERE expires_at<now()-interval '7 days';
++    DELETE FROM public.auth_mail_outbox WHERE sent_at IS NOT NULL OR dead_at IS NOT NULL OR expires_at<=now();
++END $$;
+diff --git a/apps/api/migrations/versions/0004_auth0_oidc.py b/apps/api/migrations/versions/0004_auth0_oidc.py
+new file mode 100644
+--- /dev/null
++++ b/apps/api/migrations/versions/0004_auth0_oidc.py
+@@ -0,0 +1,30 @@
++"""Pre-provisioned Auth0 identities and server-side OIDC login flows."""
++from pathlib import Path
++from alembic import op
++
++revision = "0004_auth0_oidc"
++down_revision = "0003_security_review"
++branch_labels = None
++depends_on = None
++
++
++def upgrade():
++    source = Path(__file__).parent.parent / "auth0_oidc.sql"
++    for statement in source.read_text().split("\n-- statement\n"):
++        op.execute(statement)
++
++
++def downgrade():
++    # Remove OIDC sessions rather than turn them into trusted local sessions.
++    op.execute("DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM oidc_sessions)")
++    prior = (Path(__file__).parent.parent / "security_review.sql").read_text()
++    for statement in prior.split("\n-- statement\n"):
++        if statement.startswith(("CREATE FUNCTION resolve_session", "CREATE FUNCTION tenant_admin", "CREATE FUNCTION retain_auth_data")):
++            op.execute(statement.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1))
++    lifecycle = (Path(__file__).parent.parent / "auth_lifecycle.sql").read_text()
++    for statement in lifecycle.split("\n-- statement\n"):
++        if statement.startswith("CREATE FUNCTION reset_password"):
++            op.execute(statement.replace("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1)
++                       .replace("search_path=pg_catalog,public AS", "search_path=pg_catalog,public,pg_temp AS"))
++    op.execute("DROP TABLE oidc_sessions, oidc_login_flows, oidc_identities")
++
+diff --git a/apps/api/requirements-dev.lock b/apps/api/requirements-dev.lock
+--- a/apps/api/requirements-dev.lock
++++ b/apps/api/requirements-dev.lock
+@@ -5,6 +5,7 @@
+ anyio==4.16.0
+ argon2-cffi==25.1.0
+ argon2-cffi-bindings==26.1.0
++Authlib==1.9.5
+ certifi==2026.10.23
+ cffi==2.1.1
+ click==8.5.1
+@@ -17,6 +18,7 @@
+ httpx==0.28.1
+ idna==3.20
+ iniconfig==2.3.1
++joserfc==1.8.0
+ mako==1.4.3
+ markupsafe==3.0.4
+ opentelemetry-api==1.45.2
+diff --git a/apps/api/requirements.lock b/apps/api/requirements.lock
+--- a/apps/api/requirements.lock
++++ b/apps/api/requirements.lock
+@@ -5,14 +5,19 @@
+ anyio==4.16.0
+ argon2-cffi==25.1.0
+ argon2-cffi-bindings==26.1.0
++Authlib==1.9.5
++certifi==2026.10.23
+ cffi==2.1.1
+ click==8.5.1
+ cryptography==50.0.2
+ fastapi==0.162.2
+ greenlet==3.5.6
+ h11==0.16.0
++httpcore==1.0.9
+ httptools==0.9.0
++httpx==0.28.1
+ idna==3.20
++joserfc==1.8.0
+ mako==1.4.3
+ markupsafe==3.0.4
+ opentelemetry-api==1.45.2
+diff --git a/apps/api/requirements.txt b/apps/api/requirements.txt
+--- a/apps/api/requirements.txt
++++ b/apps/api/requirements.txt
+@@ -7,3 +7,5 @@
+ SQLAlchemy==2.0.44
+ pyotp==2.9.0
+ cryptography==50.0.2
++Authlib==1.9.5
++httpx==0.28.1
+diff --git a/apps/api/tests/conftest.py b/apps/api/tests/conftest.py
+--- a/apps/api/tests/conftest.py
++++ b/apps/api/tests/conftest.py
+@@ -41,6 +41,21 @@
+             assert db.execute("SELECT password_hash FROM users WHERE id=%s", (legacy_user,)).fetchone()[0] == 'legacy-hash'
+             assert db.execute("SELECT mfa_verified FROM sessions WHERE user_id=%s", (legacy_user,)).fetchone()[0] is False
+             assert db.execute("SELECT role FROM memberships WHERE user_id=%s AND tenant_id=%s", (legacy_user, legacy_tenant)).fetchone()[0] == 'student'
++            external_user, external_identity = uuid4(), uuid4()
++            db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'external-fixture-hash')",
++                       (external_user,f'{external_user}@example.invalid'))
++            db.execute("INSERT INTO oidc_identities(id,user_id,issuer,subject,provision_reference) VALUES(%s,%s,'https://fixture.us.auth0.com/','fixture-subject','synthetic-fixture-reference')",
++                       (external_identity,external_user))
++            db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES('oidc-downgrade-fixture',%s,now()+interval '1 hour',true)", (external_user,))
++            db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES('oidc-downgrade-fixture',%s,now(),'maaher-fido2-uv-v1')", (external_identity,))
++        command.downgrade(config, "0003_security_review")
++        with psycopg.connect(owner_url) as db:
++            for table in ("oidc_identities", "oidc_login_flows", "oidc_sessions"):
++                assert db.execute("SELECT to_regclass(%s)", ("public." + table,)).fetchone()[0] is None
++            assert db.execute("SELECT password_hash FROM users WHERE id=%s", (legacy_user,)).fetchone()[0] == 'legacy-hash'
++            assert db.execute("SELECT token_hash FROM sessions WHERE token_hash='oidc-downgrade-fixture'").fetchone() is None
++            assert db.execute("SELECT password_hash FROM users WHERE id=%s", (external_user,)).fetchone()[0] == 'external-fixture-hash'
++        command.upgrade(config, "head")
+         command.downgrade(config, "0002_auth_lifecycle")
+         with psycopg.connect(owner_url) as db:
+             assert db.execute("SELECT to_regclass('public.mfa_requests')").fetchone()[0] is None
+@@ -57,11 +72,12 @@
+         with psycopg.connect(owner_url) as db:
+             for table in ("users", "tenants", "memberships", "sessions", "login_attempts", "audit_events",
+                           "invitations", "password_resets", "mfa_factors", "auth_events", "auth_mail_outbox",
+-                          "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit"):
++                          "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit",
++                          "oidc_identities", "oidc_login_flows", "oidc_sessions"):
+                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
+         command.upgrade(config, "head")
+         with psycopg.connect(owner_url) as db:
+-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0003_security_review"
++            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0004_auth0_oidc"
+         yield owner_url
+     finally:
+         if previous is None:
+diff --git a/apps/api/tests/oidc_browser_probe.py b/apps/api/tests/oidc_browser_probe.py
+new file mode 100644
+--- /dev/null
++++ b/apps/api/tests/oidc_browser_probe.py
+@@ -0,0 +1,61 @@
++"""Test-only uvicorn target with a signed, in-memory HTTPS IdP transport.
++
++Never selected by app code or copied into the runtime image. The test runner
++sets synthetic config and uses a fresh maaher_test_* DB. No network Auth0 calls.
++"""
++import os
++import time
++from urllib.parse import parse_qs,urlsplit
++
++import httpx
++import psycopg
++from joserfc import jwt
++from joserfc.jwk import RSAKey
++from authlib.oauth2.rfc7636 import create_s256_code_challenge
++
++from app.main import app
++from app import oidc
++
++if os.environ.get('APP_ENV') != 'local' or os.environ.get('AUTH0_DOMAIN') != 'browser-tests.us.auth0.com':
++    raise RuntimeError('Synthetic local browser probe only')
++with psycopg.connect(os.environ['TEST_MIGRATION_DATABASE_URL']) as guard:
++    if not guard.execute('SELECT current_database()').fetchone()[0].startswith('maaher_test_'):
++        raise RuntimeError('Disposable test database required')
++
++key = RSAKey.generate_key(2048,parameters={'kid':'synthetic-browser-key'})
++issued = {}
++original = oidc.make_client
++
++
++def handle(request):
++    if str(request.url) == 'https://browser-tests.us.auth0.com/.well-known/jwks.json':
++        return httpx.Response(200,json={'keys':[key.as_dict(private=False)]})
++    assert str(request.url) == 'https://browser-tests.us.auth0.com/oauth/token'
++    form = parse_qs(request.content.decode())
++    transaction = issued.pop(form['code'][0])
++    assert create_s256_code_challenge(form['code_verifier'][0]) == transaction['code_challenge'][0]
++    now = int(time.time())
++    claims = {'iss':'https://browser-tests.us.auth0.com/','sub':'auth0|synthetic-browser-staff',
++              'aud':'synthetic-browser-client','iat':now,'exp':now+300,'auth_time':now,
++              'nonce':transaction['nonce'][0],'amr':['pwd','mfa'],oidc.ASSURANCE_CLAIM:oidc.ASSURANCE}
++    encoded = jwt.encode({'alg':'RS256','kid':key.kid},claims,key)
++    return httpx.Response(200,json={'id_token':encoded,'access_token':'synthetic-browser-access-token',
++                                    'token_type':'Bearer','expires_in':300})
++
++
++def make(config):
++    client = original(config)
++    client.client_kwargs.update(transport=httpx.MockTransport(handle),trust_env=False)
++    create = client.create_authorization_url
++
++    async def authorization(*args,**kwargs):
++        data = await create(*args,**kwargs)
++        params = parse_qs(urlsplit(data['url']).query)
++        issued[params['state'][0]] = params
++        return data
++
++    client.create_authorization_url = authorization
++    return client
++
++
++oidc.make_client = make
+diff --git a/apps/api/tests/test_mfa_expiry_regressions.py b/apps/api/tests/test_mfa_expiry_regressions.py
+new file mode 100644
+--- /dev/null
++++ b/apps/api/tests/test_mfa_expiry_regressions.py
+@@ -0,0 +1,94 @@
++"""Regression cases for MFA setup that expires before it is completed."""
++import time
++
++import psycopg
++import pyotp
++
++from auth_helpers import authorize_mfa, enroll_mfa, sign_in
++from app.security import token_digest
++
++
++ORIGIN = {"origin": "https://testserver"}
++
++
++def test_expired_operator_request_can_be_renewed_on_the_same_session(identity):
++    client, owner, user, _, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    first_grant = authorize_mfa(client)
++    with psycopg.connect(owner) as db:
++        first_id = db.execute(
++            "UPDATE mfa_requests SET expires_at=now()-interval '1 second' "
++            "WHERE user_id=%s RETURNING id", (user,)
++        ).fetchone()[0]
++    renewed = client.post("/auth/mfa/request", json={"purpose": "bootstrap"}, headers=ORIGIN)
++    assert renewed.status_code == 200
++    assert renewed.json()["request_id"] != str(first_id)
++    # A replacement request must not make the old approval usable again.
++    assert client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": first_grant,
++    }, headers=ORIGIN).status_code == 403
++    replacement_grant = authorize_mfa(client)
++    response = client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": replacement_grant,
++    }, headers=ORIGIN)
++    assert response.status_code == 200
++    factor = pyotp.parse_uri(response.json()["provisioning_uri"])
++    assert client.post("/auth/mfa/verify", json={"code": factor.now()}, headers=ORIGIN).status_code == 200
++    with psycopg.connect(owner) as db:
++        # Expiring a request must not erase the independent approval audit.
++        assert db.execute("SELECT count(*) FROM mfa_operator_audit WHERE user_id=%s", (user,)).fetchone()[0] == 2
++
++
++def test_unexpired_request_retries_preserve_id_and_one_use_approval(identity):
++    client, _, _, _, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    first = client.post("/auth/mfa/request", json={"purpose": "bootstrap"}, headers=ORIGIN)
++    grant = authorize_mfa(client)
++    repeated = client.post("/auth/mfa/request", json={"purpose": "bootstrap"}, headers=ORIGIN)
++    assert first.status_code == repeated.status_code == 200
++    assert first.json()["request_id"] == repeated.json()["request_id"]
++    payload = {"password": password, "authorization": grant}
++    assert client.post("/auth/mfa/enroll", json=payload, headers=ORIGIN).status_code == 200
++    assert client.post("/auth/mfa/enroll", json=payload, headers=ORIGIN).status_code == 403
++
++
++def test_expired_recovery_setup_does_not_block_the_active_authenticator(identity):
++    client, owner, user, tenant, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    active = enroll_mfa(client, password)
++    assert sign_in(client, email, password).status_code == 200
++    grant = authorize_mfa(client, "recovery")
++    response = client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": grant,
++        "new_password": "Never committed recovery password 123!",
++    }, headers=ORIGIN)
++    assert response.status_code == 200
++    with psycopg.connect(owner) as db:
++        old_factor = db.execute("SELECT encrypted_secret FROM mfa_factors WHERE user_id=%s", (user,)).fetchone()[0]
++        db.execute("UPDATE mfa_enrollments SET expires_at=now()-interval '1 second' WHERE user_id=%s", (user,))
++    # The next accepted TOTP step avoids replaying the enrollment confirmation.
++    verified = client.post("/auth/mfa/verify", json={"code": active.at(time.time() + 30)}, headers=ORIGIN)
++    assert verified.status_code == 200, verified.text
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 200
++    with psycopg.connect(owner) as db:
++        assert db.execute("SELECT encrypted_secret FROM mfa_factors WHERE user_id=%s", (user,)).fetchone()[0] == old_factor
++        assert db.execute("SELECT count(*) FROM mfa_enrollments WHERE user_id=%s", (user,)).fetchone()[0] == 0
++    assert sign_in(client, email, password).status_code == 200
++
++
++def test_expired_pending_factor_cannot_complete_bootstrap(identity):
++    client, owner, user, _, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    grant = authorize_mfa(client)
++    response = client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": grant,
++    }, headers=ORIGIN)
++    assert response.status_code == 200
++    pending = pyotp.parse_uri(response.json()["provisioning_uri"])
++    digest = token_digest(client.cookies.get("maaher_session"))
++    with psycopg.connect(owner) as db:
++        db.execute("UPDATE mfa_enrollments SET expires_at=now()-interval '1 second' WHERE session_hash=%s", (digest,))
++    assert client.post("/auth/mfa/verify", json={"code": pending.now()}, headers=ORIGIN).status_code == 400
++    with psycopg.connect(owner) as db:
++        assert db.execute("SELECT count(*) FROM mfa_factors WHERE user_id=%s", (user,)).fetchone()[0] == 0
++        assert db.execute("SELECT mfa_verified FROM sessions WHERE token_hash=%s", (digest,)).fetchone()[0] is False
+diff --git a/apps/api/tests/test_oidc.py b/apps/api/tests/test_oidc.py
+new file mode 100644
+--- /dev/null
++++ b/apps/api/tests/test_oidc.py
+@@ -0,0 +1,336 @@
++"""Exercise real Authlib/JWKS/RS256 verification against an in-memory HTTPS IdP."""
++import json
++import os
++import time
++from urllib.parse import parse_qs, urlsplit
++from uuid import uuid4
++
++import httpx
++import psycopg
++import pytest
++from fastapi.testclient import TestClient
++from joserfc import jwt
++from joserfc.jwk import RSAKey, OctKey
++from authlib.oauth2.rfc7636 import create_s256_code_challenge
++
++from app import oidc
++from app.auth_support import cipher
++from app.database import transaction
++from app.main import app
++from app.security import new_token, token_digest
++from auth_helpers import sign_in
++
++ORIGIN = {"origin": "https://testserver"}
++ISSUER = "https://maaher-tests.us.auth0.com/"
++SUBJECT = "auth0|verified-synthetic-staff"
++CLIENT = "synthetic-client-id"
++SECRET = "synthetic-client-secret-not-a-real-credential-12345"
++
++
++@pytest.fixture(scope="session")
++def provider_key():
++    return RSAKey.generate_key(2048, parameters={"kid": "synthetic-provider-key"})
++
++
++@pytest.fixture
++def provider(identity, monkeypatch, provider_key):
++    monkeypatch.setenv("AUTH0_DOMAIN", "maaher-tests.us.auth0.com")
++    monkeypatch.setenv("AUTH0_CLIENT_ID", CLIENT)
++    monkeypatch.setenv("AUTH0_CLIENT_SECRET", SECRET)
++    codes, calls = {}, []
++
++    def handle(request):
++        calls.append((request.method, str(request.url)))
++        assert str(request.url).startswith(ISSUER)
++        if request.url.path == "/.well-known/jwks.json":
++            return httpx.Response(200, json={"keys": [provider_key.as_dict(private=False)]})
++        assert request.method == "POST" and request.url.path == "/oauth/token"
++        assert request.headers["authorization"].startswith("Basic ")
++        form = parse_qs(request.content.decode())
++        assert form["grant_type"] == ["authorization_code"]
++        assert form["redirect_uri"] == ["https://testserver/api/auth/oidc/callback"]
++        spec = codes.pop(form["code"][0])
++        assert create_s256_code_challenge(form["code_verifier"][0]) == spec["challenge"]
++        if spec.get("error"):
++            return httpx.Response(400, json={"error": "invalid_grant", "error_description": "private provider diagnostic"})
++        now = int(time.time())
++        claims = {"iss": ISSUER, "sub": SUBJECT + '-' + str(identity[2]), "aud": CLIENT, "iat": now, "exp": now + 300,
++                  "nonce": spec["nonce"], "auth_time": now, "amr": ["pwd", "mfa"],
++                  oidc.ASSURANCE_CLAIM: oidc.ASSURANCE}
++        claims.update(spec.get("claims", {}))
++        for key in spec.get("omit", []):
++            claims.pop(key)
++        alg = spec.get("alg", "RS256")
++        signing = OctKey.import_key(SECRET.encode()) if alg == "HS256" else spec.get("key", provider_key)
++        encoded = jwt.encode({"alg": alg, "kid": signing.kid}, claims, signing)
++        return httpx.Response(200, json={"access_token": "synthetic-access-token-never-persisted",
++                                        "token_type": "Bearer", "expires_in": 300, "id_token": encoded})
++
++    original = oidc.make_client
++
++    def make(config):
++        client = original(config)
++        client.client_kwargs.update(transport=httpx.MockTransport(handle), trust_env=False)
++        return client
++
++    monkeypatch.setattr(oidc, "make_client", make)
++    return {"codes": codes, "calls": calls}
++
++
++def bind(identity, subject=None, operator=False, admin=True):
++    owner, user, tenant = identity[1:4]
++    subject = subject if subject is not None else SUBJECT + '-' + str(user)
++    identifier = uuid4()
++    with psycopg.connect(owner) as db:
++        if admin:
++            db.execute("UPDATE memberships SET role='admin' WHERE user_id=%s AND tenant_id=%s", (user, tenant))
++        db.execute("""INSERT INTO oidc_identities(id,user_id,issuer,subject,is_operator,provision_reference)
++                      VALUES(%s,%s,%s,%s,%s,'synthetic-supervised-key-verification')""",
++                   (identifier, user, ISSUER, subject, operator))
++    return identifier
++
++
++def begin(client, provider, **spec):
++    response = client.post("/auth/oidc/login", json={}, headers=ORIGIN)
++    assert response.status_code == 200, response.text
++    query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
++    assert query["response_type"] == ["code"] and query["scope"] == ["openid"]
++    assert query["code_challenge_method"] == ["S256"] and query["prompt"] == ["login"]
++    assert query["max_age"] == ["0"]
++    assert SECRET not in response.text
++    code = new_token()
++    provider["codes"][code] = {"nonce": query["nonce"][0], "challenge": query["code_challenge"][0], **spec}
++    return {"state": query["state"][0], "code": code}
++
++
++def test_oidc_rotates_into_a_private_session_and_keeps_tenant_authorization(identity, provider):
++    client, owner, user, tenant, foreign = identity[:5]
++    assert sign_in(client, identity[5], identity[6]).status_code == 200
++    bind(identity)
++    flow = begin(client, provider)
++    with psycopg.connect(owner) as db:
++        encrypted = db.execute("SELECT encrypted_state FROM oidc_login_flows").fetchone()[0]
++        assert flow["state"] not in encrypted
++        state = json.loads(cipher().decrypt(encrypted.encode()))
++        assert "code_verifier" in next(iter(state.values()))["data"]
++    old_cookie = client.cookies.get("maaher_session")
++    response = client.get("/auth/oidc/callback", params=flow)
++    assert response.status_code == 200, response.text
++    cookie = client.cookies.get("maaher_session")
++    assert cookie and cookie != old_cookie and "." not in cookie
++    assert all(value in response.headers["set-cookie"].lower() for value in ("httponly", "secure", "samesite=lax"))
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).json()["role"] == "admin"
++    assert client.get("/auth/me", headers={"x-tenant-id": str(foreign)}).status_code == 403
++    assert client.get("/auth/tenant-members", headers={"x-tenant-id": str(tenant)}).status_code == 200
++    assert client.get("/auth/oidc/session").json()["provider"] == "auth0"
++    with psycopg.connect(owner) as db:
++        assert db.execute("SELECT count(*) FROM oidc_login_flows").fetchone()[0] == 0
++        assert db.execute("SELECT user_id,mfa_verified FROM sessions WHERE token_hash=%s", (token_digest(cookie),)).fetchone() == (user, True)
++    assert client.get("/auth/oidc/callback", params=flow).status_code == 400
++
++
++@pytest.mark.parametrize("spec", [
++    {"claims": {"iss": "https://other.us.auth0.com/"}},
++    {"claims": {"aud": "another-client"}},
++    {"claims": {"azp": "another-client"}},
++    {"claims": {"nonce": "another-flow"}},
++    {"claims": {"exp": 1}},
++    {"claims": {"iat": 9999999999}},
++    {"claims": {"auth_time": 1}},
++    {"claims": {"auth_time": 9999999999}},
++    {"claims": {"auth_time": True}},
++    {"claims": {"amr": ["pwd"]}},
++    {"claims": {oidc.ASSURANCE_CLAIM: "otp-is-not-the-security-key-policy"}},
++    {"omit": [oidc.ASSURANCE_CLAIM]},
++    {"omit": ["nonce"]},
++    {"omit": ["auth_time"]},
++    {"omit": ["sub"]},
++    {"omit": ["aud"]},
++    {"alg": "HS256"},
++    {"alg": "RS512"},
++    {"error": True},
++])
++def test_oidc_rejects_invalid_tokens_without_issuing_a_session(identity, provider, spec):
++    client, owner = identity[:2]
++    bind(identity)
++    response = client.get("/auth/oidc/callback", params=begin(client, provider, **spec))
++    assert response.status_code == 400, response.text
++    assert not client.cookies.get("maaher_session")
++    assert "private provider diagnostic" not in response.text
++    with psycopg.connect(owner) as db:
++        assert db.execute("SELECT count(*) FROM sessions WHERE user_id=%s", (identity[2],)).fetchone()[0] == 0
++
++
++def test_oidc_rejects_a_signature_from_an_untrusted_key(identity, provider):
++    bind(identity)
++    rogue = RSAKey.generate_key(2048, parameters={"kid": "untrusted-key"})
++    response = identity[0].get("/auth/oidc/callback", params=begin(identity[0], provider, key=rogue))
++    assert response.status_code == 400
++
++
++def test_same_email_never_links_an_unregistered_provider_subject(identity, provider):
++    bind(identity, subject="auth0|different-subject")
++    response = identity[0].get("/auth/oidc/callback", params=begin(identity[0], provider, claims={"email": identity[5], "email_verified": True}))
++    assert response.status_code == 400
++    assert not identity[0].cookies.get("maaher_session")
++
++
++def test_prebound_staff_can_login_without_the_local_password_or_email(identity, provider):
++    from app.auth import passwords
++    bind(identity)
++    client, owner, user, tenant = identity[:4]
++    with psycopg.connect(owner) as db:
++        db.execute("UPDATE users SET email=%s,password_hash=%s WHERE id=%s",
++                   (f'{uuid4()}@no-inbox.example.invalid', passwords.hash(new_token()), user))
++    assert sign_in(client, identity[5], identity[6]).status_code == 401
++    response = client.get('/auth/oidc/callback', params=begin(client, provider, claims={'email': identity[5]}))
++    assert response.status_code == 200
++    assert client.get('/auth/me', headers={'x-tenant-id': str(tenant)}).json()['user_id'] == str(user)
++
++
++def test_flow_is_bound_to_browser_and_invalid_attempt_does_not_consume_it(identity, provider):
++    client = identity[0]; bind(identity)
++    params = begin(client, provider)
++    with TestClient(app, base_url="https://testserver") as other:
++        assert other.get("/auth/oidc/callback", params=params).status_code == 400
++    assert not provider["calls"]
++    assert client.get("/auth/oidc/callback", params=params).status_code == 200
++
++
++@pytest.mark.parametrize("tamper", ["expired", "config", "encrypted", "state", "duplicate", "issuer"])
++def test_flow_tampering_fails_before_exchange(identity, provider, monkeypatch, tamper):
++    client, owner = identity[:2]; bind(identity)
++    params = begin(client, provider)
++    if tamper == "config": monkeypatch.setenv("AUTH0_CLIENT_ID", "changed-client")
++    elif tamper == "state": params["state"] = new_token()
++    elif tamper == "issuer": params["iss"] = "https://other.us.auth0.com/"
++    elif tamper in {"expired", "encrypted"}:
++        with psycopg.connect(owner) as db:
++            if tamper == "expired": db.execute("UPDATE oidc_login_flows SET expires_at=now()-interval '1 second'")
++            else: db.execute("UPDATE oidc_login_flows SET encrypted_state='invalid-ciphertext'")
++    if tamper == "duplicate": params = [("state", params["state"]), ("state", params["state"]), ("code", params["code"])]
++    response = client.get("/auth/oidc/callback", params=params)
++    assert response.status_code == 400 and not provider["calls"]
++
++
++def test_bound_and_revoked_staff_have_no_password_or_reset_fallback(identity, provider):
++    client, owner, user, tenant, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    local = client.cookies.get("maaher_session")
++    assert client.post("/auth/password-reset/request", json={"email": email}, headers=ORIGIN).status_code == 202
++    with psycopg.connect(owner) as db:
++        old_reset = db.execute("SELECT token_hash FROM password_resets WHERE user_id=%s", (user,)).fetchone()[0]
++    identifier = bind(identity)
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 401
++    assert sign_in(client, email, password).status_code == 401
++    response = client.get("/auth/oidc/callback", params=begin(client, provider))
++    assert response.status_code == 200
++    # A reset issued before binding must not revoke the new staff session.
++    with psycopg.connect(os.environ["TEST_AUTH_DATABASE_URL"]) as db:
++        assert db.execute("SELECT reset_password(%s,'should-not-be-written')", (old_reset,)).fetchone()[0] is False
++    with psycopg.connect(owner) as db:
++        db.execute("DELETE FROM auth_mail_outbox WHERE recipient=%s", (email,))
++    assert client.post("/auth/password-reset/request", json={"email": email}, headers=ORIGIN).status_code == 202
++    with psycopg.connect(owner) as db:
++        assert db.execute("SELECT count(*) FROM auth_mail_outbox WHERE recipient=%s", (email,)).fetchone()[0] == 0
++        db.execute("UPDATE oidc_identities SET status='revoked' WHERE id=%s", (identifier,))
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 401
++    assert sign_in(client, email, password).status_code == 401
++    client.cookies.set("maaher_session", local)
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 401
++
++
++def test_operator_marker_does_not_grant_tenant_admin_or_local_mfa_changes(identity, provider):
++    client, _, _, tenant = identity[:4]
++    bind(identity, operator=True, admin=False)
++    assert client.get("/auth/oidc/callback", params=begin(client, provider)).json()["is_operator"] is True
++    assert client.get("/auth/oidc/session").json()["is_operator"] is True
++    assert client.get("/auth/audit", headers={"x-tenant-id": str(tenant)}).status_code == 403
++    for path, payload in [("request", {"purpose": "recovery"}), ("enroll", {"password": identity[6]}), ("verify", {"code": "123456"})]:
++        assert client.post("/auth/mfa/" + path, json=payload, headers=ORIGIN).status_code == 403
++
++
++def test_membership_revocation_is_checked_after_oidc_login(identity, provider):
++    bind(identity)
++    client, owner, user, tenant = identity[:4]
++    assert client.get("/auth/oidc/callback", params=begin(client, provider)).status_code == 200
++    with psycopg.connect(owner) as db: db.execute("UPDATE memberships SET status='revoked' WHERE user_id=%s", (user,))
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 403
++
++
++def test_disabling_the_bound_user_revokes_existing_oidc_access(identity, provider):
++    bind(identity)
++    client, owner, user, tenant = identity[:4]
++    assert client.get("/auth/oidc/callback", params=begin(client, provider)).status_code == 200
++    with psycopg.connect(owner) as db: db.execute("UPDATE users SET status='disabled' WHERE id=%s", (user,))
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 401
++
++
++@pytest.mark.parametrize("table", ["oidc_identities", "oidc_sessions", "oidc_login_flows"])
++def test_tenant_runtime_cannot_read_oidc_material(identity, table):
++    with transaction() as db, pytest.raises(psycopg.errors.InsufficientPrivilege):
++        db.execute("SELECT * FROM " + table)
++
++
++def test_runtime_cannot_mint_oidc_sessions_and_auth_cannot_bind_a_subject(identity):
++    with transaction() as db, pytest.raises(psycopg.errors.InsufficientPrivilege):
++        db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES('forged',gen_random_uuid(),now(),'maaher-fido2-uv-v1')")
++    with psycopg.connect(os.environ['TEST_AUTH_DATABASE_URL']) as db, pytest.raises(psycopg.errors.InsufficientPrivilege):
++        db.execute("INSERT INTO oidc_identities(id,user_id,issuer,subject,provision_reference) VALUES(gen_random_uuid(),gen_random_uuid(),'https://example.us.auth0.com/','forged','forged-reference')")
++    with psycopg.connect(identity[1]) as db:
++        assert db.execute("SELECT has_column_privilege('maaher_definer','oidc_login_flows','expires_at','SELECT')").fetchone()[0] is True
++        assert db.execute("SELECT has_column_privilege('maaher_definer','oidc_login_flows','encrypted_state','SELECT')").fetchone()[0] is False
++
++
++def test_offline_binding_revokes_local_sessions_and_cannot_reassign_a_subject(identity, provider):
++    from app.oidc_provision import bind_identity
++    client, owner, user, tenant, foreign, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    with psycopg.connect(owner) as db:
++        db.execute("UPDATE memberships SET role='admin' WHERE user_id=%s", (user,))
++        subject = SUBJECT + '-' + str(user)
++        identifier = bind_identity(db,user,ISSUER,subject,False,'synthetic-supervised-binding')
++    assert client.get('/auth/me',headers={'x-tenant-id':str(tenant)}).status_code == 401
++    with psycopg.connect(owner) as db:
++        assert db.execute('SELECT count(*) FROM sessions WHERE user_id=%s',(user,)).fetchone()[0] == 0
++        other = db.execute('SELECT user_id FROM memberships WHERE tenant_id=%s',(foreign,)).fetchone()[0]
++    with pytest.raises(psycopg.errors.UniqueViolation), psycopg.connect(owner) as db:
++        bind_identity(db,other,ISSUER,subject,True,'synthetic-attempted-reassignment')
++    with psycopg.connect(owner) as db:
++        assert db.execute('SELECT user_id FROM oidc_identities WHERE id=%s',(identifier,)).fetchone()[0] == user
++
++
++def test_oidc_start_requires_origin_and_never_accepts_a_return_url(identity, provider):
++    client = identity[0]
++    assert client.post("/auth/oidc/login", json={}).status_code == 403
++    response = client.post("/auth/oidc/login", json={"return_to": "https://evil.invalid"}, headers=ORIGIN)
++    assert response.status_code == 200 and "evil.invalid" not in response.text
++
++
++def test_missing_provider_configuration_is_explicit(identity, monkeypatch):
++    for key in ("AUTH0_DOMAIN", "AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET"): monkeypatch.delenv(key, raising=False)
++    client = identity[0]
++    assert client.get("/auth/oidc/config").json() == {"enabled": False}
++    assert client.post("/auth/oidc/login", json={}, headers=ORIGIN).status_code == 503
++
++
++@pytest.mark.parametrize("domain", ["https://demo.us.auth0.com", "demo.auth0.com.evil.invalid", "localhost", "demo..auth0.com", "demo.auth0.com:443"])
++def test_invalid_auth0_domain_cannot_be_used_as_a_network_destination(identity, provider, monkeypatch, domain):
++    monkeypatch.setenv("AUTH0_DOMAIN", domain)
++    assert identity[0].post("/auth/oidc/login", json={}, headers=ORIGIN).status_code == 503
++    assert not provider["calls"]
++
++
++@pytest.mark.parametrize('origin', ['http://production.example', 'https://example.invalid/path',
++                                  'https://example.invalid:invalid', 'https://[broken',
++                                  'https://user:synthetic@example.invalid'])
++def test_unsafe_callback_origin_is_not_configured(identity, provider, monkeypatch, origin):
++    from fastapi import HTTPException
++    monkeypatch.setenv('APP_ENV','production'); monkeypatch.setenv('APP_ORIGIN',origin)
++    with pytest.raises(HTTPException) as failure: oidc.settings()
++    assert failure.value.status_code == 503
++
++
++def test_http_callback_is_only_available_for_explicit_local_loopback(identity, provider, monkeypatch):
++    monkeypatch.setenv('APP_ENV','local'); monkeypatch.setenv('APP_ORIGIN','http://127.0.0.1:3000')
++    assert oidc.settings().callback == 'http://127.0.0.1:3000/api/auth/oidc/callback'
+diff --git a/apps/api/tests/test_review_regressions.py b/apps/api/tests/test_review_regressions.py
+--- a/apps/api/tests/test_review_regressions.py
++++ b/apps/api/tests/test_review_regressions.py
+@@ -373,6 +373,11 @@
+     response=client.post('/auth/mfa/enroll',json={'password':password,'new_password':'Rotation recovery password 123!','authorization':grant},headers=ORIGIN)
+     assert response.status_code==200
+     replacement=pyotp.parse_uri(response.json()['provisioning_uri'])
++    flow_hash=token_digest(new_token())
++    with psycopg.connect(owner) as db:
++        db.execute("""INSERT INTO oidc_login_flows(browser_hash,state_hash,encrypted_state,config_hash,expires_at)
++                      VALUES(%s,%s,%s,'synthetic-rotation-config',now()+interval '5 minutes')""",
++                   (flow_hash,token_digest(new_token()),cipher().encrypt(b'{"oidc":"synthetic-rotation-state"}').decode()))
+     old_key=os.environ['AUTH_ENCRYPTION_KEY'];new_key=Fernet.generate_key().decode()
+     monkeypatch.setenv('AUTH_ENCRYPTION_KEYS',json.dumps({'v2':new_key,'legacy':old_key}))
+     monkeypatch.setenv('AUTH_ACTIVE_KEY_ID','v2')
+@@ -385,6 +390,8 @@
+         pending=db.execute('SELECT encrypted_secret FROM mfa_enrollments WHERE user_id=%s',(user,)).fetchone()[0]
+         assert factor.startswith('v2:') and pending.startswith('v2:')
+         assert cipher().decrypt(pending.encode()).decode()==replacement.secret
++        flow=db.execute('SELECT encrypted_state FROM oidc_login_flows WHERE browser_hash=%s',(flow_hash,)).fetchone()[0]
++        assert flow.startswith('v2:') and cipher().decrypt(flow.encode())==b'{"oidc":"synthetic-rotation-state"}'
+     assert client.post('/auth/mfa/verify',json={'code':replacement.now()},headers=ORIGIN).status_code==200
+     # Rotation is atomic: unreadable data aborts all updates, never drops factors.
+     with psycopg.connect(owner) as db:
+diff --git a/apps/web/app/api/auth/[...path]/route.ts b/apps/web/app/api/auth/[...path]/route.ts
+--- a/apps/web/app/api/auth/[...path]/route.ts
++++ b/apps/web/app/api/auth/[...path]/route.ts
+@@ -3,9 +3,10 @@
+ import { isIP } from 'node:net';
+ 
+ export const dynamic = 'force-dynamic';
+-const readable = new Set(['me', 'memberships', 'audit', 'security-events', 'tenant-members']);
++const readable = new Set(['me', 'memberships', 'audit', 'security-events', 'tenant-members',
++  'oidc/config', 'oidc/callback', 'oidc/session']);
+ const writable = new Set(['login', 'logout', 'tenant-selection', 'invitations',
+-  'invitations/accept', 'password-reset/request', 'password-reset/confirm', 'mfa/enroll', 'mfa/verify', 'mfa/request']);
++  'invitations/accept', 'password-reset/request', 'password-reset/confirm', 'mfa/enroll', 'mfa/verify', 'mfa/request', 'oidc/login']);
+ 
+ async function proxy(request: NextRequest, context: { params: Promise<{ path: string[] }> }) {
+   const path = (await context.params).path.join('/');
+@@ -34,8 +35,11 @@
+     headers.set('x-maaher-client-ip', ip);
+   }
+   headers.set('accept', 'application/json');
+-  const session = request.cookies.get('maaher_session')?.value;
+-  if (session) headers.set('cookie', `maaher_session=${session}`);
++  const cookies = ['maaher_session', 'maaher_oidc_flow'].flatMap(name => {
++    const value = request.cookies.get(name)?.value;
++    return value ? [`${name}=${value}`] : [];
++  });
++  if (cookies.length) headers.set('cookie', cookies.join('; '));
+   const tenant = request.headers.get('x-tenant-id');
+   if (tenant) headers.set('x-tenant-id', tenant); // API validates membership on every request.
+   if (request.method === 'POST') {
+@@ -66,6 +70,14 @@
+     if (!['http:', 'https:'].includes(upstream.protocol) || upstream.username || upstream.password
+         || upstream.pathname !== '/' || upstream.search || upstream.hash) throw new Error('Invalid API origin');
+     upstream.pathname = `/auth/${path}`;
++    if (path === 'oidc/callback') {
++      const keys = new Set(['state', 'code', 'error', 'error_description', 'iss']);
++      if (request.nextUrl.search.length > 8192 || [...request.nextUrl.searchParams.keys()].some(key =>
++        !keys.has(key) || request.nextUrl.searchParams.getAll(key).length !== 1)) {
++        return Response.json({ detail: 'Callback tidak valid' }, { status: 400 });
++      }
++      for (const [key, value] of request.nextUrl.searchParams) upstream.searchParams.set(key, value);
++    }
+     if (path === 'tenant-members') {
+       const after = request.nextUrl.searchParams.get('after');
+       if (after && !/^[0-9a-f-]{36}$/.test(after)) return Response.json({ detail: 'Cursor tidak valid' }, { status: 400 });
+@@ -78,6 +90,13 @@
+     for (const cookie of response.headers.getSetCookie()) outgoing.append('set-cookie', cookie);
+     const retry = response.headers.get('retry-after');
+     if (retry) outgoing.set('retry-after', retry);
++    if (path === 'oidc/callback') {
++      // Never forward provider codes, tokens, errors, or return URLs to the UI.
++      const destination = new URL('/auth', origin);
++      destination.searchParams.set('oidc', response.ok ? 'success' : 'failed');
++      outgoing.set('location', destination.toString());
++      return new Response(null, { status: 303, headers: outgoing });
++    }
+     return new Response(await response.arrayBuffer(), { status: response.status, headers: outgoing });
+   } catch {
+     return Response.json({ detail: 'Layanan sementara tidak tersedia' }, { status: 503 });
+diff --git a/apps/web/app/auth/page.tsx b/apps/web/app/auth/page.tsx
+--- a/apps/web/app/auth/page.tsx
++++ b/apps/web/app/auth/page.tsx
+@@ -30,6 +30,8 @@
+   const [members, setMembers] = useState<Member[]>([]);
+   const [nextCursor, setNextCursor] = useState<string | null>(null);
+   const [myUser, setMyUser] = useState('');
++  const [oidcAvailable, setOidcAvailable] = useState(false);
++  const [externalLogin, setExternalLogin] = useState(false);
+ 
+   useEffect(() => {
+     function readLink() {
+@@ -41,6 +43,16 @@
+       if (window.location.hash) window.history.replaceState(null, '', window.location.pathname);
+     }
+     readLink();
++    void fetch('/api/auth/oidc/config', { cache: 'no-store' })
++      .then(response => response.ok ? response.json() : { enabled: false })
++      .then(config => setOidcAvailable(config.enabled === true)).catch(() => setOidcAvailable(false));
++    const result = new URLSearchParams(window.location.search).get('oidc');
++    if (result) {
++      window.history.replaceState(null, '', window.location.pathname);
++      if (result === 'success') {
++        void run(async () => { await loadMemberships(); setMessage('Berhasil masuk melalui Auth0'); });
++      } else setMessage('Login Auth0 gagal atau tidak diizinkan. Silakan mulai kembali.');
++    }
+     window.addEventListener('hashchange', readLink);
+     return () => window.removeEventListener('hashchange', readLink);
+   }, []);
+@@ -73,6 +85,8 @@
+ 
+   async function loadMemberships() {
+     const rows: Membership[] = await call('memberships');
++    const provider = await fetch('/api/auth/oidc/session', { cache: 'no-store' });
++    setExternalLogin(provider.ok);
+     setMemberships(rows); setRole(''); setEvents([]);
+     setTenant(current => rows.some(row => row.tenant_id === current) ? current : rows[0]?.tenant_id ?? '');
+   }
+@@ -89,10 +103,20 @@
+     <p role="status" aria-live="polite">{busy ? 'Memproses…' : message}</p>
+     <fieldset disabled={busy}>
+       <legend>Masuk dan keamanan akun</legend>
++      <section aria-labelledby="oidc-heading">
++        <h2 id="oidc-heading">Admin dan operator</h2>
++        <p>Gunakan akun organisasi yang telah didaftarkan beserta kunci keamanan Anda.</p>
++        <button type="button" disabled={!oidcAvailable} onClick={() => void run(async () => {
++          const result = await call('oidc/login', {});
++          window.location.assign(result.authorization_url);
++        })}>Masuk dengan Auth0</button>
++        {!oidcAvailable && <p>Login staff belum diaktifkan.</p>}
++      </section>
+       <section aria-labelledby="login-heading">
+         <h2 id="login-heading">Masuk</h2>
+         <form onSubmit={event => form(event, async fields => {
+           const login = await call('login', { email: fields.get('email'), password: fields.get('password') });
++          setExternalLogin(false);
+           setUri(''); setRole(''); setMembers([]); setRequestId(''); setEvents([]);
+           if (login.mfa_required) { setMemberships([]); setTenant(''); } else { await loadMemberships(); }
+           setMessage('Berhasil masuk. Verifikasi MFA jika diminta.');
+@@ -103,6 +127,7 @@
+         </form>
+         <p><button type="button" onClick={() => void run(async () => {
+           await call('logout', {}); setMemberships([]); setTenant(''); setRole(''); setUri(''); setEvents([]); setMembers([]); setRequestId('');
++          setExternalLogin(false);
+           setMessage('Berhasil keluar');
+         })}>Keluar</button></p>
+       </section>
+@@ -118,7 +143,10 @@
+           const self = await call('me'); setMyUser(self.user_id);
+         })}>Gunakan organisasi</button>
+       </section>
+-      <section aria-labelledby="mfa-heading">
++      {externalLogin ? <section aria-labelledby="external-security-heading">
++        <h2 id="external-security-heading">Keamanan akun organisasi</h2>
++        <p>Faktor autentikasi akun ini dikelola melalui Auth0. Gunakan prosedur keamanan dan pemulihan akun organisasi.</p>
++      </section> : <section aria-labelledby="mfa-heading">
+         <h2 id="mfa-heading">Verifikasi dua langkah (MFA)</h2>
+         <p>Admin wajib memakai MFA. Aktivasi pertama dan pemulihan membutuhkan verifikasi operator independen, bukan email atau kata sandi saja. Jalur operator untuk akun nyata belum dikonfigurasi.</p>
+         <p><label htmlFor="mfa-purpose">Jenis permintaan</label>{' '}<select id="mfa-purpose" value={purpose} onChange={event => { setPurpose(event.target.value); setRequestId(''); }}>
+@@ -146,7 +174,7 @@
+           <p><label>Kode autentikator <input name="code" inputMode="numeric" pattern="[0-9]{6}" autoComplete="one-time-code" required /></label></p>
+           <button>Verifikasi MFA</button>
+         </form>
+-      </section>
++      </section>}
+       {mode === 'invitation' && <section aria-labelledby="invite-accept-heading">
+         <h2 id="invite-accept-heading">Terima undangan</h2>
+         <p>Jika sudah punya akun, masuk dengan akun penerima terlebih dahulu. Untuk akun baru, isi kata sandi minimal 15 karakter.</p>
+diff --git a/apps/web/playwright.config.ts b/apps/web/playwright.config.ts
+--- a/apps/web/playwright.config.ts
++++ b/apps/web/playwright.config.ts
+@@ -4,5 +4,7 @@
+   testDir: './tests', workers: 1, retries: 0, timeout: 45000,
+   use: { baseURL: process.env.APP_ORIGIN, browserName: 'chromium',
+     channel: process.env.PLAYWRIGHT_CHANNEL,
++    launchOptions: process.env.PLAYWRIGHT_EXECUTABLE_PATH
++      ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH } : undefined,
+     trace: 'off', screenshot: 'off', video: 'off' },
+ });
+diff --git a/apps/web/tests/auth.spec.ts b/apps/web/tests/auth.spec.ts
+--- a/apps/web/tests/auth.spec.ts
++++ b/apps/web/tests/auth.spec.ts
+@@ -1,6 +1,25 @@
+ import { execFileSync } from 'node:child_process';
+ import { randomUUID } from 'node:crypto';
+ import { test, expect, Page } from '@playwright/test';
++
++test('staff login is explicit and unavailable until the provider is configured', async ({ page, request, context }) => {
++  await page.goto('/auth');
++  await expect(page.getByRole('button', { name: 'Masuk dengan Auth0', exact: true })).toBeDisabled();
++  await expect(page.getByText('Login staff belum diaktifkan.')).toBeVisible();
++  const result = await request.post('/api/auth/oidc/login', { headers: { origin: process.env.APP_ORIGIN! }, data: {} });
++  expect(result.status()).toBe(503);
++  expect((await context.cookies()).some(cookie => cookie.name === 'maaher_oidc_flow')).toBe(false);
++});
++
++test('OIDC callback rejects untrusted query fields and redirects to a fixed clean URL', async ({ request }) => {
++  const callback = '/api/auth/oidc/callback';
++  expect((await request.get(`${callback}?state=one&state=two&code=private`, { maxRedirects: 0 })).status()).toBe(400);
++  expect((await request.get(`${callback}?return_to=https://evil.invalid`, { maxRedirects: 0 })).status()).toBe(400);
++  const result = await request.get(`${callback}?state=synthetic-state-value-long&code=private-code`, { maxRedirects: 0 });
++  expect(result.status()).toBe(303);
++  expect(result.headers()['location']).toBe(`${process.env.APP_ORIGIN}/auth?oidc=failed`);
++  expect(result.headers()['location']).not.toContain('private-code');
++});
+ 
+ function fixture(operation: string, payload: object = {}) {
+   return JSON.parse(execFileSync(process.env.LMS_TEST_PYTHON!,
+diff --git a/apps/web/tests/oidc.spec.ts b/apps/web/tests/oidc.spec.ts
+new file mode 100644
+--- /dev/null
++++ b/apps/web/tests/oidc.spec.ts
+@@ -0,0 +1,35 @@
++import { execFileSync } from 'node:child_process';
++import { test, expect } from '@playwright/test';
++
++test('Auth0 OIDC browser flow uses the callback cookie, opaque session and tenant permissions', async ({ page, context }) => {
++  const account = JSON.parse(execFileSync(process.env.LMS_TEST_PYTHON!,
++    [`${process.env.LMS_TEST_ROOT}/scripts/lms01-browser-fixtures.py`, 'oidc-seed'],
++    { input: '{}', encoding: 'utf8' }));
++  await page.route('https://browser-tests.us.auth0.com/authorize*', async route => {
++    const authorize = new URL(route.request().url());
++    expect(authorize.searchParams.get('code_challenge_method')).toBe('S256');
++    expect(authorize.searchParams.get('redirect_uri')).toBe(`${process.env.APP_ORIGIN}/api/auth/oidc/callback`);
++    const callback = new URL(authorize.searchParams.get('redirect_uri')!);
++    const state = authorize.searchParams.get('state')!;
++    callback.searchParams.set('state', state); callback.searchParams.set('code', state);
++    await route.fulfill({ status: 302, headers: { location: callback.toString() } });
++  });
++  await page.goto('/auth');
++  await expect(page.getByRole('button', { name: 'Masuk dengan Auth0', exact: true })).toBeEnabled();
++  await page.getByRole('button', { name: 'Masuk dengan Auth0', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Berhasil masuk melalui Auth0');
++  await expect(page).toHaveURL(`${process.env.APP_ORIGIN}/auth`);
++  await expect(page.getByRole('heading', { name: 'Keamanan akun organisasi' })).toBeVisible();
++  await expect(page.getByRole('button', { name: 'Minta verifikasi operator' })).toHaveCount(0);
++  const session = (await context.cookies()).find(cookie => cookie.name === 'maaher_session')!;
++  expect(session.httpOnly).toBe(true); expect(session.sameSite).toBe('Lax');
++  expect(session.value).not.toContain('.');
++  expect((await context.cookies()).some(cookie => cookie.name === 'maaher_oidc_flow')).toBe(false);
++  await page.getByRole('button', { name: 'Gunakan organisasi', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Organisasi dipilih');
++  const self = await context.request.get('/api/auth/me', { headers: { 'x-tenant-id': account.tenant } });
++  expect(self.status()).toBe(200); expect((await self.json()).role).toBe('admin');
++  await page.getByRole('button', { name: 'Keluar', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Berhasil keluar');
++  expect((await context.request.get('/api/auth/me', { headers: { 'x-tenant-id': account.tenant } })).status()).toBe(401);
++});
+diff --git a/docker-compose.yml b/docker-compose.yml
+--- a/docker-compose.yml
++++ b/docker-compose.yml
+@@ -30,6 +30,9 @@
+       AUTH_ACTIVE_KEY_ID: ${AUTH_ACTIVE_KEY_ID:-legacy}
+       BFF_API_SECRET: ${BFF_API_SECRET:-}
+       LOCAL_INSECURE_COOKIES: ${LOCAL_INSECURE_COOKIES:-false}
++      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-}
++      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-}
++      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
+     networks: [internal]
+   web:
+     build: ./apps/web
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -30,6 +30,12 @@
+ 5. Integration tests: cross-tenant reads/writes/downloads denied with direct identifiers; membership revocation stops access; teacher cannot grade unassigned course.
+ 
+ ## Auth implementation and external decisions
++Pemilik menyetujui Auth0/OIDC untuk admin/operator pada 10 November 2026.
++Implementasi development tahap 1 dan batas produksinya dijelaskan pada
++[ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada
++[AUTH0-SETUP](AUTH0-SETUP.md). Keputusan provider ini menggantikan status
++"belum dipilih" di catatan historis, tanpa membuka gate produksi/operator.
++
+ LMS-01 implements PostgreSQL-backed opaque sessions with `HttpOnly`, `Secure`,
+ `SameSite=Lax` cookies and exact Origin checks on mutations. Argon2 hashing,
+ PyOTP TOTP and Fernet encryption use maintained libraries; no custom crypto or
+@@ -53,8 +59,9 @@
+ independent review pass, LMS-01 is not complete or approved for real learners.
+ Password/email possession cannot bootstrap or replace MFA. The implemented
+ operator authorization/recovery adapter is deliberately restricted to synthetic
+-test databases; a production trust provider and operator MFA workflow remain
+-unapproved. Existing password-only enrollments are not automatically trusted.
++test databases. Auth0/OIDC is now selected; production enrollment, root trust,
++recovery and operator workflow still require implementation/verification and
++independent review. Existing password-only enrollments are not automatically trusted.
+ 
+ ## Coding lab / auto-grader: high-risk system
+ - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.
+diff --git a/docs/AUTH0-SETUP.md b/docs/AUTH0-SETUP.md
+new file mode 100644
+--- /dev/null
++++ b/docs/AUTH0-SETUP.md
+@@ -0,0 +1,154 @@
++# Setup Auth0 development untuk Maaher LMS
++
++Tujuan tahap ini: login admin/operator lewat identity yang diikat sebelumnya,
++tanpa membuka akses produksi. Pemilik sudah memilih Auth0/OIDC tetapi belum
++membuat tenant/aplikasi. Gunakan user dan database sintetis. Panduan tidak
++membutuhkan password, client secret, security key PIN atau recovery code di chat.
++
++## 1. Tenant dan aplikasi
++
++1. Buat akun Auth0 melalui situs resminya, lalu tenant **Development**. Pilih
++   region sesuai kebutuhan lokasi data organisasi. Amankan login **console
++   Auth0** dengan MFA pada identity/provider console dan siapkan recovery-nya;
++   MFA pada user aplikasi bukan pengganti perlindungan console.
++2. Periksa paket/entitlement: WebAuthn roaming/security keys, required user
++   verification, Actions challenge API serta kebutuhan backup/recovery harus
++   tersedia. Jangan mengaktifkan metode lebih lemah untuk melewati blocker paket.
++   Tidak ada harga/subscription diasumsikan atau dibeli oleh kode ini.
++3. Applications → Applications → Create Application. Nama usulan
++   **Maaher LMS Development**; pilih **Regular Web Applications**.
++4. Gunakan domain canonical tenant, misalnya `nama-tenant.us.auth0.com`, tanpa
++   scheme/path. Custom domain belum didukung implementasi tahap pertama.
++5. Dengan `APP_ORIGIN=http://127.0.0.1:3000`, daftarkan **Allowed Callback URLs**:
++
++```text
++http://127.0.0.1:3000/api/auth/oidc/callback
++```
++
++   Gunakan origin yang sama saat membuka browser. localhost dan 127.0.0.1 adalah
++   origin berbeda. Hindari wildcard. Untuk UAT HTTPS, tambahkan URL callback exact
++   pada origin UAT yang benar; HTTP hanya diizinkan pada local loopback eksplisit.
++6. Aktifkan OIDC conformant, signing algorithm **RS256**, grant
++   **Authorization Code**, token-endpoint authentication **Basic**. Jangan
++   aktifkan implicit/password/client-credentials sebagai jalur login staff ini.
++   Tidak meminta refresh token/offline_access. Tidak perlu membuat API audience:
++   ID token diverifikasi terhadap Client ID aplikasi.
++7. Catat **Domain** dan **Client ID**. Keduanya nonsecret. **Client Secret** hanya
++   disimpan di konfigurasi API yang aman, tidak dikirim ke chat atau browser.
++
++Nama menu Auth0 dapat berubah; pastikan nilai konfigurasinya sesuai, bukan
++sekadar mengikuti nama menu. Kehadiran konfigurasi bukan bukti flow live lulus.
++
++## 2. Security keys, first enrollment dan Action
++
++1. Security → Multi-factor Authentication: aktifkan WebAuthn **security keys /
++   roaming**, set **User Verification = Required**, dan wajibkan MFA untuk
++   aplikasi staff. Periksa fitur aktual tenant/plan sebelum melanjutkan.
++2. Buat user staff sintetis. Siapkan enrollment resmi Auth0 dalam proses yang
++   diawasi pemilik pada perangkat yang diketahui. **Jangan** memberi binding
++   admin/operator Maaher hanya karena user bisa membuka email atau login password.
++   Periksa enrollment/factor yang ada dan cabut yang tidak dikenal sebelum
++   memberi wewenang. Verifikasi kunci cadangan atau prosedur recovery yang sesuai
++   benar-benar didukung tenant/paket; jangan menganggapnya sudah tersedia.
++3. Implementasi ini tidak menyediakan onboarding root otomatis. Action di bawah
++   sengaja menolak user tanpa roaming factor yang sudah terdaftar. Jika belum
++   ada jalur enrollment independen yang dapat diverifikasi, catat sebagai blocker
++   root trust; jangan mengubah Action menjadi auto-enroll password/email-only.
++4. Pada **app_metadata**, setelah verifikasi identitas/perangkat dan key selesai,
++   set `maaher_staff_approved` ke boolean `true`. Jangan memakai user_metadata.
++5. Actions → Login/Post Login: buat custom Action dengan source
++   `infra/auth0/staff-post-login.cjs`. Tambahkan Action secret
++   `MAAHER_CLIENT_ID` dengan **Client ID** aplikasi staff tadi (bukan Client Secret).
++   Deploy Action dan hubungkan ke Login flow aplikasi/tenant.
++6. Action meminta `challengeWith({type: 'webauthn-roaming'})` tanpa fallback;
++   ID token tidak diterbitkan jika challenge tidak terpenuhi. Ia menambahkan
++   claim `https://maaherlms.aimz.my.id/assurance = maaher-fido2-uv-v1`.
++   Guardian UV=required tetap merupakan konfigurasi wajib yang harus diverifikasi.
++7. Uji bahwa token live mengandung `amr` dengan `mfa`, `auth_time` yang baru,
++   nonce/audience/issuer yang benar serta claim assurance tersebut. Jangan
++   menghapus pemeriksaan claim pada API bila tenant tidak mengeluarkannya;
++   perbaiki konfigurasi dan catat hasil Auth0 yang sebenarnya.
++
++Kontrak Action diperiksa dari paket resmi `@auth0/actions` 0.36.0,
++Post Login v3. Subsequent Actions tidak berjalan sebelum challenge selesai;
++jika factor tidak enabled/enrolled dan tidak ada factor valid, transaksi gagal.
++Unit tests Action bukan bukti tenant live sudah menerapkan kebijakan ini.
++
++Sumber:
++- https://github.com/auth0/auth0-actions
++- https://github.com/auth0/terraform-provider-auth0/blob/main/docs/resources/guardian.md
++
++## 3. Konfigurasi lokal
++
++Perbarui file `.env` lokal yang sudah ada secara hati-hati. Pertahankan semua
++nilai/secret lama dan jangan menyalin secret ke repository. Contoh **nama** nilai:
++
++```dotenv
++APP_ENV=local
++APP_ORIGIN=http://127.0.0.1:3000
++LOCAL_INSECURE_COOKIES=true
++AUTH0_DOMAIN=
++AUTH0_CLIENT_ID=
++AUTH0_CLIENT_SECRET=
++```
++
++Isi tiga nilai Auth0 dari tenant development. `AUTH_ENCRYPTION_KEY`/keyring dan
++credential DB terpisah yang sudah digunakan LMS-01 tetap diperlukan. Secret
++Auth0 hanya diteruskan Compose ke API, tidak ke service web. Jangan memakai
++prefix NEXT_PUBLIC untuk secret. File dotenv adalah data; jangan mengeksekusinya
++sebagai script shell. Untuk cloud, exact hostname tenant juga harus diizinkan
++network policy sebelum token/JWKS exchange; tidak perlu wildcard *.auth0.com.
++
++## 4. Database dan binding development
++
++Minta Codex lokal memeriksa cluster Docker yang ada dan membuat **database
++development kosong baru** berprefix `maaher_test_`, misalnya
++`maaher_test_auth0_dev`. Gunakan role migration/auth/runtime yang sudah terpisah;
++periksa port aktual Docker. Jangan menunjuk DB hasil tes lama atau data pengguna.
++Jalankan migrasi sampai **0004_auth0_oidc** menggunakan credential migration.
++
++Buat user/tenant sintetis lewat CLI provisioning existing pada DB tersebut.
++Setelah User ID Auth0 dan key-nya diverifikasi, ikat `(issuer, subject)` ke
++UUID user aplikasi dengan CLI baru dari root starter:
++
++```sh
++PYTHONPATH=apps/api .venv/bin/python -c 'from dotenv import load_dotenv; load_dotenv(".env"); from app.oidc_provision import main; main()'
++```
++
++CLI meminta UUID user aplikasi, issuer `https://DOMAIN/`, Auth0 User ID (`sub`),
++apakah operator, serta referensi verifikasi non-PII. CLI memakai migration URL,
++menolak non-test DB, tidak membuat user/role dari email dan tidak menimpa binding
++yang sudah ada. Binding mencabut session/reset lama. `is_operator` bukan
++keanggotaan admin tenant; untuk admin harus ada membership admin yang benar.
++
++Jalankan aplikasi menurut workflow lokal/Compose setelah nilai konfigurasi
++lengkap, buka `/auth`, lalu **Masuk dengan Auth0**. Akun staff yang telah diikat
++harus memakai Auth0; password, reset dan TOTP lokal tidak menjadi fallback.
++
++## 5. UAT live yang perlu dicatat
++
++- User bound + security key yang benar dapat login dan memilih tenant yang sah.
++- Subject berbeda dengan email sama ditolak; tidak ada auto-signup/link.
++- Akun belum disetujui, factor email/OTP/recovery-code saja, atau key yang belum
++  diverifikasi tidak mendapat login staff. Perubahan kebijakan/fallback IdP harus
++  ditinjau bersama Action; konfigurasi provider adalah bagian dari trust boundary.
++- Callback salah/replay/expired, MFA dibatalkan dan IdP outage ditolak dengan
++  error terkendali. Token/code tidak disalin ke screenshot, log atau chat.
++- Cabut binding/user/membership dan pastikan akses yang terkait berhenti.
++  Provider-only revocation belum otomatis logout session aplikasi: cabut session/
++  binding Maaher juga. Session staff maksimal 30 menit.
++- Hilang password/email LMS tetapi masih mempunyai identity/key Auth0 yang
++  terdaftar: login OIDC tetap dapat dilakukan tanpa password/email LMS. Hilang
++  seluruh faktor Auth0 memerlukan recovery IdP/console yang terpisah dan diuji.
++- Catat pengujian kunci cadangan dan pemulihan console. Status H1 produksi belum
++  ditutup oleh sekadar berhasil login dev.
++
++Endpoint metadata `/auth/oidc/session` hanya menunjukkan konteks session sendiri.
++Tahap ini tidak membuka API global atau approval recovery user lain. Integrasi
++operator approval harus mengikat proof fresh ke target yang identitasnya juga
++diverifikasi; mengetahui request UUID tidak cukup. Full recovery siswa tanpa
++binding independen, SMTP/inbox, ingress/TLS, backup/restore, remote CI serta
++review ulang Claude tetap pekerjaan/gate terpisah.
++
++Setelah aplikasi Auth0 dibuat, yang dapat dibagikan di chat hanya **Domain dan
++Client ID**. Client Secret diisi lewat konfigurasi lokal/secret store.
+diff --git a/docs/LMS-01-AUTH0-HANDOFF.md b/docs/LMS-01-AUTH0-HANDOFF.md
+new file mode 100644
+--- /dev/null
++++ b/docs/LMS-01-AUTH0-HANDOFF.md
+@@ -0,0 +1,117 @@
++# LMS-01 Auth0/OIDC — handoff development
++
++Pemilik menyetujui Auth0/OIDC pada 10 November 2026 dan menyatakan tenant serta
++aplikasinya belum dibuat. Tahap ini menyiapkan login development; tidak membuat
++akun layanan, memilih paket berbayar, mengirim pesan atau deploy.
++**H1 produksi tetap OPEN dan review ulang Claude tetap diperlukan.**
++
++## Implementasi
++
++- `app/oidc.py`: Authorization Code + PKCE S256/state/nonce melalui Authlib
++  1.9.5/joserfc 1.8.0; RS256/JWKS, issuer/audience/expiry/auth_time/assurance
++  diverifikasi. State disimpan terenkripsi di server dan dikonsumsi sekali
++  sebelum token exchange. Cookie browser hanya capability opak.
++- Migration **0004_auth0_oidc**: binding issuer/subject privat, login flow dan
++  konteks provider session. CLI binding development tidak auto-link email,
++  membuat role atau mengganti binding yang ada; ia mencabut session/reset lama.
++- Session staff maksimal 30 menit; tidak ada fallback password/reset/TOTP lokal
++  setelah user pernah diikat, termasuk jika binding dicabut. Reset pra-binding
++  tidak dapat mencabut session OIDC atau mengganti credential staff.
++- Membership, user/binding aktif dan RLS tetap diperiksa setiap akses. Marker
++  operator tidak memberi tenant admin/global privilege. Tidak ada API global
++  atau approval recovery orang lain pada tahap ini.
++- BFF callback allowlist, penerusan cookie korelasi dan redirect URL UI fixed.
++  UI menyediakan login Auth0 dan mengarahkan staff ke pengelolaan faktor IdP.
++- Action meminta WebAuthn roaming tanpa optional fallback; UV=required dan
++  enrollment key independen harus diverifikasi pada tenant. Tidak auto-enroll
++  root berdasarkan email/password. Rotasi key/retensi mencakup flow OIDC.
++
++Lihat [panduan setup](AUTH0-SETUP.md), [ADR-004](adr/004-auth0-development-login.md)
++dan [ticket](tickets/LMS-01-OIDC.md).
++
++## Validasi cloud
++
++Run gabungan awal: 121 PASS/1 FAIL pada retensi karena SELECT kolom expires_at
++belum diberikan kepada definer. Hak kolom itu ditambahkan tanpa SELECT state
++terenkripsi. Run berikutnya **122 API PASS**, 2 warning, 82.26s tanpa SKIP.
++Run final menambah regresi login staff tanpa password/email LMS:
++**123 API PASS**, 2 warning, 140.15s, tanpa SKIP. Ini 71 kasus sebelumnya
++ditambah 52 kasus OIDC; assertion lama tidak dihapus untuk membuat tes hijau.
++
++Browser source final: **7 PASS** baseline/security, 22.0s, dan **1 PASS** OIDC
++positif, 5.6s; tanpa SKIP. Probe positif memakai signature JWT RS256, HTTP
++transport IdP sintetis, validator Authlib sebenarnya, API/BFF/Next dan Chromium
++aktual. **Ini bukan login ke Auth0 nyata.** Action unit **8 PASS**; typecheck,
++production build, pip check, compileall dan verify-starter PASS. Snapshot PyPI:
++39 pin runtime, 0 findings/errors; npm produksi: 0 vulnerabilities.
++
++Lingkungan: PostgreSQL 16.15, Python 3.12.14, Node 24.22.1, Next 16.4.5,
++Chromium 156.0.8078.79. Warning API terkait deprecation httpx di Authlib dan
++Starlette TestClient. GitHub Actions/image runtime/Mac tidak dijalankan ulang.
++
++Fixture menguji head→0003→head, head→0002→head, head→0001→head, base→head.
++Session OIDC dicabut pada downgrade 0004, identity/password lama dipertahankan,
++18 tabel aplikasi diperiksa hilang setelah base. Downgrade mengembalikan auth
++lama yang lebih lemah, bukan rollback produksi aman tanpa maintenance plan.
++
++Semua DB cloud baru/sintetis: final `maaher_test_oidc_final_3`, browser baseline
++`maaher_test_oidc_browser_final` dan browser positif
++`maaher_test_oidc_positive_browser`, pada container cloud milik sesi ini
++`maaher-cloud-review-20261109` (port setelah restart 127.0.0.1:32769).
++Data DB/container Mac tidak diakses. Container cloud dihentikan setelah
++validasi, seluruh database hasil dipertahankan.
++
++## Reproduksi
++
++Gunakan DB pengujian kosong baru dan keenam TEST_* URL/role terpisah sesuai
++handoff lama. Root starter:
++
++```sh
++.venv/bin/pip install -r apps/api/requirements-dev.lock
++.venv/bin/python -m pytest -q -ra --tb=short apps/api/tests
++node --test infra/auth0/staff-post-login.test.cjs
++npm --prefix apps/web ci
++npm --prefix apps/web run typecheck
++npm --prefix apps/web run build
++# Ganti TEST_* URLs ke DB browser kosong yang berbeda untuk setiap command:
++PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium .venv/bin/python scripts/test-lms01-browser.py
++PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium .venv/bin/python scripts/test-lms01-browser.py --oidc
++```
++
++Di Mac gunakan PLAYWRIGHT_CHANNEL=chrome atau executable Chrome yang sesuai.
++Wrapper baseline sengaja mengosongkan konfigurasi Auth0. `--oidc` memilih
++test-only uvicorn target di tests/ dengan HTTP mock dan signature RSA; tidak
++ada trust override dalam API produksi. Runtime Dockerfile tidak menyalin tests.
++CI ditambah untuk Action dan kedua mode browser; remote run belum terjadi.
++
++## Masih diperlukan
++
++1. Buat tenant Development dan Regular Web Application Auth0. Callback lokal:
++   `http://127.0.0.1:3000/api/auth/oidc/callback`. Domain dan Client ID nonsecret;
++   Client Secret hanya pada API melalui konfigurasi lokal/secret store.
++2. Verifikasi enrollment key/first-root, MFA console, backup key/recovery dan
++   entitlement paket pada tenant nyata. Action menolak staff tanpa key yang
++   sudah terdaftar. Template bukan bypass enrollment-root.
++3. UAT live atas claims/PKCE/callback/key challenge, subject asing, kehilangan
++   credential LMS/key, revoke, TLS/proxy dan IdP outage. Provider-only revocation
++   belum otomatis logout session aplikasi; cabut binding/session Maaher juga.
++4. Operator approval bagi user lain dan full recovery siswa tanpa identity
++   independen belum diimplementasikan. Login staff tidak menutup seluruh H1.
++5. SMTP/inbox, ingress/edge, retensi operasional, backup/restore, review Claude
++   serta persetujuan release tetap gate terpisah. Tidak ada domain wildcard atau
++   credential dummy disimpan sebagai konfigurasi Auth0 produksi.
++
++## Menerapkan dan review di Mac
++
++Ekstrak source ke folder baru. Patch OIDC incremental memakai
++`maaher-lms-cloud-fixed.zip` sebagai baseline; cumulative patch memakai ZIP
++review pertama pemilik dan mencakup dua fix expiry MFA cloud sebelumnya.
++Manifest mencatat before/after hash; patch historis Mac tetap dipertahankan.
++
++Minta Codex lokal membandingkan source aktif dengan manifest lalu memilih patch
++yang cocok. Jalankan `git apply --check` dari root starter standalone; dari root
++GitHub nested tambahkan `--directory=maaher-lms-starter`. Bila gagal, rekonsiliasi
++diff sambil mempertahankan perubahan lokal; tidak melakukan reset atau apply
++ulang full patch historis. Sesudah tes lokal, Claude meninjau token validator,
++state/config binding, role SQL, fallback, Action, migrasi/rollback dan bukti live
++yang tersedia. Tidak ada approval baru yang ditulis atas nama Claude.
+diff --git a/docs/LMS-01-CHECKLIST.md b/docs/LMS-01-CHECKLIST.md
+--- a/docs/LMS-01-CHECKLIST.md
++++ b/docs/LMS-01-CHECKLIST.md
+@@ -1,4 +1,15 @@
+ # LMS-01 — checklist setelah review independen Claude
++
++Tahap Auth0/OIDC terbaru ada di [handoff Auth0](LMS-01-AUTH0-HANDOFF.md):
++migration 0004, binding identity, session staff dan guard fallback. Provider
++disetujui pemilik tetapi tenant live/first-root/recovery belum tersedia.
++Checklist historis berikut tidak menyatakan acceptance produksi selesai.
++
++Tambahan cloud 10 November 2026 WIB: **71 API PASS tanpa SKIP**, **5 browser
++PASS** setelah dua perbaikan expiry MFA. Build/typecheck, pip check dan audit
++dependensi lulus. Lihat [laporan cloud](../reviews/LMS-01-cloud-validation.md).
++Hasil di bawah yang menyebut 67 tes merekam validasi Mac/Linux sebelumnya;
++review ulang Claude dan acceptance produksi tetap belum selesai.
+ 
+ **BELUM SELESAI untuk penggunaan nyata.** Perbaikan kode lokal dan regresi sudah
+ lulus; provider trust/operator MFA produksi, kebijakan retensi operasional,
+diff --git a/docs/LMS-01-CLOUD-APPLY.md b/docs/LMS-01-CLOUD-APPLY.md
+new file mode 100644
+--- /dev/null
++++ b/docs/LMS-01-CLOUD-APPLY.md
+@@ -0,0 +1,44 @@
++# Membawa perbaikan cloud ke Mac
++
++Arsip source cloud dan patch bersifat hasil review/implementasi tambahan.
++Proyek aktif di Mac mungkin sudah berubah sejak ZIP dibuat. Periksa dahulu
++dan gunakan diff yang cocok dengan versi saat ini.
++
++1. Unduh ZIP source cloud dan ekstrak ke **folder baru**. Source tidak membawa
++   .env, kredensial, database, dependency, cache atau hasil build.
++2. Baca `reviews/LMS-01-cloud-validation.md` serta manifest cloud. Laporan
++   independen Claude asli dan manifest/patch Mac historis tetap disertakan.
++3. Minta Codex lokal memeriksa file saat ini terhadap before-hash di manifest
++   dan patch `reviews/LMS-01-cloud-fixes.patch`. Ada dua perubahan source:
++   expiry MFA dan opsi executable browser untuk tes, empat tes regresi baru,
++   serta dokumentasi. Tidak ada perubahan skema/migrasi.
++4. Di root **starter standalone**, check patch dengan:
++
++```sh
++git apply --check /path/ke/hasil-ekstrak/reviews/LMS-01-cloud-fixes.patch
++```
++
++   Jika root GitHub memuat subfolder `maaher-lms-starter`, gunakan dari root
++   repo: `git apply --check --directory=maaher-lms-starter /path/ke/patch`.
++   Jika check gagal, Codex perlu membaca diff dan mempertahankan perubahan
++   lokal; tidak menjalankan reset atau memaksa patch. Check tidak menerapkan
++   perubahan. Setelah source cocok, Codex dapat menerapkan patch dengan
++   pilihan path yang sama dan menjalankan ulang tes terkait.
++5. Set keenam URL test ke database PostgreSQL kosong baru. Jalankan suite API
++   dan browser sesuai handoff. Jangan memakai DB hasil run lama karena fixture
++   sengaja menolak database yang sudah berisi tabel aplikasi.
++6. Claude melakukan review ulang atas source final, termasuk dua kasus expiry.
++   H1 produksi dan gate eksternal tetap memiliki status terpisah.
++
++## Prompt untuk Codex lokal
++
++```text
++Baca docs/LMS-01-CLOUD-APPLY.md dan reviews/LMS-01-cloud-validation.md
++dari hasil ekstrak cloud. Bandingkan source aktif dengan before-hash pada
++cloud manifest dan patch. Pertahankan perubahan lokal. Terapkan perbaikan
++expiry MFA jika cocok; jika sudah ada, verifikasi ekuivalensinya. Tambahkan
++keempat regresi dan konfigurasi browser opsional. Jalankan tes pada DB baru
++terpisah, perbarui handoff/patch review lokal dan serahkan untuk review ulang
++Claude. Jangan apply ulang full patch Mac historis atau mengubah laporan
++Claude asli. Tidak ada merge/deploy atau pembukaan gate produksi.
++```
+diff --git a/docs/LMS-01-HANDOFF.md b/docs/LMS-01-HANDOFF.md
+--- a/docs/LMS-01-HANDOFF.md
++++ b/docs/LMS-01-HANDOFF.md
+@@ -1,4 +1,29 @@
+ # LMS-01 — handoff 2026-11-09
++
++## Tahap Auth0/OIDC disetujui — 10 November 2026 WIB
++
++Implementasi development terbaru memakai migration **0004_auth0_oidc**.
++Lihat [handoff Auth0](LMS-01-AUTH0-HANDOFF.md) dan
++[setup tenant/aplikasi](AUTH0-SETUP.md) untuk status/test terbaru.
++Tenant Auth0 nyata belum dibuat, H1 produksi tetap terbuka, tidak ada merge/deploy.
++Bagian 0003 dan 71/67 tes di bawah adalah catatan historis.
++
++## Tambahan cloud — 10 November 2026 WIB
++
++Arsip pemilik dan patch terhadap baseline GitHub berhasil diverifikasi; 75
++berkas cocok dengan manifest setelah lima file tersembunyi yang tidak masuk
++ZIP dipulihkan dari patch. Suite awal cloud: 67 PASS. Dua masalah kedaluwarsa
++MFA direproduksi dan diperbaiki; suite setelah perbaikan: **71 PASS tanpa
++SKIP**, PostgreSQL 16.15/Python 3.12.14. Browser Chromium aktual: **5 PASS**.
++Build/typecheck dan audit dependensi juga lulus. Rincian, batas verifikasi dan
++cara menerapkan perubahan lokal ada pada
++[validasi cloud](../reviews/LMS-01-cloud-validation.md) dan
++[panduan patch](LMS-01-CLOUD-APPLY.md).
++
++Ini validasi/perbaikan AUTHOR tambahan, bukan persetujuan Claude. H1 produksi,
++full account recovery, SMTP/inbox nyata dan gate operasional tetap terbuka.
++Data dan kode Mac tidak diubah oleh sesi cloud. Catatan historis di bawah
++dipertahankan sebagai bukti run sebelumnya.
+ 
+ Status: inti auth lokal terimplementasi dan teruji, **LMS-01 BELUM SELESAI**
+ karena acceptance eksternal/operasional belum terpenuhi. Belum untuk data siswa
+diff --git a/docs/adr/003-production-identity-recommendation.md b/docs/adr/003-production-identity-recommendation.md
+new file mode 100644
+--- /dev/null
++++ b/docs/adr/003-production-identity-recommendation.md
+@@ -0,0 +1,132 @@
++# ADR-003 — rekomendasi identitas produksi untuk admin/operator
++
++Tanggal: 10 November 2026 WIB.
++Status: **PILIHAN AUTH0/OIDC DISETUJUI PEMILIK** pada 10 November 2026.
++Pemilik belum memiliki tenant/aplikasi Auth0 dan meminta panduan setup.
++Implementasi development tahap pertama dijelaskan pada ADR-004. Persetujuan
++provider tidak menetapkan paket berbayar atau membuka bootstrap produksi.
++H1 tetap terbuka sampai integrasi nyata, recovery dan review selesai.
++
++## Rekomendasi
++
++Gunakan **Auth0 sebagai IdP terkelola melalui OpenID Connect (OIDC)** untuk
++admin dan operator, dengan FIDO2/WebAuthn security key. Daftarkan dua kunci
++fisik per operator penting: satu dipakai dan satu disimpan terpisah. Untuk root
++trust awal, prioritaskan kunci fisik yang tidak bergantung pada pemulihan akun
++cloud/email yang sama dengan akun LMS.
++
++Identitas staff IdP harus dibuat dan diverifikasi sebelum akses LMS admin
++diberikan. Mengaktifkan MFA pada akun IdP yang dibuat lewat email yang sudah
++dikuasai penyerang tidak menyelesaikan first-enrollment takeover. Pendaftaran
++root pertama memerlukan tindakan pemilik pada perangkat tepercaya; penambahan
++operator berikutnya memerlukan persetujuan operator yang sudah terverifikasi.
++
++Manfaat praktis: faktor, challenge dan lifecycle IdP dikelola layanan khusus;
++Maaher tetap mengelola session aplikasi, membership, izin tenant dan audit.
++Menjalankan Keycloak sendiri adalah alternatif jika penyimpanan identitas on-prem
++merupakan kebutuhan wajib, dengan tambahan tanggung jawab patch, backup,
++availability dan recovery. Dengan kebutuhan saat ini, IdP terkelola menjadi
++pilihan awal yang direkomendasikan. Tidak perlu memigrasikan seluruh akun siswa
++sekaligus untuk mulai mengintegrasikan identitas staff.
++
++Kemampuan konfigurasi Auth0 yang dikonfirmasi dari source resmi provider:
++`policy=all-applications`, `webauthn_roaming.enabled`, dan
++`webauthn_roaming.user_verification=required`. Contoh dokumentasi juga menyalakan
++email, OTP dan SMS; **jangan menyalin contoh itu sebagai kebijakan staff Maaher**.
++Metode lemah/fallback yang tidak memenuhi assurance staff harus dinonaktifkan
++atau ditolak oleh kebijakan integrasi. Entitlement paket dan dukungan pengelolaan
++serta recovery console IdP perlu diperiksa sebelum adopsi; tidak ada asumsi
++semua kemampuan tersedia gratis.
++
++Sumber resmi yang diperiksa:
++https://github.com/auth0/terraform-provider-auth0/blob/main/docs/resources/guardian.md
++
++## Pemisahan wewenang
++
++| Identitas | Wewenang |
++| --- | --- |
++| Siswa/pengajar | Membership dan resource tenant sesuai role aplikasi. Alur password/session saat ini dapat dipertahankan untuk development. |
++| Tenant admin | Identity IdP yang terikat sebelumnya, assurance MFA yang diwajibkan, dan membership admin aktif pada tenant tersebut. |
++| Operator platform | Allowlist operator terpisah, identity IdP dan step-up yang masih baru. Bukan otomatis semua tenant admin atau semua pengguna satu domain email. |
++| Administrator console IdP/host/secret-store | MFA dan recovery terpisah juga wajib pada kontrol infrastruktur ini; MFA login aplikasi saja tidak melindungi root trust. |
++
++## Binding identitas dan session
++
++1. Simpan binding unik `(issuer, subject)` ke user/operator internal melalui
++   provisioning terkontrol. Email hanya atribut kontak. Jangan auto-link akun,
++   mengangkat role, atau memulihkan user berdasarkan kecocokan email saja.
++2. Gunakan library OIDC terpelihara dan Authorization Code + PKCE, state dan
++   nonce. Validasi signature/JWKS, issuer, audience, expiry, nonce serta kode
++   sekali pakai di server. Tidak ada custom crypto atau penerimaan token/header
++   identitas dari browser tanpa verifikasi.
++3. Definisikan kontrak assurance provider yang eksplisit. Jangan menyimpulkan
++   security-key authentication hanya dari string `mfa` generik. Validasi
++   kebijakan/metode dan waktu autentikasi sesuai claim provider yang benar-benar
++   tersedia serta terverifikasi. Untuk approve/recovery sensitif, minta step-up
++   baru; usulan batas freshness lima menit perlu diuji dan disepakati.
++4. Setelah verifikasi, rotasi session opak aplikasi. Membership/status user dan
++   tenant tetap diperiksa server-side setiap akses. Claim SSO tidak memberi
++   akses tenant/global otomatis dan pencabutan membership tetap berlaku.
++5. Approval operator harus terikat target user, session/perangkat pemilik yang
++   telah diverifikasi, request ID, purpose, expiry dan satu kali pakai. Mengetahui
++   UUID request atau mengendalikan email pemilik bukan bukti identitas target.
++6. Operator/migration credential dan Management API credential IdP tidak masuk
++   browser/web atau koneksi tenant. Role SQL yang mengeluarkan approval tetap
++   minimal dan terpisah dari API tenant. Tidak ada flag environment yang bisa
++   menggantikan autentikasi operator.
++
++## Recovery yang disarankan
++
++| Kondisi | Jalur |
++| --- | --- |
++| Kunci utama hilang, kunci cadangan tersedia | Autentikasi dengan kunci cadangan, cabut kunci yang hilang dan daftarkan pengganti melalui assurance yang sama. |
++| Password/email LMS hilang, identity IdP staff masih dapat digunakan | Verifikasi `(issuer, subject)` yang telah diikat sebelumnya, step-up, terbitkan konteks recovery terbatas, ganti credential/faktor yang diperlukan dan cabut session lama. |
++| Seluruh faktor IdP hilang | Prosedur manual dengan operator lain yang sudah dipercaya dan bukti identitas terdaftar. Usulan: persetujuan dua pihak, pemberitahuan melalui kontak yang sudah didaftarkan dan penundaan sesuai risiko. Tidak memberikan akses penuh hanya dari email reset. |
++| Semua operator kehilangan seluruh faktor | Emergency process dan recovery console IdP harus diuji sebelum produksi; tidak mengandalkan password database atau SQL manual yang menandai session sebagai ter-MFA. |
++| Siswa/pengajar belum mempunyai binding independen | Recovery ketika password dan email sama-sama hilang tetap tidak dapat diklaim tersedia. Perlu binding faktor/identitas yang didaftarkan sebelumnya atau prosedur verifikasi lembaga yang dirancang terpisah. |
++
++Recovery code hanya relevan jika diterbitkan melalui enrollment tepercaya,
++disimpan offline terpisah dari akun yang dilindungi dan diverifikasi sekali
++pakai. Untuk operasi privilege tertinggi, jangan menganggap recovery code
++tunggal otomatis memenuhi semua syarat step-up/approval. Kebijakan override,
++pencabutan dan emergency access harus jelas serta diaudit.
++
++## Tahap implementasi
++
++1. Buat spike di tenant IdP development dengan akun sintetis dan domain/callback
++   yang pasti. Periksa metode MFA, entitlement paket, session/claim assurance,
++   kebijakan recovery dan akses console. Tidak memakai identitas siswa nyata.
++2. Buat provisioning binding `(issuer, subject)` dan callback OIDC teruji tanpa
++   membuka privilege admin. Kredensial diisi melalui secret store/settings;
++   dokumentasi menyimpan nama variabel, bukan nilainya.
++3. Integrasikan admin login dan operator approval/recovery ke boundary auth
++   terkontrol. Tambahkan migrasi baru dan rollback plan; jangan menulis ulang
++   migration 0003 yang sudah direview atau membuka adapter test lewat nama DB.
++4. Uji bootstrap, recovery, perubahan role, revokasi dan gangguan IdP. Pertahankan
++   fail-closed jika provider, signature atau assurance tidak dapat diverifikasi.
++5. Claude meninjau integrasi, threat model serta bukti tes. UAT terbatas di HTTPS;
++   lanjutkan SMTP/inbox, ingress, backup/restore dan gate operasional lain.
++   Pemilik menentukan release setelah gate yang relevan terpenuhi.
++
++## Acceptance yang diperlukan untuk menutup H1
++
++- Password/email LMS yang dicuri tidak dapat mendaftarkan atau mengganti faktor,
++  mengaitkan identity IdP baru atau memberi role admin/operator.
++- Identity provider sah tetapi `(issuer, subject)` berbeda tetap ditolak,
++  termasuk alamat email yang sama.
++- Callback dengan signature/issuer/audience/nonce salah, replay code, session
++  fixation, assurance terlalu lemah atau step-up terlalu lama ditolak.
++- Password/email LMS hilang dapat dipulihkan menggunakan identity independen
++  yang telah terdaftar tanpa mengakses inbox LMS. Session lama dan request/reset
++  grant yang relevan dicabut; audit tersimpan tanpa secret.
++- Hilangnya security key, revokasi operator, emergency recovery dan kegagalan
++  IdP diuji. User tidak dapat menyetujui request milik orang lain hanya dengan
++  mengirim UUID atau screenshot request.
++- Root/operator pertama, pemisahan role SQL, secret-store/console MFA, operator
++  cadangan dan backup/restore dapat dijalankan oleh pemilik sesuai runbook.
++- Cakupan recovery siswa/pengajar yang belum memiliki binding independen tetap
++  ditandai belum tersedia; jangan mengubah status seluruh H1 menjadi CLOSED
++  berdasarkan pengujian staff saja.
++
++Pilihan Auth0/OIDC telah disetujui dan implementasi development ada pada ADR-004.
++Belum ada tenant/provider dikonfigurasi, biaya disetujui atau uji IdP nyata.
+diff --git a/docs/adr/004-auth0-development-login.md b/docs/adr/004-auth0-development-login.md
+new file mode 100644
+--- /dev/null
++++ b/docs/adr/004-auth0-development-login.md
+@@ -0,0 +1,78 @@
++# ADR-004 — Auth0/OIDC login staff tahap pertama
++
++Status: implementasi development setelah pemilik menyetujui Auth0/OIDC pada
++10 November 2026. Belum diuji dengan tenant Auth0 nyata; tidak membuka gate H1
++produksi. Lihat `docs/tickets/LMS-01-OIDC.md` dan `docs/AUTH0-SETUP.md`.
++
++## Boundary dan protokol
++
++- Authlib 1.9.5 menangani Authorization Code + PKCE S256 dan validasi ID token
++  melalui joserfc/JWKS. Issuer serta endpoint Auth0 canonical dibentuk dari
++  konfigurasi server; algoritma dipin RS256. Tidak menerima bearer ID token atau
++  URL discovery/JWK dari browser/token. HTTP client mempertahankan TLS/proxy.
++- State, nonce, verifier PKCE dan redirect_uri disimpan dalam ciphertext
++  `oidc_login_flows`. Browser hanya mendapat cookie korelasi acak HttpOnly,
++  Secure, Lax. State dan cookie harus cocok; TTL lima menit. Konsumsi state
++  di-COMMIT sebelum token exchange, sehingga kegagalan exchange/commit akhir
++  tetap membutuhkan flow baru dan tidak membuka replay.
++- ID token harus valid untuk issuer, client audience, nonce, expiry/iat/azp;
++  auth_time wajib dan maksimal lima menit; amr mengandung mfa. Claim assurance
++  namespaced wajib `maaher-fido2-uv-v1`, diterbitkan Action staff yang meminta
++  challenge WebAuthn roaming tanpa fallback. Guardian harus mewajibkan user
++  verification. amr=mfa saja tidak cukup.
++- Setelah token diverifikasi, `(issuer, subject)` harus terikat ke user aktif
++  melalui provisioning offline. Tidak ada pembuatan user, binding atau kenaikan
++  role lewat email, claim role/domain, ID token saja atau input browser.
++- Session aplikasi tetap opak dan dirotasi. Tidak ada access/ID/refresh token
++  disimpan di cookie, database, URL UI atau audit. Session staff maksimal 30 menit.
++  Konteks provider menyimpan hanya binding, auth_time dan assurance; IdP harus
++  menjalankan challenge lagi pada login baru (`prompt=login`, `max_age=0`).
++
++## Database dan penutupan fallback
++
++Migration **0004_auth0_oidc** menambah tiga tabel global privat. Role auth boleh
++membaca binding, tidak membuat/mengubahnya. Role tenant tidak bisa membaca atau
++membuat identity/flow/provider session. Definer resolver dapat membaca konteks
++minimal, dan retensi hanya SELECT kolom expires_at + DELETE pada flow.
++
++Begitu user pernah memiliki binding, session lokal tidak menjadi authority lagi,
++termasuk setelah binding dicabut. Password login/reset dan perubahan TOTP lokal
++ditolak untuk akun tersebut. Reset yang diterbitkan sebelum binding juga tidak
++dapat mengubah password atau mencabut session OIDC. CLI development binding
++mencabut session/reset lama. Tidak ada implicit unlink/fallback karena IdP mati.
++
++Resolver session memeriksa binding aktif dan user aktif pada setiap request.
++`tenant_admin`, RLS dan membership aktif tetap menentukan izin tenant. Marker
++`is_operator` privat tidak memberi hak tenant admin atau akses global.
++Pencabutan binding atau user langsung menghentikan akses; pencabutan membership
++menghentikan akses tenant tersebut. Pencabutan **hanya di Auth0** belum disinkronkan
++otomatis ke session aplikasi: cabut binding/session aplikasi juga. Back-channel
++revocation/log-out integration dan incident runbook adalah pekerjaan berikutnya.
++
++Provisioning CLI dibatasi local + maaher_test_*; produksi memerlukan ceremony
++root/operator terverifikasi dan runbook yang direview. Tidak ada endpoint publik
++untuk menghubungkan akun atau menyetujui recovery orang lain. Adapter MFA
++sintetis lama tetap test-only; ia tidak dipakai sebagai proof OIDC produksi.
++
++## Dampak migrasi dan rollback
++
++Migration 0001–0003 tidak ditulis ulang. Fixture menambahkan jalur head→0003→head
++dan membuktikan session OIDC dicabut pada downgrade, sementara identity/password
++lama dipertahankan. Setelah base, 18 tabel aplikasi harus hilang. Tidak ada
++migrasi yang dijalankan pada DB Mac/pengguna dalam sesi cloud.
++
++Downgrade menghapus binding/konteks OIDC dan mengembalikan perilaku auth lokal
++0003 yang lebih lemah. Ini **bukan rollback produksi yang aman** tanpa maintenance,
++backup dan penonaktifan akun terkait; session OIDC tidak dikonversi menjadi local
++trusted session. Retensi/rotasi kunci mencakup encrypted OIDC flow yang baru.
++
++## Batas tahap ini
++
++Kode login, binding, guard dan provider session tersedia untuk development.
++Tidak ada akun/tenant Auth0, enrollment hardware nyata, recovery console IdP,
++approval operator untuk target lain, full recovery siswa, SMTP/inbox, remote CI,
++TLS/ingress atau deploy yang dianggap terverifikasi. H1 tetap terbuka.
++
++Eksperimen provider memakai HTTP transport HTTPS sintetis dan JWT RSA yang
++benar-benar ditandatangani, melewati client/token validator Authlib sebenarnya;
++ini berbeda dari menjalankan Auth0 nyata. Hasil akhir ada di handoff OIDC.
+diff --git a/docs/tickets/LMS-01-OIDC.md b/docs/tickets/LMS-01-OIDC.md
+new file mode 100644
+--- /dev/null
++++ b/docs/tickets/LMS-01-OIDC.md
+@@ -0,0 +1,25 @@
++# LMS-01-OIDC — Auth0 staff login, tahap 1
++
++Disetujui pemilik pada 10 November 2026: gunakan Auth0/OpenID Connect dan
++lanjutkan implementasi. Tenant/aplikasi Auth0 belum dibuat; sertakan setup guide.
++
++Lingkup: Authorization Code + PKCE/state/nonce menggunakan Authlib; state
++terenkripsi server-side; binding `(issuer, subject)` yang diprovisi offline;
++session opak staff dengan assurance security key; validasi membership/RLS tetap
++berlaku. Operator ditandai dalam binding privat tetapi tidak diberi API global
++atau kemampuan menyetujui recovery user lain pada tahap ini. Tidak auto-link email.
++
++File: API oidc/provisioning, migrasi 0004, resolver session dan guard local auth,
++BFF/UI login, dependencies/Compose/env example, Action Auth0, tes dan dokumentasi.
++
++Acceptance: callback sekali pakai terikat browser dan config, PKCE S256,
++RS256/JWKS issuer tetap, audience/nonce/auth_time/assurance diverifikasi; subject
++asing dengan email sama ditolak; revoke binding/user/membership menghentikan
++akses; akun staff yang sudah diikat tidak fallback ke password/TOTP/reset lokal.
++Tidak ada token IdP disimpan pada browser/session aplikasi atau audit.
++
++Tes: provider HTTPS sintetis lewat HTTP transport Authlib, token RSA bertanda
++tangan, negative claims/replay/state/browser/config, SQL privilege/RLS dan
++migrasi roundtrip pada DB baru; regresi lokal/browser/build yang relevan.
++Live Auth0 dan security key asli menunggu setup pemilik. Tahap ini bukan klaim
++seluruh H1 selesai atau operator approval/recovery produksi sudah aktif.
+diff --git a/infra/auth0/staff-post-login.cjs b/infra/auth0/staff-post-login.cjs
+new file mode 100644
+--- /dev/null
++++ b/infra/auth0/staff-post-login.cjs
+@@ -0,0 +1,21 @@
++// Auth0 Post Login Action. Configure MAAHER_CLIENT_ID as an Action secret.
++// Requires Guardian WebAuthn roaming user_verification=required and supervised
++// key enrollment before approving/binding the staff identity. No auto-enrollment.
++exports.onExecutePostLogin = async (event, api) => {
++  const client = event.secrets?.MAAHER_CLIENT_ID;
++  if (!client) {
++    api.access.deny('Staff login policy is not configured');
++    return;
++  }
++  if (event.client?.client_id !== client) return;
++  if (event.user?.app_metadata?.maaher_staff_approved !== true
++      || !event.user?.enrolledFactors?.some(factor => factor.type === 'webauthn-roaming')) {
++    api.access.deny('Verified staff enrollment is required');
++    return;
++  }
++  // Auth0 does not issue the ID token unless this challenge is fulfilled.
++  // There are deliberately no optional/fallback factors. See official
++  // @auth0/actions post-login/v3 AuthenticationAPI.challengeWith contract.
++  api.authentication.challengeWith({ type: 'webauthn-roaming' });
++  api.idToken.setCustomClaim('https://maaherlms.aimz.my.id/assurance', 'maaher-fido2-uv-v1');
++};
+diff --git a/infra/auth0/staff-post-login.test.cjs b/infra/auth0/staff-post-login.test.cjs
+new file mode 100644
+--- /dev/null
++++ b/infra/auth0/staff-post-login.test.cjs
+@@ -0,0 +1,52 @@
++const { test } = require('node:test');
++const assert = require('node:assert/strict');
++const { onExecutePostLogin } = require('./staff-post-login.cjs');
++
++function input() {
++  const calls = [];
++  return {
++    event: { secrets: { MAAHER_CLIENT_ID: 'staff-client' }, client: { client_id: 'staff-client' },
++      user: { app_metadata: { maaher_staff_approved: true }, enrolledFactors: [{ type: 'webauthn-roaming' }] } },
++    api: { access: { deny: reason => calls.push(['deny', reason]) },
++      authentication: { challengeWith: factor => calls.push(['challenge', factor]) },
++      idToken: { setCustomClaim: (key, value) => calls.push(['claim', key, value]) } }, calls,
++  };
++}
++
++test('approved staff must complete the exact security-key challenge; no fallback is supplied', async () => {
++  const { event, api, calls } = input(); await onExecutePostLogin(event, api);
++  assert.deepEqual(calls, [['challenge', { type: 'webauthn-roaming' }],
++    ['claim', 'https://maaherlms.aimz.my.id/assurance', 'maaher-fido2-uv-v1']]);
++});
++test('unapproved subject is denied even with an enrolled key', async () => {
++  const { event, api, calls } = input(); event.user.app_metadata.maaher_staff_approved = false;
++  await onExecutePostLogin(event, api); assert.equal(calls.length, 1); assert.equal(calls[0][0], 'deny');
++});
++test('a user-editable metadata flag cannot approve staff', async () => {
++  const { event, api, calls } = input(); event.user.app_metadata = {};
++  event.user.user_metadata = { maaher_staff_approved: true };
++  await onExecutePostLogin(event, api); assert.equal(calls[0][0], 'deny');
++});
++test('email, OTP and platform factors do not replace the roaming key', async () => {
++  for (const type of ['email', 'otp', 'webauthn-platform', 'recovery-code']) {
++    const { event, api, calls } = input(); event.user.enrolledFactors = [{ type }];
++    await onExecutePostLogin(event, api); assert.equal(calls.length, 1); assert.equal(calls[0][0], 'deny');
++  }
++});
++test('another application does not receive the Maaher assurance claim', async () => {
++  const { event, api, calls } = input(); event.client.client_id = 'other-client';
++  await onExecutePostLogin(event, api); assert.deepEqual(calls, []);
++});
++test('missing policy configuration fails closed', async () => {
++  const { event, api, calls } = input(); event.secrets = {};
++  await onExecutePostLogin(event, api); assert.equal(calls[0][0], 'deny');
++});
++test('a rejected challenge does not reach claim issuance', async () => {
++  const { event, api, calls } = input(); api.authentication.challengeWith = () => { throw Error('synthetic denial'); };
++  await assert.rejects(onExecutePostLogin(event, api)); assert.deepEqual(calls, []);
++});
++test('client request data cannot supply the assurance or approval', async () => {
++  const { event, api, calls } = input(); event.user.app_metadata = {};
++  event.request = { query: { maaher_staff_approved: true, assurance: 'maaher-fido2-uv-v1' } };
++  await onExecutePostLogin(event, api); assert.equal(calls[0][0], 'deny');
++});
+diff --git a/reviews/LMS-01-cloud-validation.md b/reviews/LMS-01-cloud-validation.md
+new file mode 100644
+--- /dev/null
++++ b/reviews/LMS-01-cloud-validation.md
+@@ -0,0 +1,127 @@
++# LMS-01 — validasi dan perbaikan tambahan di cloud
++
++Tanggal: 10 November 2026 WIB. Peran: Codex AUTHOR. Ini tidak menggantikan
++review independen Claude; tidak ada approval, commit, merge, push atau deploy.
++
++## Integritas input
++
++- ZIP pemilik: `maaher-lms-review.zip`, 328560 byte, SHA-256
++  `638a2f79784a19da26d5f107c43b0b5f80158066604909e6b1dc04654d51f24a`.
++- Sebelum perubahan: 70 file dalam ZIP cocok dengan manifest AUTHOR; tidak ada
++  mismatch. Lima file tidak masuk ZIP: `.gitignore` dan empat skill di `.agents`
++  serta `.claude`. Semuanya dipulihkan dari full patch dan cocok dengan hash
++  manifest, bukan dibuat ulang dari perkiraan.
++- Baseline GitHub `8941a79dcf611df66c4ee43e78b902b62ddbfce2` dibaca dari objek
++  Git yang tersedia. 25 file baseline diekstrak ke direktori sementara; full
++  patch lolos check dan diterapkan **hanya ke salinan baseline sementara**.
++  Hasilnya cocok dengan seluruh 75 file manifest. Ada dua warning whitespace
++  patch historis, tidak ada kegagalan apply.
++- Hash full patch, incremental patch dan laporan Claude asli cocok dengan
++  manifest. SHA laporan Claude asli tetap
++  `004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce`.
++- `LMS-01-review-manifest.json` adalah snapshot input historis. Perubahan cloud
++  dicatat terpisah di `LMS-01-cloud-manifest.json`; manifest historis tidak
++  diubah untuk memberi kesan source lama dan baru identik.
++
++## Temuan tambahan dan perbaikan
++
++### R1 — request operator kedaluwarsa selalu mengembalikan ID lama
++
++`request_authorization()` mengembalikan row lama tanpa memeriksa expiry.
++Sesudah sepuluh menit, klik ulang tetap menghasilkan ID yang tidak dapat
++disetujui operator. Test baru pada source input mereproduksi ID lama yang sama.
++
++Perbaikan di `apps/api/app/mfa.py`: hapus hanya request kedaluwarsa milik
++session/purpose tersebut sebelum membuat request baru. Audit independen
++operator tetap dipertahankan. `ON CONFLICT ... RETURNING id` membuat retry
++request yang belum kedaluwarsa tetap idempotent tanpa menimpa approval.
++
++Regresi membuktikan ID diperbarui, grant lama ditolak, grant baru dapat dipakai
++sekali dan kedua audit approval dipertahankan. Regresi terpisah memastikan
++retry ID yang masih valid tidak membatalkan grant dan replay tetap ditolak.
++
++### R2 — setup recovery expired menutupi faktor aktif yang sah
++
++`verify()` memilih pending enrollment berdasarkan keberadaan row, sebelum
++memeriksa expiry. Pending recovery expired tetap menutupi active factor;
++kode autentikator lama yang sah selalu ditolak dengan 400. Test source input
++mereproduksi penolakan tersebut tanpa mengganti faktor aktif.
++
++Perbaikan: pending enrollment dipilih hanya jika belum expired. Faktor aktif
++yang trusted tetap dapat digunakan bila setup recovery ditinggalkan.
++Enrollment expired tanpa faktor aktif tetap tidak dapat menaikkan session.
++Tidak ada penghapusan atau penggantian faktor aktif, password, atau pelemahan
++syarat approval operator. Tidak ada migrasi database baru.
++
++Keempat regresi ada di `apps/api/tests/test_mfa_expiry_regressions.py`.
++
++## Hasil yang dijalankan di cloud
++
++Lingkungan: Python 3.12.14, PostgreSQL 16.15 dalam container baru,
++Node 24.22.1, Next 16.4.5, Playwright 1.65.0 dan Chromium sistem
++156.0.8078.79. Koneksi runtime/auth/operator/mail/maintenance terpisah dan
++role nonowner/non-BYPASSRLS sesuai fixture. Trust socket database hanya untuk
++cluster sintetis ini dengan port yang dipublikasikan pada loopback.
++
++| Pemeriksaan | Hasil aktual |
++| --- | --- |
++| API input, sebelum perbaikan | 67 passed, 1 warning, 55.02s; tanpa SKIP |
++| Empat probe expiry pada source input | 2 failed (R1/R2), 2 passed, 5.07s |
++| API setelah perbaikan | **71 passed**, 1 warning, 63.29s; tanpa SKIP |
++| Browser setelah perbaikan, Next production + API nyata | **5 passed**, 26.2s |
++| Migrasi dan rollback | Jalur 0001→head, head→0002→head, head→0001→head, base→head dijalankan fixture kedua suite API; assertions preservasi legacy dan penghapusan 15 tabel lulus |
++| Role SQL aktual dan probe COMMIT uvicorn | Lulus di suite API, termasuk barrier sebelum response dan failure login/logout |
++| Typecheck dan production build | Lulus; typecheck diulang sesudah perubahan konfigurasi browser |
++| pip check / compileall / verify-starter | Lulus |
++| PyPI advisory runtime | 34 pin diperiksa; 0 findings/errors |
++| npm audit produksi | 0 vulnerabilities |
++
++Warning API: deprecation Starlette TestClient terhadap backend httpx.
++Warning warna log browser tidak mengubah hasil. Audit advisori adalah snapshot
++pada waktu run dan tidak memverifikasi keamanan deployment/OS.
++
++Command inti, dari root source dengan keenam `TEST_*_DATABASE_URL` menunjuk
++ke database baru yang kosong:
++
++```sh
++.venv/bin/python -m pytest -q -ra --tb=short apps/api/tests
++npm --prefix apps/web run typecheck
++npm --prefix apps/web run build
++# Gunakan DB browser kosong yang terpisah dari DB suite API.
++PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium .venv/bin/python scripts/test-lms01-browser.py
++.venv/bin/pip check
++.venv/bin/python scripts/verify-starter.py
++.venv/bin/python -m compileall -q apps/api/app apps/api/migrations apps/api/tests scripts
++.venv/bin/python scripts/audit-api-dependencies.py
++npm --prefix apps/web audit --omit=dev
++```
++
++Opsi `PLAYWRIGHT_EXECUTABLE_PATH` ditambahkan ke config browser untuk memakai
++Chromium yang terpasang. Tanpa opsi tersebut, perilaku channel/download browser
++sebelumnya tetap berlaku. Di Mac gunakan channel Chrome sesuai handoff lama;
++path Linux di atas bukan perintah untuk Mac.
++
++Container khusus run cloud: `maaher-cloud-review-20261109`, port saat run
++127.0.0.1:32768. DB input `maaher_test_cloud_review_1`, probe sebelum fix
++`maaher_test_cloud_probe_1`, final `maaher_test_cloud_final_1`, dan browser
++`maaher_test_cloud_browser_1`. Tidak ada akses ke database atau Docker Mac.
++Container milik run cloud dihentikan setelah validasi dan datanya dipertahankan.
++
++## Batas klaim dan langkah lanjut
++
++- H1 produksi belum CLOSED: root trust/operator MFA belum dipilih. Adapter
++  sintetis tetap menolak produksi dan DB non-test. Recovery faktor yang diuji
++  masih memerlukan password-valid session; total credential loss belum didukung.
++- Belum diuji dalam sesi ini: SMTP hingga inbox nyata, MFA/SSO operator nyata,
++  ingress Cloudflare/TLS publik, edge rate limit, backup/restore drill, GitHub
++  Actions remote, Mac, build image runtime/test Docker. Tidak ada klaim rerun
++  item tersebut dari laporan sesi lokal sebelumnya.
++- Perubahan source dan keempat regresi memerlukan review ulang Claude bersama
++  perbaikan Mac sebelumnya. Laporan Claude lama tetap CHANGES_REQUESTED.
++- Pilihan operator produksi perlu jawaban pemilik. Rekomendasi untuk dievaluasi:
++  IdP/SSO terkelola dengan MFA yang dipaksakan untuk operator/admin, faktor
++  phishing-resistant dan recovery yang tidak hanya mengandalkan email LMS.
++  Ini usulan arsitektur, belum keputusan atau integrasi yang diaktifkan.
++- Cara membawa patch ke Mac: `docs/LMS-01-CLOUD-APPLY.md`. Source asli di ZIP
++  dan salinan proyek sebelumnya tetap dipertahankan; tidak ada perubahan Mac
++  atau GitHub yang terjadi otomatis.
+diff --git a/scripts/lms01-browser-fixtures.py b/scripts/lms01-browser-fixtures.py
+--- a/scripts/lms01-browser-fixtures.py
++++ b/scripts/lms01-browser-fixtures.py
+@@ -19,13 +19,17 @@
+     with psycopg.connect(os.environ["TEST_MIGRATION_DATABASE_URL"]) as db:
+         name = db.execute("SELECT current_database()").fetchone()[0]
+         assert name.startswith("maaher_test_"), "Refusing non-test database"
+-        if operation == "seed":
++        if operation in {"seed", "oidc-seed"}:
+             user, tenant = uuid4(), uuid4()
+             email = f"{user}@example.invalid"
+             password = "Synthetic browser password 123!"
+             db.execute("INSERT INTO users(id,email,password_hash) VALUES (%s,%s,%s)", (user, email, passwords.hash(password)))
+             db.execute("INSERT INTO tenants(id,slug,name) VALUES (%s,%s,'Organisasi tes browser')", (tenant, str(tenant)))
+             db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES (%s,%s,%s,'admin')", (uuid4(), tenant, user))
++            if operation == 'oidc-seed':
++                from app.oidc_provision import bind_identity
++                bind_identity(db,user,'https://browser-tests.us.auth0.com/','auth0|synthetic-browser-staff',False,
++                              'synthetic-supervised-browser-binding')
+             result = {"email": email, "password": password, "tenant": str(tenant), "user": str(user)}
+         elif operation == 'member':
+             uid=uuid4();email=f'{uid}@example.invalid'
+diff --git a/scripts/test-lms01-browser.py b/scripts/test-lms01-browser.py
+--- a/scripts/test-lms01-browser.py
++++ b/scripts/test-lms01-browser.py
+@@ -4,6 +4,7 @@
+ npm ci/build and Playwright Chromium. Leaves the DB intact, stops only children.
+ """
+ from contextlib import ExitStack
++import argparse
+ import os
+ from pathlib import Path
+ import socket
+@@ -50,6 +51,9 @@
+ 
+ 
+ def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--oidc', action='store_true', help='Use the test-only signed OIDC provider probe')
++    args = parser.parse_args()
+     owner = os.environ["TEST_MIGRATION_DATABASE_URL"]
+     runtime = os.environ["TEST_DATABASE_URL"]
+     with psycopg.connect(owner) as db:
+@@ -67,11 +71,21 @@
+                LOCAL_INSECURE_COOKIES="true", AUTH_ENCRYPTION_KEY=Fernet.generate_key().decode(),
+                APP_ORIGIN=f"http://127.0.0.1:{web_port}", API_BASE_URL=f"http://127.0.0.1:{api_port}",
+                PYTHONPATH=str(ROOT/"apps/api"), LMS_TEST_PYTHON=sys.executable,
+-               LMS_TEST_ROOT=str(ROOT), NEXT_TELEMETRY_DISABLED="1")
++               LMS_TEST_ROOT=str(ROOT), NEXT_TELEMETRY_DISABLED="1",
++               AUTH0_DOMAIN="", AUTH0_CLIENT_ID="", AUTH0_CLIENT_SECRET="")
++    target = 'app.main:app'
++    test_file = 'auth.spec.ts'
++    if args.oidc:
++        # Probe module is under tests/, never copied into the runtime API image.
++        target = 'oidc_browser_probe:app'
++        test_file = 'oidc.spec.ts'
++        env.update(AUTH0_DOMAIN='browser-tests.us.auth0.com', AUTH0_CLIENT_ID='synthetic-browser-client',
++                   AUTH0_CLIENT_SECRET='synthetic-browser-client-secret-not-a-real-credential',
++                   PYTHONPATH=os.pathsep.join((str(ROOT/'apps/api'),str(ROOT/'apps/api/tests'))))
+     subprocess.run([sys.executable, "-m", "alembic", "-c", "apps/api/alembic.ini", "upgrade", "head"],
+                    env=env, cwd=ROOT, check=True)
+     with ExitStack() as stack:
+-        api = subprocess.Popen([sys.executable, "-m", "uvicorn", "app.main:app", "--host", "127.0.0.1",
++        api = subprocess.Popen([sys.executable, "-m", "uvicorn", target, "--host", "127.0.0.1",
+                                 "--port", str(api_port), "--no-access-log", "--log-level", "error"],
+                                env=env, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+         stack.callback(stop, api)
+@@ -80,7 +94,7 @@
+                                env=env, cwd=ROOT/"apps/web", stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+         stack.callback(stop, web)
+         ready(web, env["APP_ORIGIN"]+"/auth")
+-        result = subprocess.run(["node", "node_modules/@playwright/test/cli.js", "test"],
++        result = subprocess.run(["node", "node_modules/@playwright/test/cli.js", "test", test_file],
+                                 env=env, cwd=ROOT/"apps/web")
+         print(f"Browser tests exit={result.returncode}; database retained: {name}")
+         return result.returncode

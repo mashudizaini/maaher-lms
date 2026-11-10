@@ -1,0 +1,70 @@
+{
+  "input_archive_sha256": "638a2f79784a19da26d5f107c43b0b5f80158066604909e6b1dc04654d51f24a",
+  "baseline_commit": "8941a79dcf611df66c4ee43e78b902b62ddbfce2",
+  "input_author_manifest_sha256": "1ca73e3b8b4e6c4a012fe5944a13da87eb772a42ee8748bf3e44863f6840bf79",
+  "original_claude_report_sha256": "004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce",
+  "patch_sha256": "5467199fb3b392cd4bc200e8ff6c7a2ca395dc45e9ffd27d347c91410c9c682d",
+  "scope": "MFA expiry fixes, four regression tests, optional browser executable, author validation documentation",
+  "files": [
+    {
+      "path": "apps/api/app/mfa.py",
+      "before_sha256": "2260ad4fa00424dfd68ef4cebe30f7a5410dc7a89628e171a36739094bd4839f",
+      "after_sha256": "7b8eb81a5046c5aba6734fe702d1e1f53180b6799fa8187a517a8ce369e60f12"
+    },
+    {
+      "path": "apps/api/tests/test_mfa_expiry_regressions.py",
+      "before_sha256": null,
+      "after_sha256": "879a8ac6c17f738849df24d3dd7623692d98afe521877ed1d687c84ae3f59210"
+    },
+    {
+      "path": "apps/web/playwright.config.ts",
+      "before_sha256": "11ed50901e84cdcca15e4d30f0ee41c7138242a8d91b12e88618f39569b6df65",
+      "after_sha256": "c273cc3a71a5f443839648ad0230a715f9574ccf30bfb52d2bed7c3d8dfe5bb8"
+    },
+    {
+      "path": "docs/LMS-01-HANDOFF.md",
+      "before_sha256": "4283e39b3abd84402797ea2ec42be106f9b059f7ec13021455afcbf6e6267305",
+      "after_sha256": "7132282ef54107e72f501aef21a10b97035d1ee0d22efb4c2f37ec10ce4dac6d"
+    },
+    {
+      "path": "docs/LMS-01-CHECKLIST.md",
+      "before_sha256": "dba217a2f5f81bc72268748674c204903877723cfdbb9348bff17279c99727f3",
+      "after_sha256": "ac5bac741b17d4d9f2c5f9281a6f8304fd4784494bcac1a627719b993d819ae1"
+    },
+    {
+      "path": "docs/LMS-01-CLOUD-APPLY.md",
+      "before_sha256": null,
+      "after_sha256": "2fecdf4514a8703d8676e105cc4ad60d6e8075b6213e1b1e259aded583a49132"
+    },
+    {
+      "path": "reviews/LMS-01-cloud-validation.md",
+      "before_sha256": null,
+      "after_sha256": "937aa32286272e560634d8d74eb952f49674eabd356af6e6b439e41befc5997a"
+    }
+  ],
+  "restored_from_verified_author_patch": [
+    ".gitignore",
+    ".agents/skills/lms-feature-delivery/SKILL.md",
+    ".agents/skills/rea-discovery/SKILL.md",
+    ".claude/skills/lms-security-review/SKILL.md",
+    ".claude/skills/rea-discovery/SKILL.md"
+  ],
+  "validation": {
+    "baseline_api": "67 passed; no skips",
+    "expiry_probes_before_fix": "2 failed, 2 passed",
+    "final_api": "71 passed; no skips",
+    "browser": "5 passed; system Chromium 156",
+    "typecheck": "passed",
+    "production_build": "passed",
+    "pypi_runtime_advisories": "34 pins, 0 findings/errors",
+    "npm_production_audit": "0 vulnerabilities",
+    "incremental_patch": "check and temporary apply passed; 7 output hashes verified"
+  },
+  "pending": [
+    "Independent Claude re-review",
+    "Production operator/root trust decision and implementation",
+    "Full account recovery without password and email",
+    "Real SMTP inbox, ingress/TLS, retention operations and backup/restore gates"
+  ],
+  "note": "Historical author manifests/patches/report are retained unchanged. Patch targets starter root; use --directory=maaher-lms-starter from nested GitHub root. No Mac/GitHub mutation."
+}

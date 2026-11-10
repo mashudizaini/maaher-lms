@@ -1,0 +1,592 @@
+{
+  "baseline_commit": "8941a79dcf611df66c4ee43e78b902b62ddbfce2",
+  "baseline_blobs_verified": 25,
+  "baseline_payload_sha256": "c3420029f27425c96a9d75e9577c86c0c0b49ed9c3729cf8b41ac20bd32090a6",
+  "baseline_tree_sha256": "1725a05e36d8f7aa89ef7fc1235d8e2bee4d4aedb57ff4c44b1f9776f0765176",
+  "patch_sha256": "5ece1dd53cab8ef10de84908b56a5bcf74ee9adba56c0b866a1a3dc8ebf0159d",
+  "strip_at_github_repository_root": 1,
+  "strip_at_starter_root": 2,
+  "post_claude_patch_sha256": "8957eec3a686196c5995b73421862f48d3c174bad1dd42df5aaf2840b86bb5e5",
+  "reviewed_manifest_sha256": "87acde87c5bc4a577a06928a4c9f187c320e1e202436bdc1fa1b9d6993c36385",
+  "original_claude_report_sha256": "004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce",
+  "post_claude_changes": [
+    {
+      "path": ".env.example",
+      "reviewed_sha256": "d9a97b49a615390faa683c8b363d00641cfe587b26c1affaf5227ca8c64e4968",
+      "current_sha256": "36033ae2513e1adb1269b235dff9b513327bcee0c95dea96b716739a19680242"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "reviewed_sha256": "ae67ee15930ed343ad7b76052d26907e9a41f38e4a50227a98aaf92ed74b1562",
+      "current_sha256": "35a8fd17d1e3d1e962603a08ffbd46aa1994bd53251b0983b25fe833311c058f"
+    },
+    {
+      "path": "apps/api/app/auth.py",
+      "reviewed_sha256": "32dd8f8b03a8b68e9dba6947e0e46a505759462c99e15d215dcd77860a4b03f8",
+      "current_sha256": "48045881ed888764816873cea07f55164659a1075ddd44d824a232d2a589c1ce"
+    },
+    {
+      "path": "apps/api/app/auth_lifecycle.py",
+      "reviewed_sha256": "c4780030dc82c9deaa06a86a229ed9eecc1d98215d438a57838f5994418686d7",
+      "current_sha256": "2136c2abc51012fabd5689ea238d66625e63a156c8a052e7d2a01d5939194912"
+    },
+    {
+      "path": "apps/api/app/auth_support.py",
+      "reviewed_sha256": "c15bdb4d85709ba6c4f74b3944b7a54435d7bbbf5029bf9c60aeae1b8cbfa28e",
+      "current_sha256": "a62469ad79761b2577a0fe2e534efc1502cc92947db7cb236a78a6b8d17d41fe"
+    },
+    {
+      "path": "apps/api/app/database.py",
+      "reviewed_sha256": "de64e9da9a98fc601aa0143bc1d2230c9d904e2c0b09555727d55782d9578f70",
+      "current_sha256": "ea0a1c07602d4cca55012678b189a84b4ab9e613a66a1e260fb65944731b03e5"
+    },
+    {
+      "path": "apps/api/app/key_rotation.py",
+      "reviewed_sha256": null,
+      "current_sha256": "a51941bd3fe753ae586fb7ca07115ea38a37be9cf6d80c6aa12f0dc66095110c"
+    },
+    {
+      "path": "apps/api/app/mail_worker.py",
+      "reviewed_sha256": "b755de979afcfebffc8c05d84a58ab4d82dabace30afe63e8e7ed3d2c07722ba",
+      "current_sha256": "f81f38043301372a2ec59fd9e9a9eb6f8a8d38c7eb7cfbdc5dddf5c9a4932f2d"
+    },
+    {
+      "path": "apps/api/app/main.py",
+      "reviewed_sha256": "1ace775864b65d15c28cb010e1edec18f9072e49fb84bcfcbf80ed9fdd8b7742",
+      "current_sha256": "a72fbb98dea43c5b9cd605dd7aabf0af888eb50ddf4fcbd935c95922af08f022"
+    },
+    {
+      "path": "apps/api/app/maintenance.py",
+      "reviewed_sha256": null,
+      "current_sha256": "ebca1e6355ad91e41480ee54e907de79a21cb34facc6a899971fdf1d199156bd"
+    },
+    {
+      "path": "apps/api/app/mfa.py",
+      "reviewed_sha256": "64b7f2beb9672f8969510c0fc3ae5d5dcd166d3660053f4feae8eb660197b305",
+      "current_sha256": "2260ad4fa00424dfd68ef4cebe30f7a5410dc7a89628e171a36739094bd4839f"
+    },
+    {
+      "path": "apps/api/app/mfa_operator.py",
+      "reviewed_sha256": null,
+      "current_sha256": "c0b8b9b3807d0486afdbe5ae2f224aa164c3461c98cb39ea91c8fbc73f25e580"
+    },
+    {
+      "path": "apps/api/app/traffic.py",
+      "reviewed_sha256": null,
+      "current_sha256": "3f26cbec2bb79e21f9c2808bf73ab6563cb7df4744910f305aa2b8242d228079"
+    },
+    {
+      "path": "apps/api/migrations/security_review.sql",
+      "reviewed_sha256": null,
+      "current_sha256": "7906ac682fc9c5c123c5e07d93c34f0696fc92b1631a79d32db7f3c59b9f8a46"
+    },
+    {
+      "path": "apps/api/migrations/security_review_rollback.sql",
+      "reviewed_sha256": null,
+      "current_sha256": "7217f5eaf4de125f45384c5d2699cbc8c3ebd3acf16a30563ccd41bed2507a3d"
+    },
+    {
+      "path": "apps/api/migrations/versions/0003_security_review.py",
+      "reviewed_sha256": null,
+      "current_sha256": "5cb5e131865b417b360c16b302b51bb7925a1a03d3d7dae822b1e825c44166c3"
+    },
+    {
+      "path": "apps/api/tests/auth_helpers.py",
+      "reviewed_sha256": null,
+      "current_sha256": "de72c0c1d60b278b876247e8173965dc9b7b433396bf50cc84870c281acb24a5"
+    },
+    {
+      "path": "apps/api/tests/commit_probe_app.py",
+      "reviewed_sha256": null,
+      "current_sha256": "d2ab2f7dc8eacda16ebe8a69f60449defb51fa74477bee01109007b88721c900"
+    },
+    {
+      "path": "apps/api/tests/conftest.py",
+      "reviewed_sha256": null,
+      "current_sha256": "48f59e93bc89c081b95001b004f7e20280c2a9278e94750e846d724e5af9f7da"
+    },
+    {
+      "path": "apps/api/tests/test_identity_postgres.py",
+      "reviewed_sha256": "7daa66c43b9a71e703fc91f3d543e1fb6b7b9e41e84716e1f4e5826ec7909bc2",
+      "current_sha256": "73c09e31d490d61203e15fb0344b0e9e78234e7fdc32d97df3a098a7867fa261"
+    },
+    {
+      "path": "apps/api/tests/test_review_regressions.py",
+      "reviewed_sha256": null,
+      "current_sha256": "a40c4cc80db324f90529b61e0505031e96ba2d10e5312134bb95d72ed7d0a75a"
+    },
+    {
+      "path": "apps/web/app/api/auth/[...path]/route.ts",
+      "reviewed_sha256": "f8313c8a21b1728864c1f88a9711c250472be38a286d1018b5157b46334e51f5",
+      "current_sha256": "78ccb350c2c4ec11ce860b8f88e3ff01cedc6cc4d9cab8230b1ded7fbee6ccd4"
+    },
+    {
+      "path": "apps/web/app/auth/page.tsx",
+      "reviewed_sha256": "aefe08667711f3b7c33727361beddcabc1f571b36b801d6294068daf5db2cc4a",
+      "current_sha256": "fc9ba171f2d5d91f0b6ff1c3c32c58dc483647de1aaad2ea5dea6dbd6d56d0ab"
+    },
+    {
+      "path": "apps/web/app/globals.css",
+      "reviewed_sha256": null,
+      "current_sha256": "8733a2d31ba0e1baf016e44ed631ff0a4019cd351ac48960bc9969dbed626ea8"
+    },
+    {
+      "path": "apps/web/app/layout.tsx",
+      "reviewed_sha256": "9206b2734dc22cda5aa73fc6127afe3ef8c55fec3819ed0762084b3ccf508777",
+      "current_sha256": "0545dc3d2dc22fd2cf806a5929d0018011ffa9365903f4c696b294daf89dc8dd"
+    },
+    {
+      "path": "apps/web/next.config.ts",
+      "reviewed_sha256": "3918c2213c39c8ecb78c8583edb43979f268b20c3ed7a2935c5296b42103775a",
+      "current_sha256": "a28da15dd009ca1b1f15296c271bbd7f9e718b57d22b452100bdc2c4cca55249"
+    },
+    {
+      "path": "apps/web/proxy.ts",
+      "reviewed_sha256": null,
+      "current_sha256": "e53bcc24fc09769199c35bc1bd6c13aebc5641ccf5a5655ed1caf22ce155b4bd"
+    },
+    {
+      "path": "apps/web/tests/auth.spec.ts",
+      "reviewed_sha256": "1158ca24cb4dcfe7777505b5860d8f28355ba2826c6fb93ee968c05fda472ed4",
+      "current_sha256": "461966c7634d7a8147ccee3c1b95c68978f1b945779bf92303837a99ab05ed58"
+    },
+    {
+      "path": "docker-compose.yml",
+      "reviewed_sha256": "669ef9321ab1b1a449e07153f267d07d3c4f107218ce75c40a0a2e30a7b53a46",
+      "current_sha256": "af91b030163ffbdf7ab638de38f71cd2a17f40cb3a6825d403b2c4473f17c74c"
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "reviewed_sha256": "30e817c2e17a66dea13371e44101d9e9387f9794cb8b4636cccb13578ddd69bd",
+      "current_sha256": "9e9fab8e2c6ea3a0a0ef5d8e2b40383d7d255886e876b1cc9383f1cc6fdc8837"
+    },
+    {
+      "path": "docs/LMS-01-CHECKLIST.md",
+      "reviewed_sha256": "52996685fdd6c118fdb1d6eab77ba2be817a5770ba98f25b3204b9da06b6c211",
+      "current_sha256": "dba217a2f5f81bc72268748674c204903877723cfdbb9348bff17279c99727f3"
+    },
+    {
+      "path": "docs/LMS-01-HANDOFF.md",
+      "reviewed_sha256": "2fe2730ca31b13eeeec187aed772df611cfa5388e9bc4ffc8e855b7a42b4b3c4",
+      "current_sha256": "4283e39b3abd84402797ea2ec42be106f9b059f7ec13021455afcbf6e6267305"
+    },
+    {
+      "path": "docs/adr/001-auth-lifecycle.md",
+      "reviewed_sha256": "68e3bc41cdfffa3db808e055f0f5e90e3a9c89941a9fcccd09316e839651051b",
+      "current_sha256": "9e448892616ed12050e721b3d2aa6216f2d7606b1970e360e799cc2d7902645f"
+    },
+    {
+      "path": "docs/adr/002-auth-security-review.md",
+      "reviewed_sha256": null,
+      "current_sha256": "4c7cd3586e1ac0b483bd4d179a80cf7a83e41a620e3ea6e83d91967851c6fd1b"
+    },
+    {
+      "path": "docs/tickets/LMS-01.md",
+      "reviewed_sha256": "c128dbc48620412847c91ddb10b8c2a94d3265ce9be6bcf4836e64b0760dcea1",
+      "current_sha256": "d7a6f60a136a02d2eedebbe4ff5e2545fa513a6490a9e7d982dfd2d62e0df7a1"
+    },
+    {
+      "path": "infra/development-roles.sql",
+      "reviewed_sha256": "0069643c80396b744754d489b3d60c8e6dc3ed75481d74a29339c9184637b8b2",
+      "current_sha256": "3b52355a85f3db7482ca7c5b34161dc1ecf85e0df8a460cc497cb10fb94054fd"
+    },
+    {
+      "path": "reviews/LMS-01-author-response.md",
+      "reviewed_sha256": null,
+      "current_sha256": "8b73052aead43456fe4fbda624d4240f5182ffe87bd48ed62045daa0bd5d5f4c"
+    },
+    {
+      "path": "scripts/build-lms01-review.py",
+      "reviewed_sha256": "3a41757d670d3b9afd0a724bc54c87477907aa2a84879c2f1d30e0716f9cba07",
+      "current_sha256": "debe1518d88a40e438055e84516e164bc4dbc2adeaea59838def2f51e80b8fc8"
+    },
+    {
+      "path": "scripts/lms01-browser-fixtures.py",
+      "reviewed_sha256": "47ed2e733c435479e11d0af7918ad954cbfa0efb62a8156bf1ee913308dd8b25",
+      "current_sha256": "3480465038a4304d60c0dac59cf9b2da83cdee5b6c562f42a6935e79250af913"
+    },
+    {
+      "path": "scripts/test-lms01-browser.py",
+      "reviewed_sha256": "2b842cbf4e092cb2996ba74f743559d5b6c01574a3455c6e9b3d2de6ceebfb9c",
+      "current_sha256": "fdd9322e2e8fcec1e2ca6d8ae330aa1d40f809a1e1996a97a7b9ce1bb892d1c3"
+    }
+  ],
+  "note": "Full baseline diff and incremental post-review diff; includes author response, excludes recursive patch/manifest/history and reviewer report content, secrets and generated artifacts. Do not apply to active workspace.",
+  "changes": [
+    {
+      "path": ".agents/skills/lms-feature-delivery/SKILL.md",
+      "baseline_git_blob": null,
+      "current_sha256": "dc7c08f18cd66219d7e50fafb36c39396c58a6594ca111e04d5bb9e7bc5d9f28"
+    },
+    {
+      "path": ".agents/skills/rea-discovery/SKILL.md",
+      "baseline_git_blob": null,
+      "current_sha256": "02548620e53130226d755a22e3b5c8c172943c0b4a3ad6634dc55ea481f9efd3"
+    },
+    {
+      "path": ".claude/skills/lms-security-review/SKILL.md",
+      "baseline_git_blob": null,
+      "current_sha256": "435caf8f3c26f727df7d8439f4d473a71ec9ea3a7bc87196744997aa64968452"
+    },
+    {
+      "path": ".claude/skills/rea-discovery/SKILL.md",
+      "baseline_git_blob": null,
+      "current_sha256": "4990865d82fceae73d71d6395ae5ddcf88401e030e2ea5ba45d93656fdd92c54"
+    },
+    {
+      "path": ".env.example",
+      "baseline_git_blob": null,
+      "current_sha256": "36033ae2513e1adb1269b235dff9b513327bcee0c95dea96b716739a19680242"
+    },
+    {
+      "path": ".github/pull_request_template.md",
+      "baseline_git_blob": null,
+      "current_sha256": "8103ca42e0d4e71bc6ff5bf2f03f33b0ed6ed743a6b2b888ba3066f3ef44572a"
+    },
+    {
+      "path": ".github/workflows/ci.yml",
+      "baseline_git_blob": null,
+      "current_sha256": "35a8fd17d1e3d1e962603a08ffbd46aa1994bd53251b0983b25fe833311c058f"
+    },
+    {
+      "path": ".gitignore",
+      "baseline_git_blob": null,
+      "current_sha256": "63a7a694591ff218eee6d81563cb29326ed0b82b228a77d4b8e3b63d775596b5"
+    },
+    {
+      "path": "apps/api/.dockerignore",
+      "baseline_git_blob": null,
+      "current_sha256": "760528ed4c5417ee7d22d995130f9ff6ea7dc232259c5d737a6d7dbc23af30f4"
+    },
+    {
+      "path": "apps/api/Dockerfile",
+      "baseline_git_blob": "fa5ce2456b6ddcd3e6abac0a4c0024c70849994a",
+      "current_sha256": "415d3e788ddaa66d3224f5114139b28086457e76239036a57efb475b038906f1"
+    },
+    {
+      "path": "apps/api/alembic.ini",
+      "baseline_git_blob": null,
+      "current_sha256": "4be35c86b24192bde1327811488c4fcbc1f446b8c1e688fbbcba8f27640a252b"
+    },
+    {
+      "path": "apps/api/app/auth.py",
+      "baseline_git_blob": null,
+      "current_sha256": "48045881ed888764816873cea07f55164659a1075ddd44d824a232d2a589c1ce"
+    },
+    {
+      "path": "apps/api/app/auth_lifecycle.py",
+      "baseline_git_blob": null,
+      "current_sha256": "2136c2abc51012fabd5689ea238d66625e63a156c8a052e7d2a01d5939194912"
+    },
+    {
+      "path": "apps/api/app/auth_support.py",
+      "baseline_git_blob": null,
+      "current_sha256": "a62469ad79761b2577a0fe2e534efc1502cc92947db7cb236a78a6b8d17d41fe"
+    },
+    {
+      "path": "apps/api/app/database.py",
+      "baseline_git_blob": null,
+      "current_sha256": "ea0a1c07602d4cca55012678b189a84b4ab9e613a66a1e260fb65944731b03e5"
+    },
+    {
+      "path": "apps/api/app/key_rotation.py",
+      "baseline_git_blob": null,
+      "current_sha256": "a51941bd3fe753ae586fb7ca07115ea38a37be9cf6d80c6aa12f0dc66095110c"
+    },
+    {
+      "path": "apps/api/app/mail_worker.py",
+      "baseline_git_blob": null,
+      "current_sha256": "f81f38043301372a2ec59fd9e9a9eb6f8a8d38c7eb7cfbdc5dddf5c9a4932f2d"
+    },
+    {
+      "path": "apps/api/app/main.py",
+      "baseline_git_blob": "ea9cd698b9cfa4eb5a15122c95d8c7e6b66d9f0f",
+      "current_sha256": "a72fbb98dea43c5b9cd605dd7aabf0af888eb50ddf4fcbd935c95922af08f022"
+    },
+    {
+      "path": "apps/api/app/maintenance.py",
+      "baseline_git_blob": null,
+      "current_sha256": "ebca1e6355ad91e41480ee54e907de79a21cb34facc6a899971fdf1d199156bd"
+    },
+    {
+      "path": "apps/api/app/mfa.py",
+      "baseline_git_blob": null,
+      "current_sha256": "2260ad4fa00424dfd68ef4cebe30f7a5410dc7a89628e171a36739094bd4839f"
+    },
+    {
+      "path": "apps/api/app/mfa_operator.py",
+      "baseline_git_blob": null,
+      "current_sha256": "c0b8b9b3807d0486afdbe5ae2f224aa164c3461c98cb39ea91c8fbc73f25e580"
+    },
+    {
+      "path": "apps/api/app/provision.py",
+      "baseline_git_blob": null,
+      "current_sha256": "3c3dff0675e240a55746be16019b297f5a095821a6d43c2395b9cc9f92b9b40b"
+    },
+    {
+      "path": "apps/api/app/security.py",
+      "baseline_git_blob": null,
+      "current_sha256": "1f77dac63235a413c6f3178946a5e7294489d3d6ea90c0b073aa9301d91b02f1"
+    },
+    {
+      "path": "apps/api/app/traffic.py",
+      "baseline_git_blob": null,
+      "current_sha256": "3f26cbec2bb79e21f9c2808bf73ab6563cb7df4744910f305aa2b8242d228079"
+    },
+    {
+      "path": "apps/api/migrations/auth_lifecycle.sql",
+      "baseline_git_blob": null,
+      "current_sha256": "cd7486875f591f1b1665570901cc155f58df448ef2b0084198379ca615accc7f"
+    },
+    {
+      "path": "apps/api/migrations/env.py",
+      "baseline_git_blob": null,
+      "current_sha256": "5c8cb1f120210b83e870f4b7ea3dd20d542bfa5c39b0120781970c50b26fe87c"
+    },
+    {
+      "path": "apps/api/migrations/identity.sql",
+      "baseline_git_blob": null,
+      "current_sha256": "35430f4f4785160833af1a0904df524f7c124a3e8dc7d7fccfcbb888fe92b1e9"
+    },
+    {
+      "path": "apps/api/migrations/security_review.sql",
+      "baseline_git_blob": null,
+      "current_sha256": "7906ac682fc9c5c123c5e07d93c34f0696fc92b1631a79d32db7f3c59b9f8a46"
+    },
+    {
+      "path": "apps/api/migrations/security_review_rollback.sql",
+      "baseline_git_blob": null,
+      "current_sha256": "7217f5eaf4de125f45384c5d2699cbc8c3ebd3acf16a30563ccd41bed2507a3d"
+    },
+    {
+      "path": "apps/api/migrations/versions/0001_identity.py",
+      "baseline_git_blob": null,
+      "current_sha256": "7e7dc3bc9ef2faaeab38ef5decb3dbee798780a85849163869be49afafa55b15"
+    },
+    {
+      "path": "apps/api/migrations/versions/0002_auth_lifecycle.py",
+      "baseline_git_blob": null,
+      "current_sha256": "98a127b08d4de59b355411f37308201e74677dbabb84a8ba2265ee11ccc44769"
+    },
+    {
+      "path": "apps/api/migrations/versions/0003_security_review.py",
+      "baseline_git_blob": null,
+      "current_sha256": "5cb5e131865b417b360c16b302b51bb7925a1a03d3d7dae822b1e825c44166c3"
+    },
+    {
+      "path": "apps/api/pytest.ini",
+      "baseline_git_blob": null,
+      "current_sha256": "b160d82f7811555051f8966d8e02750a985227c1d022208c784e606946f2eada"
+    },
+    {
+      "path": "apps/api/requirements-dev.lock",
+      "baseline_git_blob": null,
+      "current_sha256": "058ebeea38849c66330a9587bb07a0e39197ebb0b2cc404062f168278be24826"
+    },
+    {
+      "path": "apps/api/requirements-dev.txt",
+      "baseline_git_blob": "656a16ec409682ef0b4463a628eb0c98ffd8e67e",
+      "current_sha256": "cd704ee23ea4171c534e5aa4fb6722d8ab4c78c1033cf4bf34a90b033627a6d7"
+    },
+    {
+      "path": "apps/api/requirements.lock",
+      "baseline_git_blob": null,
+      "current_sha256": "94a37b7c549dda97a94e50876572e6143bc8a57bb3a9e2645673e643b6b53b42"
+    },
+    {
+      "path": "apps/api/requirements.txt",
+      "baseline_git_blob": "a4c245dbe8661c8ad43a7825e58f7c02af546fd1",
+      "current_sha256": "ab6bcd96fa6a4629b69ce0af6f6b8816341e2828b7563bb6b5e7275f95892e2c"
+    },
+    {
+      "path": "apps/api/tests/auth_helpers.py",
+      "baseline_git_blob": null,
+      "current_sha256": "de72c0c1d60b278b876247e8173965dc9b7b433396bf50cc84870c281acb24a5"
+    },
+    {
+      "path": "apps/api/tests/commit_probe_app.py",
+      "baseline_git_blob": null,
+      "current_sha256": "d2ab2f7dc8eacda16ebe8a69f60449defb51fa74477bee01109007b88721c900"
+    },
+    {
+      "path": "apps/api/tests/conftest.py",
+      "baseline_git_blob": null,
+      "current_sha256": "48f59e93bc89c081b95001b004f7e20280c2a9278e94750e846d724e5af9f7da"
+    },
+    {
+      "path": "apps/api/tests/test_identity_postgres.py",
+      "baseline_git_blob": null,
+      "current_sha256": "73c09e31d490d61203e15fb0344b0e9e78234e7fdc32d97df3a098a7867fa261"
+    },
+    {
+      "path": "apps/api/tests/test_review_regressions.py",
+      "baseline_git_blob": null,
+      "current_sha256": "a40c4cc80db324f90529b61e0505031e96ba2d10e5312134bb95d72ed7d0a75a"
+    },
+    {
+      "path": "apps/api/tests/test_security_unit.py",
+      "baseline_git_blob": null,
+      "current_sha256": "8cfee9cea78437059b38df423c9045c0bc272b2ff21a07cf1d3f0dde343443ae"
+    },
+    {
+      "path": "apps/web/.dockerignore",
+      "baseline_git_blob": null,
+      "current_sha256": "602fb53a954ac02c1a7d7519345bcd7f9e82bd5fd798d23ace05d22d5a38dc25"
+    },
+    {
+      "path": "apps/web/Dockerfile",
+      "baseline_git_blob": "d63dfdc841c290da95cf4d907f7cc0253c576b69",
+      "current_sha256": "cd12c0ad636decb275c54d40abc11659bd9909dc35ac96e4f85076d9834daec4"
+    },
+    {
+      "path": "apps/web/app/api/auth/[...path]/route.ts",
+      "baseline_git_blob": null,
+      "current_sha256": "78ccb350c2c4ec11ce860b8f88e3ff01cedc6cc4d9cab8230b1ded7fbee6ccd4"
+    },
+    {
+      "path": "apps/web/app/auth/page.tsx",
+      "baseline_git_blob": null,
+      "current_sha256": "fc9ba171f2d5d91f0b6ff1c3c32c58dc483647de1aaad2ea5dea6dbd6d56d0ab"
+    },
+    {
+      "path": "apps/web/app/globals.css",
+      "baseline_git_blob": null,
+      "current_sha256": "8733a2d31ba0e1baf016e44ed631ff0a4019cd351ac48960bc9969dbed626ea8"
+    },
+    {
+      "path": "apps/web/app/layout.tsx",
+      "baseline_git_blob": "eea43aeae92476227adf1213341d0b234aaad0b0",
+      "current_sha256": "0545dc3d2dc22fd2cf806a5929d0018011ffa9365903f4c696b294daf89dc8dd"
+    },
+    {
+      "path": "apps/web/app/page.tsx",
+      "baseline_git_blob": "12cab74e9602990d7415ad989dc6639bf09d3dcf",
+      "current_sha256": "95b93f37c878ce7e39f5e6107eaf79a88e9e261e78cb56e24d2ba9bb3f445396"
+    },
+    {
+      "path": "apps/web/next-env.d.ts",
+      "baseline_git_blob": "52285074b6b5db33e5a1ff5211ea6a4382cfee55",
+      "current_sha256": "1862ac4bbbc5192d4bf562161df66ea547ed3e67173100656ab606ae9797db2b"
+    },
+    {
+      "path": "apps/web/next.config.ts",
+      "baseline_git_blob": null,
+      "current_sha256": "a28da15dd009ca1b1f15296c271bbd7f9e718b57d22b452100bdc2c4cca55249"
+    },
+    {
+      "path": "apps/web/package-lock.json",
+      "baseline_git_blob": null,
+      "current_sha256": "627aee83811cc453c9cee74fab65c22be962228b47767140dbc32bf780397866"
+    },
+    {
+      "path": "apps/web/package.json",
+      "baseline_git_blob": "a859d24d9d66da8398ce7b031ae91bf5d29cd2e0",
+      "current_sha256": "60a5a5491fa4e435788bba03373144a9b3cc8daaeb6661ea5d39fd44585bf866"
+    },
+    {
+      "path": "apps/web/playwright.config.ts",
+      "baseline_git_blob": null,
+      "current_sha256": "11ed50901e84cdcca15e4d30f0ee41c7138242a8d91b12e88618f39569b6df65"
+    },
+    {
+      "path": "apps/web/proxy.ts",
+      "baseline_git_blob": null,
+      "current_sha256": "e53bcc24fc09769199c35bc1bd6c13aebc5641ccf5a5655ed1caf22ce155b4bd"
+    },
+    {
+      "path": "apps/web/tests/auth.spec.ts",
+      "baseline_git_blob": null,
+      "current_sha256": "461966c7634d7a8147ccee3c1b95c68978f1b945779bf92303837a99ab05ed58"
+    },
+    {
+      "path": "apps/web/tsconfig.json",
+      "baseline_git_blob": "cf2cb6b491ca9da3657c3d59dfc80e654290ab2c",
+      "current_sha256": "6bf102b8ecab1f3d366d415e0ea89bb95b2f90036570e40703a2175cd62f10b7"
+    },
+    {
+      "path": "docker-compose.yml",
+      "baseline_git_blob": "4ad364975aeab10a54cd6c57c8aec24bdd39173d",
+      "current_sha256": "af91b030163ffbdf7ab638de38f71cd2a17f40cb3a6825d403b2c4473f17c74c"
+    },
+    {
+      "path": "docs/ARCHITECTURE.md",
+      "baseline_git_blob": "026858d12cc900432cb63a5fc3782badba5aa2ca",
+      "current_sha256": "9e9fab8e2c6ea3a0a0ef5d8e2b40383d7d255886e876b1cc9383f1cc6fdc8837"
+    },
+    {
+      "path": "docs/LMS-01-CHECKLIST.md",
+      "baseline_git_blob": null,
+      "current_sha256": "dba217a2f5f81bc72268748674c204903877723cfdbb9348bff17279c99727f3"
+    },
+    {
+      "path": "docs/LMS-01-HANDOFF.md",
+      "baseline_git_blob": null,
+      "current_sha256": "4283e39b3abd84402797ea2ec42be106f9b059f7ec13021455afcbf6e6267305"
+    },
+    {
+      "path": "docs/REA-FINDINGS.md",
+      "baseline_git_blob": "0958508be853a7661533f9260ae9abe236020717",
+      "current_sha256": "faa61ec7b25d51f912dcc7aaee75a24376c9a0a5bee71864f6378d94cae34652"
+    },
+    {
+      "path": "docs/REA-SETUP-CODEX.md",
+      "baseline_git_blob": null,
+      "current_sha256": "ee47c9422b52ef9b5923b76a6ff32f1ce0ffb5d371fc8714ae9bb990e99214cf"
+    },
+    {
+      "path": "docs/SETUP-DEPLOY.md",
+      "baseline_git_blob": "7c5692f649c8443535063480cda9201e1d93dec2",
+      "current_sha256": "363d3a5bf18c02fe4de1ba17ec84c791c823da2ab52583356106670e83d52940"
+    },
+    {
+      "path": "docs/adr/001-auth-lifecycle.md",
+      "baseline_git_blob": null,
+      "current_sha256": "9e448892616ed12050e721b3d2aa6216f2d7606b1970e360e799cc2d7902645f"
+    },
+    {
+      "path": "docs/adr/002-auth-security-review.md",
+      "baseline_git_blob": null,
+      "current_sha256": "4c7cd3586e1ac0b483bd4d179a80cf7a83e41a620e3ea6e83d91967851c6fd1b"
+    },
+    {
+      "path": "docs/tickets/LMS-01.md",
+      "baseline_git_blob": null,
+      "current_sha256": "d7a6f60a136a02d2eedebbe4ff5e2545fa513a6490a9e7d982dfd2d62e0df7a1"
+    },
+    {
+      "path": "infra/Dockerfile.lms01-test",
+      "baseline_git_blob": null,
+      "current_sha256": "34c25f0a7ded39535a7662e517c80827cad65161fb65d9a3477f433a03c819fb"
+    },
+    {
+      "path": "infra/development-roles.sql",
+      "baseline_git_blob": null,
+      "current_sha256": "3b52355a85f3db7482ca7c5b34161dc1ecf85e0df8a460cc497cb10fb94054fd"
+    },
+    {
+      "path": "reviews/LMS-01-author-response.md",
+      "baseline_git_blob": null,
+      "current_sha256": "8b73052aead43456fe4fbda624d4240f5182ffe87bd48ed62045daa0bd5d5f4c"
+    },
+    {
+      "path": "scripts/audit-api-dependencies.py",
+      "baseline_git_blob": null,
+      "current_sha256": "b93facfcbb10a5362e08e8bceb82a0203e3196489a8ab9036a2a450a961f4864"
+    },
+    {
+      "path": "scripts/build-lms01-review.py",
+      "baseline_git_blob": null,
+      "current_sha256": "debe1518d88a40e438055e84516e164bc4dbc2adeaea59838def2f51e80b8fc8"
+    },
+    {
+      "path": "scripts/lms01-browser-fixtures.py",
+      "baseline_git_blob": null,
+      "current_sha256": "3480465038a4304d60c0dac59cf9b2da83cdee5b6c562f42a6935e79250af913"
+    },
+    {
+      "path": "scripts/test-lms01-browser.py",
+      "baseline_git_blob": null,
+      "current_sha256": "fdd9322e2e8fcec1e2ca6d8ae330aa1d40f809a1e1996a97a7b9ce1bb892d1c3"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+{
+  "baseline": "8941a79dcf611df66c4ee43e78b902b62ddbfce2",
+  "branch": "feat/LMS-01-auth0-development",
+  "purpose": "Transfer tested source to GitHub so Mac can obtain migration 0004 without chat artifact downloads",
+  "source_comparison": {
+    "files_checked": 44,
+    "semantic_changes": false,
+    "eof_normalizations": [
+      "apps/api/migrations/versions/0004_auth0_oidc.py",
+      "apps/api/tests/auth_helpers.py",
+      "apps/api/tests/conftest.py"
+    ]
+  },
+  "validation": {
+    "prior_source_api": "123 passed",
+    "prior_source_browser": "8 passed",
+    "auth0_action_rerun_in_nested_checkout": "8 passed",
+    "local_checker_rerun_in_nested_checkout": "6 passed",
+    "root_ci": "YAML/working directories checked; remote execution not yet observed"
+  },
+  "configuration": {
+    "dotenv_committed": false,
+    "client_secret_committed": false,
+    "public_domain_client_id": "User confirmed these belong to Maaher LMS",
+    "mac_project_path": "/Users/mashudi/Downloads/AiMZ-Corp Project/maaher-lms-starter"
+  },
+  "state": "Development source only. No main merge, deployment, live Auth0 login or H1 closure."
+}

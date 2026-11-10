@@ -22,16 +22,70 @@ services:
         condition: service_healthy
     environment:
       APP_ENV: ${APP_ENV:-local}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      DATABASE_URL: ${DATABASE_URL:?Set a restricted API role URL}
+      AUTH_DATABASE_URL: ${AUTH_DATABASE_URL:?Set a separate authentication role URL}
+      APP_ORIGIN: ${APP_ORIGIN:?Set the exact browser origin}
+      AUTH_ENCRYPTION_KEY: ${AUTH_ENCRYPTION_KEY:?Set the auth encryption secret}
+      AUTH_ENCRYPTION_KEYS: ${AUTH_ENCRYPTION_KEYS:-}
+      AUTH_ACTIVE_KEY_ID: ${AUTH_ACTIVE_KEY_ID:-legacy}
+      BFF_API_SECRET: ${BFF_API_SECRET:-}
+      LOCAL_INSECURE_COOKIES: ${LOCAL_INSECURE_COOKIES:-false}
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-}
+      AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-}
+      AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
     networks: [internal]
   web:
     build: ./apps/web
     restart: unless-stopped
     depends_on: [api]
     environment:
-      API_INTERNAL_URL: http://api:8000
+      API_BASE_URL: http://api:8000
+      APP_ORIGIN: ${APP_ORIGIN:?Set the exact browser origin}
+      APP_ENV: ${APP_ENV:-local}
+      BFF_API_SECRET: ${BFF_API_SECRET:-}
+      EDGE_SHARED_SECRET: ${EDGE_SHARED_SECRET:-}
     ports:
       - '127.0.0.1:3000:3000'
+    networks: [internal]
+  migrate:
+    profiles: [tools]
+    build: ./apps/api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MIGRATION_DATABASE_URL: ${MIGRATION_DATABASE_URL:-}
+    command: [alembic, -c, alembic.ini, upgrade, head]
+    networks: [internal]
+  mail:
+    profiles: [mail]
+    build: ./apps/api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      MAIL_DATABASE_URL: ${MAIL_DATABASE_URL:-}
+      APP_ORIGIN: ${APP_ORIGIN}
+      AUTH_ENCRYPTION_KEY: ${AUTH_ENCRYPTION_KEY}
+      AUTH_ENCRYPTION_KEYS: ${AUTH_ENCRYPTION_KEYS:-}
+      AUTH_ACTIVE_KEY_ID: ${AUTH_ACTIVE_KEY_ID:-legacy}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+    command: [python, -m, app.mail_worker]
+    networks: [internal]
+  retention:
+    profiles: [tools]
+    build: ./apps/api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: ${APP_ENV:-local}
+      MAINTENANCE_DATABASE_URL: ${MAINTENANCE_DATABASE_URL:-}
+    command: [python, -m, app.maintenance]
     networks: [internal]
 networks:
   internal: {}

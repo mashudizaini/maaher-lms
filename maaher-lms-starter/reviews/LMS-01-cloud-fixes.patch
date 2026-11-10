@@ -1,0 +1,374 @@
+diff --git a/apps/api/app/mfa.py b/apps/api/app/mfa.py
+--- a/apps/api/app/mfa.py
++++ b/apps/api/app/mfa.py
+@@ -37,19 +37,21 @@
+                           db=Depends(auth_connection,scope='function')):
+     uid=session_user(request,db,require_mfa=False)
+     digest=token_digest(request.cookies[COOKIE])
+-    # A request gives no authority. At most one per session/purpose; it cannot
+-    # overwrite/revoke another device's authorized request or active factor.
+-    row=db.execute("""SELECT id FROM mfa_requests WHERE session_hash=%s AND purpose=%s""",
+-                   (digest,body.purpose)).fetchone()
+-    if row:
+-        return {'request_id':row['id']}
+     factor=db.execute('SELECT confirmed FROM mfa_factors WHERE user_id=%s',(uid,)).fetchone()
+     if body.purpose=='bootstrap' and factor and factor['confirmed']:
+         raise HTTPException(409,'MFA sudah aktif; gunakan pemulihan terverifikasi')
++    # Renew expired requests without reviving their approval. The independent
++    # operator audit is retained separately and does not reference this row by FK.
++    db.execute("""DELETE FROM mfa_requests WHERE session_hash=%s AND purpose=%s
++                  AND expires_at<=now()""",(digest,body.purpose))
+     rid=uuid4()
+-    db.execute("""INSERT INTO mfa_requests(id,user_id,session_hash,purpose,expires_at)
+-                  VALUES(%s,%s,%s,%s,now()+interval '10 minutes')""",(rid,uid,digest,body.purpose))
+-    return {'request_id':rid}
++    # Concurrent retries share the existing unexpired ID and preserve any grant.
++    # A request alone still grants no authority and cannot affect another session.
++    row=db.execute("""INSERT INTO mfa_requests(id,user_id,session_hash,purpose,expires_at)
++                  VALUES(%s,%s,%s,%s,now()+interval '10 minutes')
++                  ON CONFLICT(session_hash,purpose) DO UPDATE SET id=mfa_requests.id
++                  RETURNING id""",(rid,uid,digest,body.purpose)).fetchone()
++    return {'request_id':row['id']}
+ 
+ 
+ @router.post('/enroll')
+@@ -98,7 +100,8 @@
+     digest=token_digest(request.cookies[COOKIE])
+     # Serialize enrollment completion and code replay across sessions.
+     db.execute('SELECT pg_advisory_xact_lock(hashtextextended(%s,0))',('factor:'+str(uid),))
+-    pending=db.execute('SELECT * FROM mfa_enrollments WHERE session_hash=%s FOR UPDATE',(digest,)).fetchone()
++    # An abandoned setup must not shadow an existing trusted authenticator.
++    pending=db.execute('SELECT * FROM mfa_enrollments WHERE session_hash=%s AND expires_at>now() FOR UPDATE',(digest,)).fetchone()
+     active=db.execute('SELECT * FROM mfa_factors WHERE user_id=%s FOR UPDATE',(uid,)).fetchone()
+     if active and not (active['confirmed'] and active['trust_verified']):
+         active=None
+diff --git a/apps/api/tests/test_mfa_expiry_regressions.py b/apps/api/tests/test_mfa_expiry_regressions.py
+new file mode 100644
+--- /dev/null
++++ b/apps/api/tests/test_mfa_expiry_regressions.py
+@@ -0,0 +1,94 @@
++"""Regression cases for MFA setup that expires before it is completed."""
++import time
++
++import psycopg
++import pyotp
++
++from auth_helpers import authorize_mfa, enroll_mfa, sign_in
++from app.security import token_digest
++
++
++ORIGIN = {"origin": "https://testserver"}
++
++
++def test_expired_operator_request_can_be_renewed_on_the_same_session(identity):
++    client, owner, user, _, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    first_grant = authorize_mfa(client)
++    with psycopg.connect(owner) as db:
++        first_id = db.execute(
++            "UPDATE mfa_requests SET expires_at=now()-interval '1 second' "
++            "WHERE user_id=%s RETURNING id", (user,)
++        ).fetchone()[0]
++    renewed = client.post("/auth/mfa/request", json={"purpose": "bootstrap"}, headers=ORIGIN)
++    assert renewed.status_code == 200
++    assert renewed.json()["request_id"] != str(first_id)
++    # A replacement request must not make the old approval usable again.
++    assert client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": first_grant,
++    }, headers=ORIGIN).status_code == 403
++    replacement_grant = authorize_mfa(client)
++    response = client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": replacement_grant,
++    }, headers=ORIGIN)
++    assert response.status_code == 200
++    factor = pyotp.parse_uri(response.json()["provisioning_uri"])
++    assert client.post("/auth/mfa/verify", json={"code": factor.now()}, headers=ORIGIN).status_code == 200
++    with psycopg.connect(owner) as db:
++        # Expiring a request must not erase the independent approval audit.
++        assert db.execute("SELECT count(*) FROM mfa_operator_audit WHERE user_id=%s", (user,)).fetchone()[0] == 2
++
++
++def test_unexpired_request_retries_preserve_id_and_one_use_approval(identity):
++    client, _, _, _, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    first = client.post("/auth/mfa/request", json={"purpose": "bootstrap"}, headers=ORIGIN)
++    grant = authorize_mfa(client)
++    repeated = client.post("/auth/mfa/request", json={"purpose": "bootstrap"}, headers=ORIGIN)
++    assert first.status_code == repeated.status_code == 200
++    assert first.json()["request_id"] == repeated.json()["request_id"]
++    payload = {"password": password, "authorization": grant}
++    assert client.post("/auth/mfa/enroll", json=payload, headers=ORIGIN).status_code == 200
++    assert client.post("/auth/mfa/enroll", json=payload, headers=ORIGIN).status_code == 403
++
++
++def test_expired_recovery_setup_does_not_block_the_active_authenticator(identity):
++    client, owner, user, tenant, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    active = enroll_mfa(client, password)
++    assert sign_in(client, email, password).status_code == 200
++    grant = authorize_mfa(client, "recovery")
++    response = client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": grant,
++        "new_password": "Never committed recovery password 123!",
++    }, headers=ORIGIN)
++    assert response.status_code == 200
++    with psycopg.connect(owner) as db:
++        old_factor = db.execute("SELECT encrypted_secret FROM mfa_factors WHERE user_id=%s", (user,)).fetchone()[0]
++        db.execute("UPDATE mfa_enrollments SET expires_at=now()-interval '1 second' WHERE user_id=%s", (user,))
++    # The next accepted TOTP step avoids replaying the enrollment confirmation.
++    verified = client.post("/auth/mfa/verify", json={"code": active.at(time.time() + 30)}, headers=ORIGIN)
++    assert verified.status_code == 200, verified.text
++    assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 200
++    with psycopg.connect(owner) as db:
++        assert db.execute("SELECT encrypted_secret FROM mfa_factors WHERE user_id=%s", (user,)).fetchone()[0] == old_factor
++        assert db.execute("SELECT count(*) FROM mfa_enrollments WHERE user_id=%s", (user,)).fetchone()[0] == 0
++    assert sign_in(client, email, password).status_code == 200
++
++
++def test_expired_pending_factor_cannot_complete_bootstrap(identity):
++    client, owner, user, _, _, email, password = identity
++    assert sign_in(client, email, password).status_code == 200
++    grant = authorize_mfa(client)
++    response = client.post("/auth/mfa/enroll", json={
++        "password": password, "authorization": grant,
++    }, headers=ORIGIN)
++    assert response.status_code == 200
++    pending = pyotp.parse_uri(response.json()["provisioning_uri"])
++    digest = token_digest(client.cookies.get("maaher_session"))
++    with psycopg.connect(owner) as db:
++        db.execute("UPDATE mfa_enrollments SET expires_at=now()-interval '1 second' WHERE session_hash=%s", (digest,))
++    assert client.post("/auth/mfa/verify", json={"code": pending.now()}, headers=ORIGIN).status_code == 400
++    with psycopg.connect(owner) as db:
++        assert db.execute("SELECT count(*) FROM mfa_factors WHERE user_id=%s", (user,)).fetchone()[0] == 0
++        assert db.execute("SELECT mfa_verified FROM sessions WHERE token_hash=%s", (digest,)).fetchone()[0] is False
+diff --git a/apps/web/playwright.config.ts b/apps/web/playwright.config.ts
+--- a/apps/web/playwright.config.ts
++++ b/apps/web/playwright.config.ts
+@@ -4,5 +4,7 @@
+   testDir: './tests', workers: 1, retries: 0, timeout: 45000,
+   use: { baseURL: process.env.APP_ORIGIN, browserName: 'chromium',
+     channel: process.env.PLAYWRIGHT_CHANNEL,
++    launchOptions: process.env.PLAYWRIGHT_EXECUTABLE_PATH
++      ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH } : undefined,
+     trace: 'off', screenshot: 'off', video: 'off' },
+ });
+diff --git a/docs/LMS-01-HANDOFF.md b/docs/LMS-01-HANDOFF.md
+--- a/docs/LMS-01-HANDOFF.md
++++ b/docs/LMS-01-HANDOFF.md
+@@ -1,4 +1,21 @@
+ # LMS-01 — handoff 2026-11-09
++
++## Tambahan cloud — 10 November 2026 WIB
++
++Arsip pemilik dan patch terhadap baseline GitHub berhasil diverifikasi; 75
++berkas cocok dengan manifest setelah lima file tersembunyi yang tidak masuk
++ZIP dipulihkan dari patch. Suite awal cloud: 67 PASS. Dua masalah kedaluwarsa
++MFA direproduksi dan diperbaiki; suite setelah perbaikan: **71 PASS tanpa
++SKIP**, PostgreSQL 16.15/Python 3.12.14. Browser Chromium aktual: **5 PASS**.
++Build/typecheck dan audit dependensi juga lulus. Rincian, batas verifikasi dan
++cara menerapkan perubahan lokal ada pada
++[validasi cloud](../reviews/LMS-01-cloud-validation.md) dan
++[panduan patch](LMS-01-CLOUD-APPLY.md).
++
++Ini validasi/perbaikan AUTHOR tambahan, bukan persetujuan Claude. H1 produksi,
++full account recovery, SMTP/inbox nyata dan gate operasional tetap terbuka.
++Data dan kode Mac tidak diubah oleh sesi cloud. Catatan historis di bawah
++dipertahankan sebagai bukti run sebelumnya.
+ 
+ Status: inti auth lokal terimplementasi dan teruji, **LMS-01 BELUM SELESAI**
+ karena acceptance eksternal/operasional belum terpenuhi. Belum untuk data siswa
+diff --git a/docs/LMS-01-CHECKLIST.md b/docs/LMS-01-CHECKLIST.md
+--- a/docs/LMS-01-CHECKLIST.md
++++ b/docs/LMS-01-CHECKLIST.md
+@@ -1,4 +1,10 @@
+ # LMS-01 — checklist setelah review independen Claude
++
++Tambahan cloud 10 November 2026 WIB: **71 API PASS tanpa SKIP**, **5 browser
++PASS** setelah dua perbaikan expiry MFA. Build/typecheck, pip check dan audit
++dependensi lulus. Lihat [laporan cloud](../reviews/LMS-01-cloud-validation.md).
++Hasil di bawah yang menyebut 67 tes merekam validasi Mac/Linux sebelumnya;
++review ulang Claude dan acceptance produksi tetap belum selesai.
+ 
+ **BELUM SELESAI untuk penggunaan nyata.** Perbaikan kode lokal dan regresi sudah
+ lulus; provider trust/operator MFA produksi, kebijakan retensi operasional,
+diff --git a/docs/LMS-01-CLOUD-APPLY.md b/docs/LMS-01-CLOUD-APPLY.md
+new file mode 100644
+--- /dev/null
++++ b/docs/LMS-01-CLOUD-APPLY.md
+@@ -0,0 +1,44 @@
++# Membawa perbaikan cloud ke Mac
++
++Arsip source cloud dan patch bersifat hasil review/implementasi tambahan.
++Proyek aktif di Mac mungkin sudah berubah sejak ZIP dibuat. Periksa dahulu
++dan gunakan diff yang cocok dengan versi saat ini.
++
++1. Unduh ZIP source cloud dan ekstrak ke **folder baru**. Source tidak membawa
++   .env, kredensial, database, dependency, cache atau hasil build.
++2. Baca `reviews/LMS-01-cloud-validation.md` serta manifest cloud. Laporan
++   independen Claude asli dan manifest/patch Mac historis tetap disertakan.
++3. Minta Codex lokal memeriksa file saat ini terhadap before-hash di manifest
++   dan patch `reviews/LMS-01-cloud-fixes.patch`. Ada dua perubahan source:
++   expiry MFA dan opsi executable browser untuk tes, empat tes regresi baru,
++   serta dokumentasi. Tidak ada perubahan skema/migrasi.
++4. Di root **starter standalone**, check patch dengan:
++
++```sh
++git apply --check /path/ke/hasil-ekstrak/reviews/LMS-01-cloud-fixes.patch
++```
++
++   Jika root GitHub memuat subfolder `maaher-lms-starter`, gunakan dari root
++   repo: `git apply --check --directory=maaher-lms-starter /path/ke/patch`.
++   Jika check gagal, Codex perlu membaca diff dan mempertahankan perubahan
++   lokal; tidak menjalankan reset atau memaksa patch. Check tidak menerapkan
++   perubahan. Setelah source cocok, Codex dapat menerapkan patch dengan
++   pilihan path yang sama dan menjalankan ulang tes terkait.
++5. Set keenam URL test ke database PostgreSQL kosong baru. Jalankan suite API
++   dan browser sesuai handoff. Jangan memakai DB hasil run lama karena fixture
++   sengaja menolak database yang sudah berisi tabel aplikasi.
++6. Claude melakukan review ulang atas source final, termasuk dua kasus expiry.
++   H1 produksi dan gate eksternal tetap memiliki status terpisah.
++
++## Prompt untuk Codex lokal
++
++```text
++Baca docs/LMS-01-CLOUD-APPLY.md dan reviews/LMS-01-cloud-validation.md
++dari hasil ekstrak cloud. Bandingkan source aktif dengan before-hash pada
++cloud manifest dan patch. Pertahankan perubahan lokal. Terapkan perbaikan
++expiry MFA jika cocok; jika sudah ada, verifikasi ekuivalensinya. Tambahkan
++keempat regresi dan konfigurasi browser opsional. Jalankan tes pada DB baru
++terpisah, perbarui handoff/patch review lokal dan serahkan untuk review ulang
++Claude. Jangan apply ulang full patch Mac historis atau mengubah laporan
++Claude asli. Tidak ada merge/deploy atau pembukaan gate produksi.
++```
+diff --git a/reviews/LMS-01-cloud-validation.md b/reviews/LMS-01-cloud-validation.md
+new file mode 100644
+--- /dev/null
++++ b/reviews/LMS-01-cloud-validation.md
+@@ -0,0 +1,127 @@
++# LMS-01 — validasi dan perbaikan tambahan di cloud
++
++Tanggal: 10 November 2026 WIB. Peran: Codex AUTHOR. Ini tidak menggantikan
++review independen Claude; tidak ada approval, commit, merge, push atau deploy.
++
++## Integritas input
++
++- ZIP pemilik: `maaher-lms-review.zip`, 328560 byte, SHA-256
++  `638a2f79784a19da26d5f107c43b0b5f80158066604909e6b1dc04654d51f24a`.
++- Sebelum perubahan: 70 file dalam ZIP cocok dengan manifest AUTHOR; tidak ada
++  mismatch. Lima file tidak masuk ZIP: `.gitignore` dan empat skill di `.agents`
++  serta `.claude`. Semuanya dipulihkan dari full patch dan cocok dengan hash
++  manifest, bukan dibuat ulang dari perkiraan.
++- Baseline GitHub `8941a79dcf611df66c4ee43e78b902b62ddbfce2` dibaca dari objek
++  Git yang tersedia. 25 file baseline diekstrak ke direktori sementara; full
++  patch lolos check dan diterapkan **hanya ke salinan baseline sementara**.
++  Hasilnya cocok dengan seluruh 75 file manifest. Ada dua warning whitespace
++  patch historis, tidak ada kegagalan apply.
++- Hash full patch, incremental patch dan laporan Claude asli cocok dengan
++  manifest. SHA laporan Claude asli tetap
++  `004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce`.
++- `LMS-01-review-manifest.json` adalah snapshot input historis. Perubahan cloud
++  dicatat terpisah di `LMS-01-cloud-manifest.json`; manifest historis tidak
++  diubah untuk memberi kesan source lama dan baru identik.
++
++## Temuan tambahan dan perbaikan
++
++### R1 — request operator kedaluwarsa selalu mengembalikan ID lama
++
++`request_authorization()` mengembalikan row lama tanpa memeriksa expiry.
++Sesudah sepuluh menit, klik ulang tetap menghasilkan ID yang tidak dapat
++disetujui operator. Test baru pada source input mereproduksi ID lama yang sama.
++
++Perbaikan di `apps/api/app/mfa.py`: hapus hanya request kedaluwarsa milik
++session/purpose tersebut sebelum membuat request baru. Audit independen
++operator tetap dipertahankan. `ON CONFLICT ... RETURNING id` membuat retry
++request yang belum kedaluwarsa tetap idempotent tanpa menimpa approval.
++
++Regresi membuktikan ID diperbarui, grant lama ditolak, grant baru dapat dipakai
++sekali dan kedua audit approval dipertahankan. Regresi terpisah memastikan
++retry ID yang masih valid tidak membatalkan grant dan replay tetap ditolak.
++
++### R2 — setup recovery expired menutupi faktor aktif yang sah
++
++`verify()` memilih pending enrollment berdasarkan keberadaan row, sebelum
++memeriksa expiry. Pending recovery expired tetap menutupi active factor;
++kode autentikator lama yang sah selalu ditolak dengan 400. Test source input
++mereproduksi penolakan tersebut tanpa mengganti faktor aktif.
++
++Perbaikan: pending enrollment dipilih hanya jika belum expired. Faktor aktif
++yang trusted tetap dapat digunakan bila setup recovery ditinggalkan.
++Enrollment expired tanpa faktor aktif tetap tidak dapat menaikkan session.
++Tidak ada penghapusan atau penggantian faktor aktif, password, atau pelemahan
++syarat approval operator. Tidak ada migrasi database baru.
++
++Keempat regresi ada di `apps/api/tests/test_mfa_expiry_regressions.py`.
++
++## Hasil yang dijalankan di cloud
++
++Lingkungan: Python 3.12.14, PostgreSQL 16.15 dalam container baru,
++Node 24.22.1, Next 16.4.5, Playwright 1.65.0 dan Chromium sistem
++156.0.8078.79. Koneksi runtime/auth/operator/mail/maintenance terpisah dan
++role nonowner/non-BYPASSRLS sesuai fixture. Trust socket database hanya untuk
++cluster sintetis ini dengan port yang dipublikasikan pada loopback.
++
++| Pemeriksaan | Hasil aktual |
++| --- | --- |
++| API input, sebelum perbaikan | 67 passed, 1 warning, 55.02s; tanpa SKIP |
++| Empat probe expiry pada source input | 2 failed (R1/R2), 2 passed, 5.07s |
++| API setelah perbaikan | **71 passed**, 1 warning, 63.29s; tanpa SKIP |
++| Browser setelah perbaikan, Next production + API nyata | **5 passed**, 26.2s |
++| Migrasi dan rollback | Jalur 0001→head, head→0002→head, head→0001→head, base→head dijalankan fixture kedua suite API; assertions preservasi legacy dan penghapusan 15 tabel lulus |
++| Role SQL aktual dan probe COMMIT uvicorn | Lulus di suite API, termasuk barrier sebelum response dan failure login/logout |
++| Typecheck dan production build | Lulus; typecheck diulang sesudah perubahan konfigurasi browser |
++| pip check / compileall / verify-starter | Lulus |
++| PyPI advisory runtime | 34 pin diperiksa; 0 findings/errors |
++| npm audit produksi | 0 vulnerabilities |
++
++Warning API: deprecation Starlette TestClient terhadap backend httpx.
++Warning warna log browser tidak mengubah hasil. Audit advisori adalah snapshot
++pada waktu run dan tidak memverifikasi keamanan deployment/OS.
++
++Command inti, dari root source dengan keenam `TEST_*_DATABASE_URL` menunjuk
++ke database baru yang kosong:
++
++```sh
++.venv/bin/python -m pytest -q -ra --tb=short apps/api/tests
++npm --prefix apps/web run typecheck
++npm --prefix apps/web run build
++# Gunakan DB browser kosong yang terpisah dari DB suite API.
++PLAYWRIGHT_EXECUTABLE_PATH=/usr/bin/chromium .venv/bin/python scripts/test-lms01-browser.py
++.venv/bin/pip check
++.venv/bin/python scripts/verify-starter.py
++.venv/bin/python -m compileall -q apps/api/app apps/api/migrations apps/api/tests scripts
++.venv/bin/python scripts/audit-api-dependencies.py
++npm --prefix apps/web audit --omit=dev
++```
++
++Opsi `PLAYWRIGHT_EXECUTABLE_PATH` ditambahkan ke config browser untuk memakai
++Chromium yang terpasang. Tanpa opsi tersebut, perilaku channel/download browser
++sebelumnya tetap berlaku. Di Mac gunakan channel Chrome sesuai handoff lama;
++path Linux di atas bukan perintah untuk Mac.
++
++Container khusus run cloud: `maaher-cloud-review-20261109`, port saat run
++127.0.0.1:32768. DB input `maaher_test_cloud_review_1`, probe sebelum fix
++`maaher_test_cloud_probe_1`, final `maaher_test_cloud_final_1`, dan browser
++`maaher_test_cloud_browser_1`. Tidak ada akses ke database atau Docker Mac.
++Container milik run cloud dihentikan setelah validasi dan datanya dipertahankan.
++
++## Batas klaim dan langkah lanjut
++
++- H1 produksi belum CLOSED: root trust/operator MFA belum dipilih. Adapter
++  sintetis tetap menolak produksi dan DB non-test. Recovery faktor yang diuji
++  masih memerlukan password-valid session; total credential loss belum didukung.
++- Belum diuji dalam sesi ini: SMTP hingga inbox nyata, MFA/SSO operator nyata,
++  ingress Cloudflare/TLS publik, edge rate limit, backup/restore drill, GitHub
++  Actions remote, Mac, build image runtime/test Docker. Tidak ada klaim rerun
++  item tersebut dari laporan sesi lokal sebelumnya.
++- Perubahan source dan keempat regresi memerlukan review ulang Claude bersama
++  perbaikan Mac sebelumnya. Laporan Claude lama tetap CHANGES_REQUESTED.
++- Pilihan operator produksi perlu jawaban pemilik. Rekomendasi untuk dievaluasi:
++  IdP/SSO terkelola dengan MFA yang dipaksakan untuk operator/admin, faktor
++  phishing-resistant dan recovery yang tidak hanya mengandalkan email LMS.
++  Ini usulan arsitektur, belum keputusan atau integrasi yang diaktifkan.
++- Cara membawa patch ke Mac: `docs/LMS-01-CLOUD-APPLY.md`. Source asli di ZIP
++  dan salinan proyek sebelumnya tetap dipertahankan; tidak ada perubahan Mac
++  atau GitHub yang terjadi otomatis.
