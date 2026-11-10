@@ -1,5 +1,12 @@
 # LMS-03 — setup dan UAT development Mac
 
+**Status 11 November:** validasi CLI Mac pada 110c9be/0008 kini dilaporkan lulus
+dengan dua sesi dan provider sintetis; [hasil dan batas](LMS-03-DEV-UAT-20261111.md).
+Panduan setup di bawah tetap untuk checkout baru. Lingkungan yang sudah aktif
+tidak perlu migrasi atau setup Auth0 ulang untuk langkah berikutnya, yaitu
+[review independen Claude](../reviews/LMS-03-review-request.md). Pertahankan
+catatan lokal reviews/LMS-03-mac-validation-20261111.md untuk reviewer.
+
 Branch `feat/LMS-03-enrollment`, base fe54142. Root GitHub memuat subfolder
 maaher-lms-starter/. Workspace lama bisa berbeda; periksa Git status dan root.
 Folder LMS Mac yang diberikan pemilik:

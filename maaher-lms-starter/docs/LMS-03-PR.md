@@ -22,6 +22,11 @@ Validation: 272 API/unit (0 skip, two existing deprecation warnings), 12 scripts
 16 Action tests and 13 real Chromium browser cases; build/typecheck, npm audit 0
 and PyPI runtime snapshot 41 pins/0 findings. Details: LMS-03-HANDOFF.md. Cloud uses PostgreSQL 16,
 separate non-owner runtime roles, real Chromium and a signed synthetic IdP.
-UAT Mac, real teacher/student Auth0, CI remote, application image build and
-independent LMS-03 review are pending. Auth parent's full review remains open;
+The owner now reports successful Mac functional validation on 110c9be/0008:
+27 API, 2 browser, 12 scripts, 16 Action tests and 13 preflight PASS, using two
+separate browser sessions and a synthetic provider. Cohort/course restore did
+not reactivate enrollment. See LMS-03-DEV-UAT-20261111.md; the Mac subset does
+not establish a full 272-test rerun, real Auth0 login or owner manual acceptance.
+Real teacher/student Auth0, CI remote, application image build and independent
+LMS-03 review remain pending. Auth parent's full review remains open;
 LMS-02 APPROVED_WITH_NOTES applies to fe54142 only. No merge/deploy approval.

@@ -1,8 +1,11 @@
 # LMS-03 — checklist development
 
-Source base fe54142; branch feat/LMS-03-enrollment. Head schema 0008_enrollment.
+Source runtime **110c9be**, base fe54142; branch feat/LMS-03-enrollment.
+Head schema 0008_enrollment.
 Validasi final: **272 API, 12 scripts, 16 Action, 13 browser**, 0 skip,
-build/typecheck/audit PASS. Bukti cloud dan command detail pada LMS-03-HANDOFF.md; belum UAT Mac/review Claude.
+build/typecheck/audit PASS. Mac kini dilaporkan 27 API, 2 browser, 12 scripts,
+16 Action serta preflight 13 PASS pada provider sintetis; detail/provenance di
+[validasi Mac](LMS-03-DEV-UAT-20261111.md). Review Claude LMS-03 masih pending.
 
 | Item | Status |
 |---|---|
@@ -20,7 +23,9 @@ build/typecheck/audit PASS. Bukti cloud dan command detail pada LMS-03-HANDOFF.m
 | Build/typecheck/dependency audit | PASS |
 | CI remote / Docker application image | UNVERIFIED |
 | Auth0 nyata, real staff/student UAT | NOT TESTED cloud |
-| UAT Mac LMS-03 / independent review LMS-03 | PENDING |
+| Validasi fungsional Mac LMS-03 | Dilaporkan lulus pada 110c9be/0008, dua sesi, provider sintetis |
+| UAT manual pemilik / Auth0 nyata pada delta ini | Belum dilaporkan terpisah / NOT TESTED menurut CLI |
+| Independent review LMS-03 | **PENDING**, review source fe54142..110c9be |
 | Full independent auth parent review | PENDING; LMS-02 verdict hanya delta kursus fe54142 |
 | Merge/deploy | Tidak dilakukan |
 

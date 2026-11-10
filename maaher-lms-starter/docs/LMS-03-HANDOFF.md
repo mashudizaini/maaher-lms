@@ -1,5 +1,14 @@
 # LMS-03 — cohort dan enrollment siap review development
 
+**Pembaruan validasi Mac, 11 November:** pemilik melaporkan source **110c9be**
+aktif, backup/upgrade 0008 selesai, API/web dibangun ulang, alur dua sesi
+cohort→enroll→read→move→revoke→reactivate lulus, dan archive/restore cohort maupun
+course tidak mengaktifkan enrollment otomatis. Hasil lokal: **27 API, 2 browser,
+12 scripts, 16 Action**, preflight **13 PASS**, provider/data sintetis. Lihat
+[catatan provenance dan batas](LMS-03-DEV-UAT-20261111.md). Ini bukan login Auth0
+nyata atau klaim pengulangan full 272 pada Mac. Review Claude LMS-03 masih pending.
+Perubahan sesudah 110c9be pada tahap ini hanya dokumentasi; runtime tetap sama.
+
 11 November 2026 WIB. Branch `feat/LMS-03-enrollment`, base **fe54142**,
 bertumpu pada branch LMS-02 yang belum di-merge. Instruksi pemilik: lanjut setelah
 re-review LMS-02 APPROVED_WITH_NOTES. Delapan temuan LOW lama kini dipetakan;
@@ -126,10 +135,11 @@ Auth0 dan profil dev-TOTP yang sudah berhasil dipertahankan. Tidak perlu setup
 IdP ulang. Jangan menjalankan pytest pada DB UAT yang berisi; fixture menuntut
 DB tes kosong baru dan melakukan rollback destruktif ber-ack pada DB itu.
 
-Owner melakukan login sendiri. UAT baru pada /enrollments dan /learn belum
-terjadi di Mac; cloud tidak mengakses localhost Mac. Provision siswa sintetis
-baru melalui alur undangan existing pada tenant tes; kredensial/token hanya
-lokal, jangan di chat. Tidak membuat role admin atau binding berdasarkan email.
+Validasi /enrollments dan /learn di Mac kini dilaporkan lulus memakai provider
+sintetis; catatan lokal asli tersedia untuk reviewer di Mac. Cloud tidak
+mengakses localhost Mac. UAT manual pemilik dan login Auth0 nyata belum
+dilaporkan pada delta ini. Tidak perlu mengulang provisioning, setup atau
+migrasi untuk meminta review; simpan akun/data uji dan bukti lokal yang ada.
 
 Minta review independen sesuai [review request](../reviews/LMS-03-review-request.md).
 Auth parent full review **8941a79..4733526** tetap terbuka; LMS-02 approved with
