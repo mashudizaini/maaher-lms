@@ -31,7 +31,7 @@ def test_response_body_never_becomes_a_diagnostic(capsys):
 
 def start_response(request, malicious=False):
     if request.url.path.endswith('/config'):
-        return httpx.Response(200,json={'enabled':True})
+        return httpx.Response(200,json={'enabled':True,'assurance':'maaher-fido2-uv-v1'})
     params = {'client_id':module['CLIENT_ID'],'response_type':'code','code_challenge_method':'S256',
               'prompt':'login','max_age':'0','nonce':SENTINEL,'state':SENTINEL,'code_challenge':SENTINEL,
               'redirect_uri':'https://evil.invalid/' if malicious else ORIGIN+'/api/auth/oidc/callback'}
@@ -75,3 +75,24 @@ def test_database_errors_do_not_print_credentials(monkeypatch,capsys):
     module['database']({'MIGRATION_DATABASE_URL':SENTINEL,'AUTH_DATABASE_URL':SENTINEL},Report())
     output = capsys.readouterr().out
     assert SENTINEL not in output and 'FAIL' in output
+
+
+def test_service_with_the_wrong_profile_prevents_start_flow(capsys):
+    calls = []
+    def handler(request):
+        calls.append(request.url.path)
+        return start_response(request)
+    report = Report()
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        module['application'](client,{'APP_ORIGIN':ORIGIN,'AUTH0_ASSURANCE_PROFILE':'dev-totp'},report,True)
+    assert calls == ['/api/auth/oidc/config']
+    assert report.items[-1][1]=='FAIL'
+    assert SENTINEL not in capsys.readouterr().out
+
+
+def test_unknown_profile_prevents_live_probes(tmp_path,monkeypatch,capsys):
+    for name in module['NAMES']:monkeypatch.delenv(name,raising=False)
+    (tmp_path/'.env').write_text(f'AUTH0_DOMAIN={module["DOMAIN"]}\nAUTH0_CLIENT_ID={module["CLIENT_ID"]}\nAUTH0_CLIENT_SECRET={SENTINEL}\nAPP_ENV=local\nAPP_ORIGIN={ORIGIN}\nAUTH0_ASSURANCE_PROFILE=unknown\n')
+    _, valid = module['load_config'](tmp_path,Report())
+    assert valid is False
+    assert SENTINEL not in capsys.readouterr().out

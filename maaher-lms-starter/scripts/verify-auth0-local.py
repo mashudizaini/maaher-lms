@@ -17,7 +17,9 @@ DOMAIN = 'dev-hl2un81cojtbhbv4.us.auth0.com'
 CLIENT_ID = 'FjD4enWFIU9PNdnLjGwc1M1x4p8xsdW3'
 ISSUER = 'https://' + DOMAIN + '/'
 NAMES = ('AUTH0_DOMAIN','AUTH0_CLIENT_ID','AUTH0_CLIENT_SECRET','APP_ORIGIN',
-         'APP_ENV','LOCAL_INSECURE_COOKIES','MIGRATION_DATABASE_URL','AUTH_DATABASE_URL')
+         'APP_ENV','LOCAL_INSECURE_COOKIES','MIGRATION_DATABASE_URL','AUTH_DATABASE_URL',
+         'AUTH0_ASSURANCE_PROFILE')
+ASSURANCES = {'fido2':'maaher-fido2-uv-v1','dev-totp':'maaher-dev-totp-v1'}
 
 
 class Report:
@@ -43,6 +45,8 @@ def load_config(root, report):
         report.add('.env','FAIL','file lokal belum dapat dibaca sebagai dotenv; isi file tidak ditampilkan')
         return {},False
     config = {name: os.environ.get(name,values.get(name) or '') for name in NAMES}
+    if not config['AUTH0_ASSURANCE_PROFILE'] and 'AUTH0_ASSURANCE_PROFILE' not in values and 'AUTH0_ASSURANCE_PROFILE' not in os.environ:
+        config['AUTH0_ASSURANCE_PROFILE'] = 'fido2'
     ready = True
     for name, expected in (('AUTH0_DOMAIN',DOMAIN),('AUTH0_CLIENT_ID',CLIENT_ID)):
         match = config[name] == expected
@@ -60,7 +64,9 @@ def load_config(root, report):
     except ValueError:
         valid = False
     report.add('development origin','PASS' if valid else 'FAIL','origin loopback local valid' if valid else 'gunakan APP_ENV=local dan APP_ORIGIN loopback exact tanpa trailing slash')
-    return config, ready and valid
+    profile = config['AUTH0_ASSURANCE_PROFILE'] in ASSURANCES
+    report.add('assurance profile','PASS' if profile else 'FAIL','profil dikenali; dev-totp bukan assurance produksi' if profile else 'gunakan fido2 atau dev-totp secara eksplisit')
+    return config, ready and valid and profile
 
 
 def public_provider(client, report):
@@ -106,10 +112,10 @@ def database(config, report):
                 report.add('database','FAIL','checker hanya untuk DB development sintetis maaher_test_*; tidak menginspeksi data pengguna')
                 return
             revision = owner.execute('SELECT version_num FROM alembic_version').fetchone()[0]
-            if revision != '0004_auth0_oidc':
-                report.add('database migration','FAIL','migration 0004 belum aktif; periksa source dan DB yang dipilih')
+            if revision != '0005_dev_totp':
+                report.add('database migration','FAIL','migration 0005 belum aktif; periksa source dan DB development yang dipilih')
                 return
-            report.add('database migration','PASS','0004 aktif pada DB sintetis')
+            report.add('database migration','PASS','0005 aktif pada DB sintetis')
         with psycopg.connect(config['AUTH_DATABASE_URL'],connect_timeout=5,options='-c default_transaction_read_only=on') as auth:
             if auth.execute('SELECT current_database()').fetchone()[0] != name:
                 report.add('auth role','FAIL','auth dan migration URL menuju database berbeda')
@@ -134,6 +140,10 @@ def application(client, config, report, start_flow=False):
         response = client.get(origin+'/api/auth/oidc/config')
         if response.status_code!=200 or response.json().get('enabled') is not True:
             report.add('API/web Auth0 config','FAIL','service belum aktif/konfigurasi belum termuat; periksa source dan restart service development')
+            return
+        expected_assurance = ASSURANCES.get(config.get('AUTH0_ASSURANCE_PROFILE','fido2'))
+        if not expected_assurance or response.json().get('assurance') != expected_assurance:
+            report.add('API/web Auth0 config','FAIL','profil service berbeda dari konfigurasi lokal; periksa source dan restart API')
             return
         report.add('API/web Auth0 config','PASS','service menyatakan konfigurasi tersedia; secret belum divalidasi provider')
         if not start_flow:

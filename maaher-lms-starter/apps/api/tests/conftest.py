@@ -48,6 +48,14 @@ def database():
                        (external_identity,external_user))
             db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES('oidc-downgrade-fixture',%s,now()+interval '1 hour',true)", (external_user,))
             db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES('oidc-downgrade-fixture',%s,now(),'maaher-fido2-uv-v1')", (external_identity,))
+            db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES('dev-downgrade-fixture',%s,now()+interval '1 hour',true)", (external_user,))
+            db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES('dev-downgrade-fixture',%s,now(),'maaher-dev-totp-v1')", (external_identity,))
+        command.downgrade(config, "0004_auth0_oidc")
+        with psycopg.connect(owner_url) as db:
+            assert db.execute("SELECT 1 FROM sessions WHERE token_hash='dev-downgrade-fixture'").fetchone() is None
+            assert db.execute("SELECT 1 FROM sessions WHERE token_hash='oidc-downgrade-fixture'").fetchone() == (1,)
+            assert db.execute("SELECT password_hash FROM users WHERE id=%s", (external_user,)).fetchone()[0] == 'external-fixture-hash'
+        command.upgrade(config, "head")
         command.downgrade(config, "0003_security_review")
         with psycopg.connect(owner_url) as db:
             for table in ("oidc_identities", "oidc_login_flows", "oidc_sessions"):
@@ -77,7 +85,7 @@ def database():
                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
         command.upgrade(config, "head")
         with psycopg.connect(owner_url) as db:
-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0004_auth0_oidc"
+            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0005_dev_totp"
         yield owner_url
     finally:
         if previous is None:
@@ -105,6 +113,7 @@ def identity(database, monkeypatch, auth_key):
     monkeypatch.setenv("AUTH_DATABASE_URL", os.environ["TEST_AUTH_DATABASE_URL"])
     monkeypatch.setenv("APP_ORIGIN", "https://testserver")
     monkeypatch.setenv("APP_ENV", "test")
+    monkeypatch.delenv("AUTH0_ASSURANCE_PROFILE", raising=False)
     monkeypatch.setenv("AUTH_ENCRYPTION_KEY", auth_key)
     user, other, tenant, foreign = (uuid4() for _ in range(4))
     email = f"{user}@example.invalid"

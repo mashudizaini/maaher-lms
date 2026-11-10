@@ -1,5 +1,11 @@
 # Menjalankan verifikasi di Mac yang memiliki .env
 
+Pilihan terbaru pemilik adalah autentikator HP untuk development sintetis.
+Ikuti [AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md), gunakan checker dari source branch
+terbaru dan migration **0005_dev_totp**. Paket checker lama yang hanya mengenali
+0004 harus diganti. Instruksi security key historis di bawah hanya untuk profile
+fido2. `--start-flow` tetap tidak melakukan enrollment/login/binding.
+
 Penyesuaian `.env` di Mac tidak menyinkronkan credential ke cloud. Pada pemeriksaan
 sesi ini, cloud tidak mempunyai `.env` utama, binding secret atau akses jaringan
 ke tenant Auth0. Karena itu validasi live perlu dijalankan di Mac Anda.
@@ -36,7 +42,7 @@ validitas Client Secret terhadap token endpoint, policy/security-key yang aktif
 di Auth0 atau izin produksi. Exit 1 = ada FAIL; exit 2 = ada langkah SKIP dan
 tidak ada FAIL; exit 0 = seluruh langkah preflight yang dijalankan lulus.
 
-Jika source/schema belum 0004, source Auth0 belum diterapkan/migrasi dev belum
+Jika source/schema belum 0005, source Auth0 terbaru belum diterapkan/migrasi dev belum
 aktif. Jika binding belum ada, lakukan verifikasi user/key dan provisioning
 terkontrol pada runbook; jangan auto-link email atau mengubah MFA flags lewat SQL.
 Jika DB URL memakai hostname internal Compose seperti `db`, koneksi dari Terminal

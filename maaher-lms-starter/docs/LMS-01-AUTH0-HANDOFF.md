@@ -115,3 +115,11 @@ diff sambil mempertahankan perubahan lokal; tidak melakukan reset atau apply
 ulang full patch historis. Sesudah tes lokal, Claude meninjau token validator,
 state/config binding, role SQL, fallback, Action, migrasi/rollback dan bukti live
 yang tersedia. Tidak ada approval baru yang ditulis atas nama Claude.
+# Lanjutan terbaru — autentikator HP untuk development
+
+10 November 2026: pemilik memilih profile TOTP local/synthetic. Head migrasi
+terbaru **0005_dev_totp**. Lihat [handoff dev TOTP](LMS-01-DEV-TOTP-HANDOFF.md)
+untuk perubahan, hasil final 143 API/unit + 9 browser + 16 Action + 8 checker,
+batas dan review. Panduan pemilik: [AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md).
+Catatan di atas adalah snapshot tahap FIDO2 sebelumnya. Produksi tetap FIDO2;
+live Auth0/Mac belum diverifikasi oleh cloud, H1/review tetap terbuka.

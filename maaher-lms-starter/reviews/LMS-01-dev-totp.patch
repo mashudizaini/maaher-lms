@@ -1,0 +1,1208 @@
+diff --git a/.github/workflows/lms-auth0.yml b/.github/workflows/lms-auth0.yml
+index 4798396..fa2d12d 100644
+--- a/.github/workflows/lms-auth0.yml
++++ b/.github/workflows/lms-auth0.yml
+@@ -55,7 +55,7 @@ jobs:
+       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+         with:
+           node-version: '22'
+-      - run: node --test infra/auth0/staff-post-login.test.cjs
++      - run: node --test infra/auth0/*.test.cjs
+       - run: npm ci --no-audit --no-fund
+         working-directory: maaher-lms-starter/apps/web
+       - run: npm run build
+@@ -90,6 +90,20 @@ jobs:
+           TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_oidc_browser_ci
+           TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_oidc_browser_ci
+         run: python scripts/test-lms01-browser.py --oidc
++      - name: Create separate development TOTP browser test database
++        run: |
++          python - <<'PY'
++          import os,psycopg
++          with psycopg.connect(os.environ['TEST_MIGRATION_DATABASE_URL'],autocommit=True) as db:
++              db.execute('CREATE DATABASE maaher_test_dev_totp_browser_ci')
++          PY
++      - name: Development TOTP browser regression
++        env:
++          TEST_MIGRATION_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
++          TEST_DATABASE_URL: postgresql://maaher_api@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
++          TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
++          TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
++        run: python scripts/test-lms01-browser.py --oidc --dev-totp
+   web:
+     runs-on: ubuntu-latest
+     steps:
+diff --git a/AUTH0-DEVELOPMENT.md b/AUTH0-DEVELOPMENT.md
+index c4d371e..441bfb0 100644
+--- a/AUTH0-DEVELOPMENT.md
++++ b/AUTH0-DEVELOPMENT.md
+@@ -6,8 +6,10 @@ dari subfolder tersebut.
+ 
+ - [Mengambil source dan konfigurasi Mac dengan aman](maaher-lms-starter/docs/MAC-SOURCE-SYNC.md)
+ - [Setup tenant/aplikasi Auth0](maaher-lms-starter/docs/AUTH0-SETUP.md)
++- [Autentikator HP untuk development — langkah pemilik dan prompt Codex Mac](maaher-lms-starter/docs/AUTH0-DEV-TOTP.md)
+ - [Hasil validasi dan gate yang masih terbuka](maaher-lms-starter/docs/LMS-01-AUTH0-HANDOFF.md)
+ 
+-Source mencakup migration 0004, OIDC Authorization Code + PKCE, binding issuer/
++Source mencakup migration 0005, profile TOTP local/synthetic terpisah dari FIDO2,
++OIDC Authorization Code + PKCE, binding issuer/
+ subject dan checker lokal. Secret `.env` tidak disertakan. H1 produksi dan
+ review independen masih terbuka; tidak ada merge/deploy otomatis.
+diff --git a/maaher-lms-starter/.env.example b/maaher-lms-starter/.env.example
+index 9102c35..e87ac11 100644
+--- a/maaher-lms-starter/.env.example
++++ b/maaher-lms-starter/.env.example
+@@ -34,3 +34,6 @@ LOCAL_INSECURE_COOKIES=false
+ AUTH0_DOMAIN=dev-hl2un81cojtbhbv4.us.auth0.com
+ AUTH0_CLIENT_ID=FjD4enWFIU9PNdnLjGwc1M1x4p8xsdW3
+ AUTH0_CLIENT_SECRET=
++# Default: fido2. dev-totp requires APP_ENV=local, loopback origin and an actual
++# maaher_test_* database. Never use dev-totp with real users or production.
++AUTH0_ASSURANCE_PROFILE=fido2
+diff --git a/maaher-lms-starter/apps/api/app/database.py b/maaher-lms-starter/apps/api/app/database.py
+index 3eb456a..b2ea7d9 100644
+--- a/maaher-lms-starter/apps/api/app/database.py
++++ b/maaher-lms-starter/apps/api/app/database.py
+@@ -5,6 +5,8 @@ import os
+ import psycopg
+ from psycopg.rows import dict_row
+ 
++from .oidc_policy import configured_assurance
++
+ # Tests instrument this connector in a separate uvicorn process, never via HTTP.
+ _connect = psycopg.connect
+ 
+@@ -23,6 +25,10 @@ def transaction(environment='DATABASE_URL', group='maaher_runtime'):
+         """,(group,)).fetchone()
+         if flags['unsafe']:
+             raise RuntimeError('Koneksi harus memakai role runtime terpisah tanpa owner/BYPASSRLS')
++        # Transaction-local, set by the server on both auth and tenant paths.
++        # The resolver additionally requires the actual DB name for dev TOTP.
++        db.execute("SELECT set_config('app.oidc_assurance',%s,true)",
++                   (configured_assurance() or 'disabled',))
+         yield db
+         # psycopg's connection context commits here. FastAPI callers must use
+         # Depends(..., scope='function'), whose teardown precedes response send.
+diff --git a/maaher-lms-starter/apps/api/app/oidc.py b/maaher-lms-starter/apps/api/app/oidc.py
+index 6ca7778..a87eeee 100644
+--- a/maaher-lms-starter/apps/api/app/oidc.py
++++ b/maaher-lms-starter/apps/api/app/oidc.py
+@@ -23,13 +23,14 @@ from .auth import COOKIE, SESSION_SECONDS, auth_connection, secure_cookie, sessi
+ from .auth_support import cipher, reserve_session_slot, security_event
+ from .database import auth_transaction, user_context
+ from .security import new_token, token_digest
++from .oidc_policy import FIDO2_ASSURANCE, DEV_TOTP_ASSURANCE, configured_assurance
+ 
+ router = APIRouter(prefix="/auth/oidc")
+ FLOW_COOKIE = "maaher_oidc_flow"
+ FLOW_SECONDS = 300
+ STAFF_SESSION_SECONDS = 30 * 60
+ ASSURANCE_CLAIM = "https://maaherlms.aimz.my.id/assurance"
+-ASSURANCE = "maaher-fido2-uv-v1"
++ASSURANCE = FIDO2_ASSURANCE
+ 
+ 
+ @dataclass(frozen=True)
+@@ -38,6 +39,7 @@ class Settings:
+     client_id: str
+     client_secret: str = field(repr=False)
+     origin: str
++    assurance: str = FIDO2_ASSURANCE
+ 
+     @property
+     def callback(self):
+@@ -45,7 +47,7 @@ class Settings:
+ 
+     @property
+     def fingerprint(self):
+-        return token_digest(json.dumps([self.issuer, self.client_id, self.callback, ASSURANCE]))
++        return token_digest(json.dumps([self.issuer, self.client_id, self.callback, self.assurance]))
+ 
+ 
+ def settings():
+@@ -53,20 +55,28 @@ def settings():
+     client_id = os.environ.get("AUTH0_CLIENT_ID", "")
+     secret = os.environ.get("AUTH0_CLIENT_SECRET", "")
+     origin = os.environ.get("APP_ORIGIN", "")
++    assurance = configured_assurance()
+     try:
+         parsed = urlsplit(origin)
+         parsed.port
+     except ValueError:
+         raise HTTPException(503, "Login Auth0 belum dikonfigurasi") from None
+     local = os.environ.get("APP_ENV") == "local" and parsed.hostname in {"127.0.0.1", "localhost"}
+-    if (not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+auth0\.com", domain)
++    if (not assurance
++            or not re.fullmatch(r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+auth0\.com", domain)
+             or len(domain) > 253 or not 3 <= len(client_id) <= 128
+             or not client_id.isascii() or any(c.isspace() for c in client_id) or not secret
+             or not parsed.hostname or parsed.username or parsed.password or parsed.path
+             or parsed.query or parsed.fragment
+             or not (parsed.scheme == "https" or (local and parsed.scheme == "http"))):
+         raise HTTPException(503, "Login Auth0 belum dikonfigurasi")
+-    return Settings("https://" + domain + "/", client_id, secret, origin)
++    return Settings("https://" + domain + "/", client_id, secret, origin, assurance)
++
++
++def require_policy_database(config, db):
++    if (config.assurance == DEV_TOTP_ASSURANCE
++            and not db.execute("SELECT current_database() AS name").fetchone()["name"].startswith("maaher_test_")):
++        raise HTTPException(503, "TOTP development hanya untuk database sintetis maaher_test_*")
+ 
+ 
+ def make_client(config):
+@@ -97,15 +107,16 @@ def denied():
+ @router.get("/config")
+ def configuration():
+     try:
+-        settings()
++        config = settings()
+     except HTTPException:
+         return {"enabled": False}
+-    return {"enabled": True}
++    return {"enabled": True, "assurance": config.assurance}
+ 
+ 
+ @router.post("/login", dependencies=[Depends(verify_origin)])
+ async def start(request: Request, response: Response, config=Depends(settings),
+                 db=Depends(auth_connection, scope="function")):
++    require_policy_database(config, db)
+     client = make_client(config)
+     data = await client.create_authorization_url(config.callback, nonce=new_token(), prompt="login", max_age="0")
+     request.scope["session"] = {}
+@@ -135,6 +146,7 @@ def consume_flow(browser, state):
+ @router.get("/callback")
+ async def callback(request: Request, response: Response, config=Depends(settings),
+                    db=Depends(auth_connection, scope="function")):
++    require_policy_database(config, db)
+     query = request.query_params
+     if (any(len(query.getlist(k)) != 1 for k in query)
+             or set(query) - {"state", "code", "error", "error_description", "iss"}
+@@ -158,7 +170,7 @@ async def callback(request: Request, response: Response, config=Depends(settings
+         )
+         claims = token.get("userinfo")
+         now = time.time()
+-        if (not claims or claims.get(ASSURANCE_CLAIM) != ASSURANCE
++        if (not claims or claims.get(ASSURANCE_CLAIM) != config.assurance
+                 or "mfa" not in claims.get("amr", [])
+                 or isinstance(claims.get("auth_time"), bool)
+                 or not isinstance(claims.get("auth_time"), (int, float))
+@@ -183,7 +195,7 @@ async def callback(request: Request, response: Response, config=Depends(settings
+     db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES(%s,%s,%s,true)",
+                (token_digest(opaque), uid, datetime.now(timezone.utc) + timedelta(seconds=lifetime)))
+     db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES(%s,%s,%s,%s)",
+-               (token_digest(opaque), identity["id"], datetime.fromtimestamp(claims["auth_time"], timezone.utc), ASSURANCE))
++               (token_digest(opaque), identity["id"], datetime.fromtimestamp(claims["auth_time"], timezone.utc), config.assurance))
+     security_event(db, uid, "login.succeeded")
+     response.set_cookie(COOKIE, opaque, max_age=lifetime, httponly=True,
+                         secure=secure_cookie(), samesite="lax", path="/")
+diff --git a/maaher-lms-starter/apps/api/app/oidc_policy.py b/maaher-lms-starter/apps/api/app/oidc_policy.py
+new file mode 100644
+index 0000000..d9341b1
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/oidc_policy.py
+@@ -0,0 +1,23 @@
++"""Explicit assurance profiles. Phone TOTP is only for local synthetic data."""
++import os
++from urllib.parse import urlsplit
++
++FIDO2_ASSURANCE = "maaher-fido2-uv-v1"
++DEV_TOTP_ASSURANCE = "maaher-dev-totp-v1"
++
++
++def configured_assurance():
++    profile = os.environ.get("AUTH0_ASSURANCE_PROFILE", "fido2")
++    if profile == "fido2":
++        return FIDO2_ASSURANCE
++    if profile != "dev-totp" or os.environ.get("APP_ENV") != "local":
++        return None
++    try:
++        origin = urlsplit(os.environ.get("APP_ORIGIN", ""))
++        origin.port
++    except ValueError:
++        return None
++    if (origin.scheme not in {"http", "https"} or origin.hostname not in {"localhost", "127.0.0.1"}
++            or origin.username or origin.password or origin.path or origin.query or origin.fragment):
++        return None
++    return DEV_TOTP_ASSURANCE
+diff --git a/maaher-lms-starter/apps/api/migrations/auth0_dev_totp.sql b/maaher-lms-starter/apps/api/migrations/auth0_dev_totp.sql
+new file mode 100644
+index 0000000..72cebf3
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/auth0_dev_totp.sql
+@@ -0,0 +1,33 @@
++ALTER TABLE oidc_sessions DROP CONSTRAINT oidc_sessions_assurance_check;
++-- statement
++ALTER TABLE oidc_sessions ADD CONSTRAINT oidc_sessions_assurance_check
++    CHECK (assurance IN ('maaher-fido2-uv-v1','maaher-dev-totp-v1'));
++-- statement
++ALTER TABLE oidc_sessions ADD CONSTRAINT oidc_sessions_dev_database_check
++    CHECK (assurance<>'maaher-dev-totp-v1' OR starts_with(current_database(),'maaher_test_'));
++-- statement
++CREATE OR REPLACE FUNCTION resolve_session(p_hash text)
++RETURNS TABLE(id uuid,mfa_verified boolean,mfa_required boolean,factor_confirmed boolean)
++LANGUAGE sql STABLE SECURITY DEFINER SET search_path=pg_catalog,public,pg_temp AS $$
++    SELECT u.id,s.mfa_verified,
++      EXISTS(SELECT 1 FROM public.oidc_identities i WHERE i.user_id=u.id)
++      OR EXISTS(SELECT 1 FROM public.mfa_factors f WHERE f.user_id=u.id AND f.confirmed)
++      OR EXISTS(SELECT 1 FROM public.memberships m JOIN public.tenants t ON t.id=m.tenant_id
++                WHERE m.user_id=u.id AND m.role='admin' AND m.status='active' AND t.status='active'),
++      CASE WHEN EXISTS(SELECT 1 FROM public.oidc_identities i WHERE i.user_id=u.id)
++        THEN EXISTS(SELECT 1 FROM public.oidc_sessions o JOIN public.oidc_identities i ON i.id=o.identity_id
++                    WHERE o.token_hash=s.token_hash AND i.user_id=u.id AND i.status='active'
++                      AND o.assurance=coalesce(current_setting('app.oidc_assurance',true),'maaher-fido2-uv-v1')
++                      AND (o.assurance='maaher-fido2-uv-v1'
++                           OR (o.assurance='maaher-dev-totp-v1' AND starts_with(current_database(),'maaher_test_'))))
++        ELSE EXISTS(SELECT 1 FROM public.mfa_factors f WHERE f.user_id=u.id AND f.confirmed AND f.trust_verified)
++      END
++    FROM public.sessions s JOIN public.users u ON u.id=s.user_id
++    WHERE s.token_hash=p_hash AND s.expires_at>now() AND u.status='active'
++      AND (NOT EXISTS(SELECT 1 FROM public.oidc_identities i WHERE i.user_id=u.id)
++           OR EXISTS(SELECT 1 FROM public.oidc_sessions o JOIN public.oidc_identities i ON i.id=o.identity_id
++                     WHERE o.token_hash=s.token_hash AND i.user_id=u.id AND i.status='active'
++                       AND o.assurance=coalesce(current_setting('app.oidc_assurance',true),'maaher-fido2-uv-v1')
++                       AND (o.assurance='maaher-fido2-uv-v1'
++                            OR (o.assurance='maaher-dev-totp-v1' AND starts_with(current_database(),'maaher_test_')))))
++$$;
+diff --git a/maaher-lms-starter/apps/api/migrations/versions/0005_dev_totp.py b/maaher-lms-starter/apps/api/migrations/versions/0005_dev_totp.py
+new file mode 100644
+index 0000000..ac844bf
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/versions/0005_dev_totp.py
+@@ -0,0 +1,27 @@
++"""Separate local synthetic TOTP assurance from the production FIDO2 policy."""
++from pathlib import Path
++from alembic import op
++
++revision = "0005_dev_totp"
++down_revision = "0004_auth0_oidc"
++branch_labels = None
++depends_on = None
++
++
++def upgrade():
++    source = Path(__file__).parent.parent / "auth0_dev_totp.sql"
++    for statement in source.read_text().split("\n-- statement\n"):
++        op.execute(statement)
++
++
++def downgrade():
++    # Never turn a dev session into a FIDO2 or local trusted session.
++    op.execute("DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM oidc_sessions WHERE assurance='maaher-dev-totp-v1')")
++    op.execute("DELETE FROM oidc_login_flows")
++    op.execute("ALTER TABLE oidc_sessions DROP CONSTRAINT oidc_sessions_dev_database_check")
++    op.execute("ALTER TABLE oidc_sessions DROP CONSTRAINT oidc_sessions_assurance_check")
++    op.execute("ALTER TABLE oidc_sessions ADD CONSTRAINT oidc_sessions_assurance_check CHECK (assurance='maaher-fido2-uv-v1')")
++    prior = (Path(__file__).parent.parent / "auth0_oidc.sql").read_text()
++    for statement in prior.split("\n-- statement\n"):
++        if statement.startswith("CREATE OR REPLACE FUNCTION resolve_session"):
++            op.execute(statement)
+diff --git a/maaher-lms-starter/apps/api/tests/conftest.py b/maaher-lms-starter/apps/api/tests/conftest.py
+index 055026a..598b0e4 100644
+--- a/maaher-lms-starter/apps/api/tests/conftest.py
++++ b/maaher-lms-starter/apps/api/tests/conftest.py
+@@ -48,6 +48,14 @@ def database():
+                        (external_identity,external_user))
+             db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES('oidc-downgrade-fixture',%s,now()+interval '1 hour',true)", (external_user,))
+             db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES('oidc-downgrade-fixture',%s,now(),'maaher-fido2-uv-v1')", (external_identity,))
++            db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES('dev-downgrade-fixture',%s,now()+interval '1 hour',true)", (external_user,))
++            db.execute("INSERT INTO oidc_sessions(token_hash,identity_id,authenticated_at,assurance) VALUES('dev-downgrade-fixture',%s,now(),'maaher-dev-totp-v1')", (external_identity,))
++        command.downgrade(config, "0004_auth0_oidc")
++        with psycopg.connect(owner_url) as db:
++            assert db.execute("SELECT 1 FROM sessions WHERE token_hash='dev-downgrade-fixture'").fetchone() is None
++            assert db.execute("SELECT 1 FROM sessions WHERE token_hash='oidc-downgrade-fixture'").fetchone() == (1,)
++            assert db.execute("SELECT password_hash FROM users WHERE id=%s", (external_user,)).fetchone()[0] == 'external-fixture-hash'
++        command.upgrade(config, "head")
+         command.downgrade(config, "0003_security_review")
+         with psycopg.connect(owner_url) as db:
+             for table in ("oidc_identities", "oidc_login_flows", "oidc_sessions"):
+@@ -77,7 +85,7 @@ def database():
+                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
+         command.upgrade(config, "head")
+         with psycopg.connect(owner_url) as db:
+-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0004_auth0_oidc"
++            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0005_dev_totp"
+         yield owner_url
+     finally:
+         if previous is None:
+@@ -105,6 +113,7 @@ def identity(database, monkeypatch, auth_key):
+     monkeypatch.setenv("AUTH_DATABASE_URL", os.environ["TEST_AUTH_DATABASE_URL"])
+     monkeypatch.setenv("APP_ORIGIN", "https://testserver")
+     monkeypatch.setenv("APP_ENV", "test")
++    monkeypatch.delenv("AUTH0_ASSURANCE_PROFILE", raising=False)
+     monkeypatch.setenv("AUTH_ENCRYPTION_KEY", auth_key)
+     user, other, tenant, foreign = (uuid4() for _ in range(4))
+     email = f"{user}@example.invalid"
+diff --git a/maaher-lms-starter/apps/api/tests/oidc_browser_probe.py b/maaher-lms-starter/apps/api/tests/oidc_browser_probe.py
+index 9e52112..f9f3de5 100644
+--- a/maaher-lms-starter/apps/api/tests/oidc_browser_probe.py
++++ b/maaher-lms-starter/apps/api/tests/oidc_browser_probe.py
+@@ -37,7 +37,7 @@ def handle(request):
+     now = int(time.time())
+     claims = {'iss':'https://browser-tests.us.auth0.com/','sub':'auth0|synthetic-browser-staff',
+               'aud':'synthetic-browser-client','iat':now,'exp':now+300,'auth_time':now,
+-              'nonce':transaction['nonce'][0],'amr':['pwd','mfa'],oidc.ASSURANCE_CLAIM:oidc.ASSURANCE}
++              'nonce':transaction['nonce'][0],'amr':['pwd','mfa'],oidc.ASSURANCE_CLAIM:oidc.settings().assurance}
+     encoded = jwt.encode({'alg':'RS256','kid':key.kid},claims,key)
+     return httpx.Response(200,json={'id_token':encoded,'access_token':'synthetic-browser-access-token',
+                                     'token_type':'Bearer','expires_in':300})
+diff --git a/maaher-lms-starter/apps/api/tests/test_oidc.py b/maaher-lms-starter/apps/api/tests/test_oidc.py
+index 7421107..68683e6 100644
+--- a/maaher-lms-starter/apps/api/tests/test_oidc.py
++++ b/maaher-lms-starter/apps/api/tests/test_oidc.py
+@@ -48,7 +48,7 @@ def provider(identity, monkeypatch, provider_key):
+         assert request.headers["authorization"].startswith("Basic ")
+         form = parse_qs(request.content.decode())
+         assert form["grant_type"] == ["authorization_code"]
+-        assert form["redirect_uri"] == ["https://testserver/api/auth/oidc/callback"]
++        assert form["redirect_uri"] == [os.environ["APP_ORIGIN"] + "/api/auth/oidc/callback"]
+         spec = codes.pop(form["code"][0])
+         assert create_s256_code_challenge(form["code_verifier"][0]) == spec["challenge"]
+         if spec.get("error"):
+@@ -91,7 +91,7 @@ def bind(identity, subject=None, operator=False, admin=True):
+ 
+ 
+ def begin(client, provider, **spec):
+-    response = client.post("/auth/oidc/login", json={}, headers=ORIGIN)
++    response = client.post("/auth/oidc/login", json={}, headers={"origin": os.environ["APP_ORIGIN"]})
+     assert response.status_code == 200, response.text
+     query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
+     assert query["response_type"] == ["code"] and query["scope"] == ["openid"]
+@@ -141,6 +141,7 @@ def test_oidc_rotates_into_a_private_session_and_keeps_tenant_authorization(iden
+     {"claims": {"auth_time": True}},
+     {"claims": {"amr": ["pwd"]}},
+     {"claims": {oidc.ASSURANCE_CLAIM: "otp-is-not-the-security-key-policy"}},
++    {"claims": {oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE}},
+     {"omit": [oidc.ASSURANCE_CLAIM]},
+     {"omit": ["nonce"]},
+     {"omit": ["auth_time"]},
+@@ -282,6 +283,71 @@ def test_runtime_cannot_mint_oidc_sessions_and_auth_cannot_bind_a_subject(identi
+         assert db.execute("SELECT has_column_privilege('maaher_definer','oidc_login_flows','encrypted_state','SELECT')").fetchone()[0] is False
+ 
+ 
++def use_dev_totp(monkeypatch):
++    monkeypatch.setenv("APP_ENV", "local")
++    monkeypatch.setenv("APP_ORIGIN", "http://127.0.0.1:3000")
++    monkeypatch.setenv("LOCAL_INSECURE_COOKIES", "true")
++    monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp")
++
++
++def test_dev_totp_uses_a_distinct_session_and_checks_tenant_and_policy_on_every_request(identity, provider, monkeypatch):
++    use_dev_totp(monkeypatch)
++    bind(identity)
++    _, owner, user, tenant, foreign = identity[:5]
++    with TestClient(app, base_url=os.environ["APP_ORIGIN"]) as client:
++        assert client.get("/auth/oidc/config").json()["assurance"] == oidc.DEV_TOTP_ASSURANCE
++        flow = begin(client, provider, claims={oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE})
++        assert client.get("/auth/oidc/callback", params=flow).status_code == 200
++        opaque = client.cookies.get("maaher_session")
++        assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).json()["role"] == "admin"
++        assert client.get("/auth/tenant-members", headers={"x-tenant-id": str(tenant)}).status_code == 200
++        assert client.get("/auth/me", headers={"x-tenant-id": str(foreign)}).status_code == 403
++        with psycopg.connect(owner) as db:
++            assert db.execute("SELECT assurance FROM oidc_sessions WHERE token_hash=%s", (token_digest(opaque),)).fetchone()[0] == oidc.DEV_TOTP_ASSURANCE
++        # Direct SQL defaults to FIDO2 and does not inherit app's dev profile.
++        with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
++            assert db.execute("SELECT * FROM resolve_session(%s)", (token_digest(opaque),)).fetchone() is None
++            assert db.execute("SELECT count(*) FROM list_members(%s,%s,NULL)", (token_digest(opaque), tenant)).fetchone() == (0,)
++        monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "fido2")
++        assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 401
++        monkeypatch.setenv("APP_ENV", "production")
++        assert client.get("/auth/oidc/session").status_code == 401
++        monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp")
++        assert client.get("/auth/oidc/config").json() == {"enabled": False}
++        assert client.post("/auth/oidc/login", headers={"origin": os.environ["APP_ORIGIN"]}).status_code == 503
++        assert client.get("/auth/oidc/session").status_code == 401
++        # A request cannot re-enable the dev policy using a header/query value.
++        assert client.get("/auth/me?AUTH0_ASSURANCE_PROFILE=dev-totp", headers={"x-tenant-id": str(tenant), "app-env": "local"}).status_code == 401
++
++
++def test_dev_profile_rejects_a_fido2_claim_and_a_policy_change_invalidates_inflight_state(identity, provider, monkeypatch):
++    bind(identity)
++    use_dev_totp(monkeypatch)
++    with TestClient(app, base_url=os.environ["APP_ORIGIN"]) as client:
++        assert client.get("/auth/oidc/callback", params=begin(client, provider)).status_code == 400
++        flow = begin(client, provider, claims={oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE})
++        before = len(provider["calls"])
++        monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "fido2")
++        assert client.get("/auth/oidc/callback", params=flow).status_code == 400
++        assert len(provider["calls"]) == before
++        assert not client.cookies.get("maaher_session")
++
++
++def test_dev_profile_rejects_an_actual_non_test_database(identity, provider, monkeypatch):
++    from fastapi import HTTPException
++    from psycopg.conninfo import make_conninfo
++    from psycopg.rows import dict_row
++    use_dev_totp(monkeypatch)
++    config = oidc.settings()
++    assert config.assurance == oidc.DEV_TOTP_ASSURANCE
++    # Read only the actual DB name, with no schema/data writes to this database.
++    with psycopg.connect(make_conninfo(identity[1], dbname="postgres"), row_factory=dict_row,
++                         options="-c default_transaction_read_only=on") as db:
++        with pytest.raises(HTTPException) as denied:
++            oidc.require_policy_database(config, db)
++        assert denied.value.status_code == 503
++
++
+ def test_offline_binding_revokes_local_sessions_and_cannot_reassign_a_subject(identity, provider):
+     from app.oidc_provision import bind_identity
+     client, owner, user, tenant, foreign, email, password = identity
+diff --git a/maaher-lms-starter/apps/api/tests/test_oidc_policy.py b/maaher-lms-starter/apps/api/tests/test_oidc_policy.py
+new file mode 100644
+index 0000000..45ff728
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_oidc_policy.py
+@@ -0,0 +1,37 @@
++import pytest
++
++from app.oidc_policy import configured_assurance, FIDO2_ASSURANCE, DEV_TOTP_ASSURANCE
++
++
++def test_default_profile_remains_fido2(monkeypatch):
++    monkeypatch.delenv("AUTH0_ASSURANCE_PROFILE", raising=False)
++    monkeypatch.setenv("APP_ENV", "production")
++    assert configured_assurance() == FIDO2_ASSURANCE
++
++
++@pytest.mark.parametrize("environment,origin,allowed", [
++    ("local", "http://127.0.0.1:3000", True),
++    ("local", "https://localhost", True),
++    ("production", "http://127.0.0.1:3000", False),
++    ("staging", "http://127.0.0.1:3000", False),
++    ("test", "http://127.0.0.1:3000", False),
++    ("local", "https://lms.example.invalid", False),
++    ("local", "http://localhost.evil.invalid", False),
++    ("local", "http://user@localhost", False),
++    ("local", "http://localhost/", False),
++    ("local", "http://localhost?dev=1", False),
++    ("local", "http://localhost#dev", False),
++    ("local", "http://localhost:bad", False),
++    ("local", "http://localhost:65536", False),
++    ("local", "", False),
++])
++def test_dev_profile_requires_explicit_local_loopback(monkeypatch, environment, origin, allowed):
++    monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp")
++    monkeypatch.setenv("APP_ENV", environment)
++    monkeypatch.setenv("APP_ORIGIN", origin)
++    assert configured_assurance() == (DEV_TOTP_ASSURANCE if allowed else None)
++
++
++def test_unknown_profile_fails_closed(monkeypatch):
++    monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp-typo")
++    assert configured_assurance() is None
+diff --git a/maaher-lms-starter/docker-compose.yml b/maaher-lms-starter/docker-compose.yml
+index e987e9b..ced1ede 100644
+--- a/maaher-lms-starter/docker-compose.yml
++++ b/maaher-lms-starter/docker-compose.yml
+@@ -33,6 +33,7 @@ services:
+       AUTH0_DOMAIN: ${AUTH0_DOMAIN:-}
+       AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-}
+       AUTH0_CLIENT_SECRET: ${AUTH0_CLIENT_SECRET:-}
++      AUTH0_ASSURANCE_PROFILE: ${AUTH0_ASSURANCE_PROFILE:-fido2}
+     networks: [internal]
+   web:
+     build: ./apps/web
+diff --git a/maaher-lms-starter/docs/ARCHITECTURE.md b/maaher-lms-starter/docs/ARCHITECTURE.md
+index 39ef932..92c442c 100644
+--- a/maaher-lms-starter/docs/ARCHITECTURE.md
++++ b/maaher-lms-starter/docs/ARCHITECTURE.md
+@@ -35,6 +35,9 @@ Implementasi development tahap 1 dan batas produksinya dijelaskan pada
+ [ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada
+ [AUTH0-SETUP](AUTH0-SETUP.md). Keputusan provider ini menggantikan status
+ "belum dipilih" di catatan historis, tanpa membuka gate produksi/operator.
++Pemilik kemudian memilih TOTP HP khusus local development dengan data sintetis;
++[ADR-005](adr/005-development-phone-totp.md) membatasi profile/session/DB tersebut
++secara eksplisit. Kebijakan FIDO2/UV produksi tetap berlaku.
+ 
+ LMS-01 implements PostgreSQL-backed opaque sessions with `HttpOnly`, `Secure`,
+ `SameSite=Lax` cookies and exact Origin checks on mutations. Argon2 hashing,
+diff --git a/maaher-lms-starter/docs/AUTH0-DEV-TOTP.md b/maaher-lms-starter/docs/AUTH0-DEV-TOTP.md
+new file mode 100644
+index 0000000..2e38c20
+--- /dev/null
++++ b/maaher-lms-starter/docs/AUTH0-DEV-TOTP.md
+@@ -0,0 +1,176 @@
++# Login development dengan autentikator HP
++
++Pemilik memilih opsi ini pada 10 November 2026 karena belum mempunyai security
++key. Gunakan hanya akun dan database sintetis di Mac. Tidak perlu membeli key
++untuk langkah development ini. TOTP adalah kode enam digit dari aplikasi HP;
++ia bukan security key FIDO2 dan tidak menutup gate H1 produksi.
++
++## 1. Persiapan source di Mac — Codex lokal
++
++Ambil perubahan terbaru branch `feat/LMS-01-auth0-development` dari repository
++`mashudizaini/maaher-lms`. Root GitHub berisi subfolder `maaher-lms-starter`.
++Periksa Git status terlebih dahulu: jangan reset, overwrite, atau stash otomatis
++perubahan pemilik. Jika folder Mac bukan checkout Git atau memiliki perubahan
++yang bertabrakan, buat clone baru dengan nama unik, kemudian baca konfigurasi
++LMS dari `.env` lama melalui parser dotenv tanpa mencetak atau mengeksekusinya.
++Lihat [MAC-SOURCE-SYNC](MAC-SOURCE-SYNC.md). Folder lama yang benar adalah:
++
++```text
++/Users/mashudi/Downloads/AiMZ-Corp Project/maaher-lms-starter
++```
++
++File baru yang harus ada: `apps/api/migrations/versions/0005_dev_totp.py`,
++`apps/api/app/oidc_policy.py`, dan `infra/auth0/development-totp-post-login.cjs`.
++Ubah hanya field lokal berikut, pertahankan semua secret/field lain:
++
++```dotenv
++APP_ENV=local
++APP_ORIGIN=http://127.0.0.1:3000
++LOCAL_INSECURE_COOKIES=true
++AUTH0_ASSURANCE_PROFILE=dev-totp
++```
++
++Domain/Client ID tetap milik aplikasi **Maaher LMS Development**:
++`dev-hl2un81cojtbhbv4.us.auth0.com` /
++`FjD4enWFIU9PNdnLjGwc1M1x4p8xsdW3`. Client Secret tetap di `.env` Mac,
++tidak dipindahkan ke chat, web, Git, atau Action.
++
++Periksa nama database aktual melalui koneksi, bukan hanya teks pada dotenv.
++Migration/auth/runtime harus menuju DB sintetis development yang sama dengan
++nama `maaher_test_*` dan role terpisah. DB development Auth0 0004 yang sudah
++dibuat boleh di-upgrade jika terkonfirmasi hanya berisi data sintetis; simpan
++backup dahulu. Jangan menjalankan migrasi pada data pengguna/hasil tes lama.
++Gunakan credential migrasi lokal untuk `alembic -c apps/api/alembic.ini upgrade
++head` dengan dotenv dimuat sebagai data. Head baru adalah **0005_dev_totp**.
++Restart API/web development melalui workflow yang sudah digunakan; pertahankan
++volume DB. Default profile tanpa pilihan eksplisit tetap `fido2`.
++
++## 2. Persiapan HP — pemilik
++
++1. Instal **Google Authenticator** atau **Microsoft Authenticator** dari App
++   Store/Google Play resmi. Pilih aplikasi dari penerbit Google/Microsoft.
++   Tidak perlu berlangganan aplikasi berbayar untuk kode TOTP ini.
++2. Aktifkan kunci layar HP dan waktu otomatis. Waktu yang salah dapat membuat
++   kode ditolak. Enrollment QR akan muncul di browser Mac pada langkah 4.
++3. QR, setup key TOTP, password, kode enam digit dan recovery code hanya Anda
++   yang memegangnya. Jangan mengirimnya ke Codex, Claude, chat atau screenshot.
++
++## 3. Atur Auth0 Development — pemilik di Dashboard
++
++Pastikan tenant/app yang dipilih khusus Development. Jangan terapkan perubahan
++ini ke aplikasi produksi atau tenant lain. Amankan akun console Auth0 dengan
++MFA juga; MFA user LMS tidak melindungi login console.
++
++1. **Security → Multi-factor Auth**: aktifkan **One-time Password / OTP** untuk
++   aplikasi autentikator. Aktifkan kebijakan MFA wajib pada tenant development.
++   Gunakan Universal Login dan pastikan entitlement tenant mendukung
++   `api.authentication.enrollWith` serta `challengeWith`. Jika tidak tersedia,
++   laporkan blocker paket; jangan menghapus pemeriksaan MFA/assurance di API.
++2. **User Management → Users**: buat/pilih akun uji milik Anda sendiri. Pastikan
++   akun ini hanya digunakan untuk data sintetis. Pada **app_metadata**, tambahkan
++   boolean berikut sambil mempertahankan field lain:
++
++   ```json
++   { "maaher_dev_totp_approved": true }
++   ```
++
++   Ini persetujuan pemilik untuk mencoba enrollment **development**, belum
++   merupakan binding admin LMS atau verifikasi FIDO2. Jangan memakai
++   `user_metadata` atau mengubah `maaher_staff_approved` menjadi bukti produksi.
++3. **Actions → Library → Create Action → Login/Post Login**: buat Action bernama
++   **Maaher Development TOTP**, lalu salin seluruh source dari
++   [development-totp-post-login.cjs](../infra/auth0/development-totp-post-login.cjs).
++   Tambahkan Action secret bernama `MAAHER_DEV_CLIENT_ID`, nilainya **Client ID**
++   aplikasi Development di atas, bukan Client Secret. Deploy versi Action ini.
++4. Di **Actions → Flows → Login**, pasang Action tersebut dan Apply perubahan.
++   Jika Action `staff-post-login.cjs` lama saat ini menargetkan Client ID
++   Development yang sama, lepaskan Action lama **dari flow development ini**:
++   jika keduanya berjalan untuk aplikasi yang sama, policy security key akan
++   tetap menolak OTP. Pertahankan source dan policy FIDO2 untuk produksi, dan
++   jangan mengubah Action milik aplikasi lain.
++5. Pastikan **Allowed Callback URLs** aplikasi exact:
++   `http://127.0.0.1:3000/api/auth/oidc/callback`.
++
++Nama menu bisa berbeda antar versi Dashboard. Action meminta **otp** saja,
++tanpa faktor alternatif. Claim yang diterbitkan adalah
++`https://maaherlms.aimz.my.id/assurance = maaher-dev-totp-v1`.
++
++## 4. Daftarkan HP, kemudian binding — pemilik + Codex lokal
++
++1. Buka `http://127.0.0.1:3000/auth` di browser Mac lalu **Masuk dengan Auth0**.
++   Login memakai akun uji. Untuk akun tanpa OTP, Action meminta enrollment dan
++   Auth0 menampilkan QR. Di Google Authenticator pilih **+ → Scan a QR code**;
++   di Microsoft Authenticator pilih **+ → Other account → Scan QR code**.
++   Pindai QR pada Mac dan ketik kode dari HP ke halaman Auth0.
++2. Simpan recovery code yang diberikan Auth0 secara pribadi di penyimpanan aman.
++   QR/setup key harus tetap rahasia. Setelah enrollment, callback LMS pertama
++   **dapat ditolak** karena binding belum dibuat; penolakan ini memang diperlukan.
++   Pesan umum di `/auth?oidc=failed` bukan alasan melewati binding.
++3. Pemilik memeriksa pada Auth0 bahwa akun uji yang benar sudah mempunyai OTP
++   dan enrollment pada HP miliknya selesai. Jika menemukan faktor asing, hentikan
++   binding dan periksa akun. Catat referensi non-PII, misalnya
++   `dev-totp-owner-verified-20261110`, **hanya setelah benar-benar diperiksa**.
++4. Di **User Management → Users → akun uji**, salin **User ID** (`sub`), umumnya
++   berbentuk `auth0|...`. Ini berbeda dari Client ID aplikasi. Berikan sub dan
++   referensi verifikasi itu kepada **Codex lokal** untuk binding ke UUID admin
++   sintetis yang sudah ada. Jangan memberikan kode OTP/password/recovery code.
++   Codex memakai CLI `app.oidc_provision`, bukan email auto-link atau SQL untuk
++   memaksa `mfa_verified`. Jangan membuat binding sebelum langkah 3.
++5. Klik **Masuk dengan Auth0** lagi. Login berikutnya harus meminta kode OTP
++   HP yang benar. Sesudah callback berhasil, pilih organisasi sintetis dan
++   periksa akses; logout harus mencabut session. Coba pembatalan login dan
++   subject yang tidak terikat: keduanya harus ditolak. Jangan mengekspor ID token
++   untuk dibagikan; API memverifikasi signature, issuer/audience/nonce,
++   auth_time yang fresh, `amr=mfa` dan assurance development sendiri.
++
++## 5. Verifikasi teknis dan hasil nyata
++
++Jalankan checker dari folder source terbaru:
++
++```sh
++.venv/bin/python scripts/verify-auth0-local.py --project-root . --start-flow
++```
++
++Checker membandingkan profil `.env` dengan profil API yang sedang berjalan dan
++head 0005 pada DB sintetis. Sebelum binding, FAIL `identity binding` memang masih
++ada. PASS preflight tidak membuktikan token exchange/login nyata atau perangkat
++HP yang benar. Catat preflight, enrollment dan login kedua secara terpisah.
++Jika Auth0 tidak mengeluarkan `amr=mfa`, auth_time atau claim yang diwajibkan,
++catat kegagalan live dan perbaiki konfigurasi provider; jangan menghapus validasi.
++
++Kode membatasi dev-totp pada APP_ENV=local, origin loopback dan **nama database
++aktual** maaher_test_*. Resolver memeriksa assurance pada setiap request,
++termasuk session lama; profile produksi/default menolak session/token dev.
++Nama DB adalah guard terhadap salah konfigurasi, bukan detektor data pribadi:
++operator tetap bertanggung jawab memastikan dataset hanya sintetis. Untuk
++produksi gunakan tenant/aplikasi terpisah, profile fido2, Action security key dan
++enrollment/UV/recovery yang diverifikasi. Tidak ada konversi otomatis dev trust.
++
++## Prompt siap tempel ke Codex CLI
++
++```text
++Saya memilih autentikator HP untuk development Maaher dengan data sintetis.
++Ambil source terbaru branch feat/LMS-01-auth0-development dari GitHub
++mashudizaini/maaher-lms. Root aplikasi GitHub adalah maaher-lms-starter/.
++Periksa status Git dan source lokal dahulu; jangan reset/menimpa perubahan saya.
++Jika perlu, gunakan clone baru dengan nama unik dan pertahankan folder lama:
++/Users/mashudi/Downloads/AiMZ-Corp Project/maaher-lms-starter
++Baca AGENTS.md dan docs/AUTH0-DEV-TOTP.md pada source terbaru.
++Pertahankan .env/secrets/data. Muat dotenv sebagai data tanpa mencetak nilainya.
++Siapkan AUTH0_ASSURANCE_PROFILE=dev-totp, APP_ENV=local dan origin loopback.
++Backup dan upgrade hanya DB development Auth0 yang sudah dipastikan sintetis
++maaher_test_* dari 0004 ke 0005_dev_totp memakai role migrasi terpisah.
++Restart layanan dev dan jalankan checker; jangan menyentuh database lain.
++Tunjukkan langkah Dashboard Auth0 dan buka /auth. Saya sendiri yang mengatur
++Action/app_metadata dan memindai QR lalu memasukkan OTP. Jangan membuat binding
++sebelum saya mengonfirmasi enrollment akun uji yang benar dan memberikan sub
++serta referensi non-PII. Setelah itu pakai CLI provisioning existing, uji login
++kedua, pemilihan tenant dan logout. Catat hasil nyata dan FAIL/SKIP; pertahankan
++gate FIDO2 produksi. Jangan merge/deploy atau mencetak token/secret/QR.
++```
++
++Kontrak API Action mengacu ke paket resmi `@auth0/actions` 0.36.0, post-login/v3:
++enrollment/challenge harus selesai sebelum login dapat lanjut. Unit/transport
++test bukan bukti konfigurasi tenant live. Review independen Claude tetap perlu.
++
++Sumber: https://github.com/auth0/auth0-actions
+diff --git a/maaher-lms-starter/docs/AUTH0-LOCAL-LIVE-CHECK.md b/maaher-lms-starter/docs/AUTH0-LOCAL-LIVE-CHECK.md
+index fa317e6..bbd8d67 100644
+--- a/maaher-lms-starter/docs/AUTH0-LOCAL-LIVE-CHECK.md
++++ b/maaher-lms-starter/docs/AUTH0-LOCAL-LIVE-CHECK.md
+@@ -1,5 +1,11 @@
+ # Menjalankan verifikasi di Mac yang memiliki .env
+ 
++Pilihan terbaru pemilik adalah autentikator HP untuk development sintetis.
++Ikuti [AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md), gunakan checker dari source branch
++terbaru dan migration **0005_dev_totp**. Paket checker lama yang hanya mengenali
++0004 harus diganti. Instruksi security key historis di bawah hanya untuk profile
++fido2. `--start-flow` tetap tidak melakukan enrollment/login/binding.
++
+ Penyesuaian `.env` di Mac tidak menyinkronkan credential ke cloud. Pada pemeriksaan
+ sesi ini, cloud tidak mempunyai `.env` utama, binding secret atau akses jaringan
+ ke tenant Auth0. Karena itu validasi live perlu dijalankan di Mac Anda.
+@@ -36,7 +42,7 @@ validitas Client Secret terhadap token endpoint, policy/security-key yang aktif
+ di Auth0 atau izin produksi. Exit 1 = ada FAIL; exit 2 = ada langkah SKIP dan
+ tidak ada FAIL; exit 0 = seluruh langkah preflight yang dijalankan lulus.
+ 
+-Jika source/schema belum 0004, source Auth0 belum diterapkan/migrasi dev belum
++Jika source/schema belum 0005, source Auth0 terbaru belum diterapkan/migrasi dev belum
+ aktif. Jika binding belum ada, lakukan verifikasi user/key dan provisioning
+ terkontrol pada runbook; jangan auto-link email atau mengubah MFA flags lewat SQL.
+ Jika DB URL memakai hostname internal Compose seperti `db`, koneksi dari Terminal
+diff --git a/maaher-lms-starter/docs/AUTH0-SETUP.md b/maaher-lms-starter/docs/AUTH0-SETUP.md
+index 2df770d..aa65a87 100644
+--- a/maaher-lms-starter/docs/AUTH0-SETUP.md
++++ b/maaher-lms-starter/docs/AUTH0-SETUP.md
+@@ -1,10 +1,15 @@
+ # Setup Auth0 development untuk Maaher LMS
+ 
+ Tujuan tahap ini: login admin/operator lewat identity yang diikat sebelumnya,
+-tanpa membuka akses produksi. Pemilik sudah memilih Auth0/OIDC tetapi belum
+-membuat tenant/aplikasi. Gunakan user dan database sintetis. Panduan tidak
++tanpa membuka akses produksi. Tenant/aplikasi development sudah dibuat; nilai
++publiknya ada pada AUTH0-TENANT-LOCAL.md. Gunakan user dan database sintetis. Panduan tidak
+ membutuhkan password, client secret, security key PIN atau recovery code di chat.
+ 
++**Pilihan terbaru pemilik: autentikator HP untuk development.** Ikuti
++[AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md) untuk profile dev-totp, migration 0005,
++Action OTP dan pemindaian QR. Bagian security key di bawah tetap berlaku untuk
++profile default fido2/produksi, bukan langkah wajib onboarding HP development.
++
+ ## 1. Tenant dan aplikasi
+ 
+ 1. Buat akun Auth0 melalui situs resminya, lalu tenant **Development**. Pilih
+diff --git a/maaher-lms-starter/docs/AUTH0-TENANT-LOCAL.md b/maaher-lms-starter/docs/AUTH0-TENANT-LOCAL.md
+index f3a7676..5b8acfa 100644
+--- a/maaher-lms-starter/docs/AUTH0-TENANT-LOCAL.md
++++ b/maaher-lms-starter/docs/AUTH0-TENANT-LOCAL.md
+@@ -1,5 +1,9 @@
+ # Tenant Auth0 development yang diberikan pemilik
+ 
++Pilihan terbaru pemilik adalah autentikator HP untuk local/synthetic. Gunakan
++[AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md) untuk migration 0005, Action OTP dan enrollment
++HP; instruksi FIDO2 pada catatan historis tetap untuk profile default/produksi.
++
+ Domain: `dev-hl2un81cojtbhbv4.us.auth0.com`.
+ Client ID: `FjD4enWFIU9PNdnLjGwc1M1x4p8xsdW3`.
+ Issuer yang digunakan API:
+diff --git a/maaher-lms-starter/docs/LMS-01-AUTH0-HANDOFF.md b/maaher-lms-starter/docs/LMS-01-AUTH0-HANDOFF.md
+index 9af5bea..8d84939 100644
+--- a/maaher-lms-starter/docs/LMS-01-AUTH0-HANDOFF.md
++++ b/maaher-lms-starter/docs/LMS-01-AUTH0-HANDOFF.md
+@@ -115,3 +115,11 @@ diff sambil mempertahankan perubahan lokal; tidak melakukan reset atau apply
+ ulang full patch historis. Sesudah tes lokal, Claude meninjau token validator,
+ state/config binding, role SQL, fallback, Action, migrasi/rollback dan bukti live
+ yang tersedia. Tidak ada approval baru yang ditulis atas nama Claude.
++# Lanjutan terbaru — autentikator HP untuk development
++
++10 November 2026: pemilik memilih profile TOTP local/synthetic. Head migrasi
++terbaru **0005_dev_totp**. Lihat [handoff dev TOTP](LMS-01-DEV-TOTP-HANDOFF.md)
++untuk perubahan, hasil final 143 API/unit + 9 browser + 16 Action + 8 checker,
++batas dan review. Panduan pemilik: [AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md).
++Catatan di atas adalah snapshot tahap FIDO2 sebelumnya. Produksi tetap FIDO2;
++live Auth0/Mac belum diverifikasi oleh cloud, H1/review tetap terbuka.
+diff --git a/maaher-lms-starter/docs/LMS-01-DEV-TOTP-HANDOFF.md b/maaher-lms-starter/docs/LMS-01-DEV-TOTP-HANDOFF.md
+new file mode 100644
+index 0000000..00419d1
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-01-DEV-TOTP-HANDOFF.md
+@@ -0,0 +1,107 @@
++# LMS-01 — autentikator HP khusus development
++
++10 November 2026. Pemilik menyetujui TOTP HP untuk development sintetis; FIDO2
++tetap gate produksi. Source berada pada branch `feat/LMS-01-auth0-development`.
++Base perubahan ini: `e5526649c1e96ba94d87a0f0f2d4cc33208eaeea`.
++
++## Perilaku dan file
++
++- `apps/api/app/oidc_policy.py`, `oidc.py`, `database.py`: profile fido2 default;
++  dev-totp hanya local/loopback + DB aktual maaher_test_*. Claim berbeda,
++  fingerprint mengikat profile dan setiap transaksi auth/tenant memasang
++  assurance server. Profile invalid menolak login dan session OIDC existing.
++- Migration `0005_dev_totp.py` / `auth0_dev_totp.sql`: constraint assurance dan
++  nama DB; resolver session memeriksa assurance pada setiap request. Owner/grant
++  fungsi tetap restricted. Runtime tetap tidak bisa membaca tabel OIDC.
++- `infra/auth0/development-totp-post-login.cjs`: Action khusus Client ID dev,
++  flag app_metadata dev tersendiri, enrollWith OTP awal dan challengeWith OTP
++  berikutnya. Tidak ada fallback atau claim FIDO2. Action FIDO2 asli tidak diubah.
++- `.env.example` / Compose meneruskan selector hanya ke API. Checker memeriksa
++  head 0005 dan kecocokan profile `.env` dengan API yang sedang berjalan.
++- Tes API/policy, Action, fixture migrasi dan wrapper browser diperbarui.
++  CI root menambahkan Action dev serta browser dev pada database tersendiri.
++- `AUTH0-DEV-TOTP.md`: source sync Mac, Dashboard, app_metadata/Action,
++  pemindaian QR, callback pertama tanpa binding, binding setelah pemeriksaan
++  pemilik dan login kedua. ADR-005/ticket dan tautan panduan lama diperbarui.
++
++## Hasil verifikasi cloud pada source final
++
++| Pemeriksaan | Hasil |
++|---|---|
++| API/unit `python -m pytest -q -x --tb=short apps/api/tests` | **143 passed**, 0 skip, 85.76s |
++| Checker `python -m pytest -q scripts/tests/test_auth0_preflight.py` | **8 passed**, 0 skip |
++| Action `node --test infra/auth0/*.test.cjs` | **16 passed**, 0 skip |
++| Browser baseline `python scripts/test-lms01-browser.py` | **7 passed** |
++| Browser FIDO2 signed synthetic provider `... --oidc` | **1 passed** |
++| Browser TOTP signed synthetic provider `... --oidc --dev-totp` | **1 passed** |
++| `npm run typecheck`, `npm run build` | **PASS** |
++| compileall app/migrations, starter verifier, git whitespace check | **PASS** |
++
++API termasuk token dev ditolak profile FIDO2, state tidak berlaku setelah ganti
++profile, session dev ditolak ketika profile/lingkungan berubah, tenant asing
++ditolak, DB aktual non-test ditolak (SELECT read-only pada postgres), serta
++privilege dan regresi review lama. Fixture memverifikasi 0005→0004→head,
++head→0003/0002/0001→head, base→head dan preservasi data fixture; downgrade 0005
++mencabut session dev sambil mempertahankan session FIDO2 dan users/binding.
++
++API final memakai DB kosong baru `maaher_test_dev_totp_final_20261110`.
++Browser memakai DB terpisah `maaher_test_totp_browser_base_20261110`,
++`maaher_test_totp_browser_fido_20261110`, `maaher_test_totp_browser_dev_20261110`.
++Container milik sesi cloud: `maaher-cloud-review-20261109`; port saat pengujian
++127.0.0.1:32770. Seluruh hasil DB, termasuk dua percobaan awal, dipertahankan.
++Container dihentikan setelah validasi. Tidak ada akses Docker/DB/source Mac.
++
++Percobaan awal menemukan kesalahan format URL pada harness Alembic, lalu sebuah
++assertion tes memakai fungsi SQL yang memang tidak boleh dipanggil runtime.
++Harness diperbaiki; tes memakai list_members yang sah dan memeriksa penolakan
++melalui resolver. Tes nama DB juga memastikan konfigurasi valid sebelum memeriksa
++penolakan, sehingga tidak lulus karena secret/config belum tersedia. Angka di
++tabel adalah run final setelah koreksi tersebut, bukan hasil percobaan awal.
++Instalasi npm sempat gagal karena cache default di luar writable root; berhasil
++dengan cache `/tmp/maaher-npm-cache`, tanpa mengubah lockfile/TLS. Dua warning
++deprecation httpx/Authlib tetap ada. Dependency/lockfile tidak berubah; audit
++dependensi tidak diulang pada perubahan ini.
++
++## Migrasi, rollback dan batas
++
++Upgrade hanya DB development Auth0 yang sudah diperiksa sintetis, backup dahulu,
++dari 0004 ke **0005_dev_totp**, lalu restart API/web. CLI memakai credential
++migrasi, bukan role runtime/auth. Jangan source file dotenv sebagai shell.
++Database test lama bukan target upgrade lokal. Panduan operasi lengkap di
++[AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md).
++
++Downgrade 0005→0004 menghapus session dev beserta pending OIDC flows; users,
++bindings dan session FIDO2 dipertahankan. Kembalikan profile API ke fido2 pada
++rollback. Downgrade lebih jauh menghilangkan guard OIDC dan tetap bukan rollback
++produksi yang aman sebagaimana ADR-004.
++
++**Belum diuji:** tenant Auth0 nyata, enrollment HP, token exchange Client Secret
++Mac, binding/login nyata dan konfigurasi Dashboard/Actions. Cloud tidak memiliki
++secret Mac dan allowlist tidak mencakup tenant Auth0. Browser/transport memakai
++provider sintetis dengan signature RSA nyata; tidak mensimulasikan keamanan
++perangkat atau menyatakan MFA live sudah lulus. Preflight tidak menutup gap ini.
++
++H1 root trust/recovery produksi tetap terbuka; dev approval tidak diangkat
++menjadi produksi. Prod perlu app/tenant terpisah dan FIDO2/UV/recovery yang
++diverifikasi. Tidak ada merge/deploy atau perubahan policy Auth0 dari cloud.
++Remote CI dan review Claude atas perubahan ini belum terverifikasi.
++
++## Review independen
++
++Laporan Claude awal tetap utuh; SHA256:
++`004a19183409b152d0947ab6f5b99af2000d9dd3324c9a2c77ea66a4106032ce`.
++Patch/manifest lama adalah snapshot historis. Gunakan diff Git terbaru dan
++manifest dev-totp untuk review ini. Untuk penilaian seluruh Auth0, review
++`git diff main...HEAD` dari root Git, bukan hanya delta TOTP terhadap base di atas.
++
++```text
++Review READ-ONLY branch feat/LMS-01-auth0-development sebagai reviewer independen.
++Baca CLAUDE.md/AGENTS.md dan skill lms-security-review pada maaher-lms-starter/.
++Mulai dari docs/LMS-01-DEV-TOTP-HANDOFF.md, ADR-005 dan ticket LMS-01-OIDC.
++Periksa diff main...HEAD, terutama default FIDO2, claim dev terpisah, pembatasan
++local/loopback/DB aktual, resolver session existing, role SQL/RLS, migration
++0005 rollback, Action enrollment/challenge dan binding setelah verifikasi pemilik.
++Jalankan tes pada DB baru milik review sendiri. Bedakan provider sintetis dari
++Auth0 nyata. Pertahankan laporan lama; tulis reviews/LMS-01-dev-totp-claude.md.
++Jangan ubah source, data pemilik, policy Auth0, merge atau deploy.
++```
+diff --git a/maaher-lms-starter/docs/MAC-SOURCE-SYNC.md b/maaher-lms-starter/docs/MAC-SOURCE-SYNC.md
+index bc3582a..90255a3 100644
+--- a/maaher-lms-starter/docs/MAC-SOURCE-SYNC.md
++++ b/maaher-lms-starter/docs/MAC-SOURCE-SYNC.md
+@@ -1,5 +1,11 @@
+ # Mengambil source Auth0 yang benar ke Mac
+ 
++Untuk pilihan autentikator HP yang disetujui terbaru, gunakan
++[AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md). Pastikan source mencakup migration 0005
++dan Action development, bukan hanya file 0004 pada pemeriksaan historis ini.
++Database Auth0 development 0004 yang sudah terbukti sintetis boleh di-upgrade
++sesuai panduan baru setelah backup; tidak perlu membuat ulang dataset tersebut.
++
+ Hasil Codex lokal yang masih melihat head 0003 menunjukkan folder lokal belum
+ memuat implementasi Auth0 yang dibuat di cloud. Verifikasi saja tidak memindahkan
+ source. Branch `feat/LMS-01-auth0-development` menyediakan source yang dapat
+diff --git a/maaher-lms-starter/docs/adr/004-auth0-development-login.md b/maaher-lms-starter/docs/adr/004-auth0-development-login.md
+index 9859a76..c04a313 100644
+--- a/maaher-lms-starter/docs/adr/004-auth0-development-login.md
++++ b/maaher-lms-starter/docs/adr/004-auth0-development-login.md
+@@ -1,5 +1,9 @@
+ # ADR-004 — Auth0/OIDC login staff tahap pertama
+ 
++Tambahan 10 November 2026: [ADR-005](005-development-phone-totp.md) menambah
++profile TOTP HP yang dibatasi local/synthetic. Assurance FIDO2 di ADR ini tetap
++default dan wajib untuk gate produksi. Head migrasi terbaru 0005.
++
+ Status: implementasi development setelah pemilik menyetujui Auth0/OIDC pada
+ 10 November 2026. Belum diuji dengan tenant Auth0 nyata; tidak membuka gate H1
+ produksi. Lihat `docs/tickets/LMS-01-OIDC.md` dan `docs/AUTH0-SETUP.md`.
+diff --git a/maaher-lms-starter/docs/adr/005-development-phone-totp.md b/maaher-lms-starter/docs/adr/005-development-phone-totp.md
+new file mode 100644
+index 0000000..effb184
+--- /dev/null
++++ b/maaher-lms-starter/docs/adr/005-development-phone-totp.md
+@@ -0,0 +1,40 @@
++# ADR-005 — TOTP HP khusus development sintetis
++
++Status: dipilih pemilik pada 10 November 2026. Pemilik belum memiliki security
++key fisik. Auth0/OIDC tetap dipakai; kebijakan produksi tetap FIDO2 roaming
++dengan UV required. TOTP lebih rentan phishing dan tidak menjadi bukti FIDO2.
++
++Profile server `AUTH0_ASSURANCE_PROFILE` default `fido2`. Pilihan `dev-totp`
++hanya valid dengan APP_ENV=local dan origin loopback yang exact. Settings yang
++invalid menolak start/callback; auth/runtime transaction memakai assurance
++`disabled` sehingga session OIDC lama ikut ditolak. Tidak ada request/header/
++token yang dapat memilih profile server. Profile masuk fingerprint flow.
++
++Migration 0005 menambah assurance `maaher-dev-totp-v1` pada oidc_sessions dengan
++constraint nama database aktual maaher_test_*. Start/callback memeriksa nama
++aktual itu juga. Resolver SECURITY DEFINER tetap dimiliki role NOLOGIN semula;
++memeriksa profile transaksi dan nama DB saat memvalidasi token session pada
++setiap request. Default SQL tanpa konteks hanya menerima assurance FIDO2.
++Runtime tidak mendapat akses baru ke tabel/kunci/provider material. Tenant
++membership dan RLS tetap wajib. Tidak ada auto-link email atau local fallback.
++
++Action development terpisah ditargetkan hanya ke Client ID Development. Flag
++app_metadata `maaher_dev_totp_approved` adalah persetujuan pemilik untuk mencoba
++enrollment sintetis; tidak sama dengan produksi `maaher_staff_approved`.
++Action meminta enrollWith otp saat belum enrolled, atau challengeWith otp pada
++login berikutnya, tanpa fallback. Keduanya hanya menerbitkan claim development.
++Pemilik menyelesaikan enrollment sendiri; binding offline baru dilakukan setelah
++pemilik memeriksa akun/faktor. Callback pertama tanpa binding tetap ditolak.
++Semua validasi OIDC (signature/PKCE/nonce/freshness/amr) tetap berlaku.
++
++Ini izin development dengan data sintetis, bukan penyelesaian bootstrap/recovery
++H1 produksi. Guard nama DB bukan klasifikasi isi data. Deployment harus memakai
++tenant/app terpisah dan konfigurasi produksi yang direview. Approval developer
++dan faktor TOTP tidak dipromosikan menjadi staff trust/FIDO2 otomatis.
++
++Downgrade 0005→0004 mencabut session dev dan membersihkan pending OIDC flows,
++mempertahankan users/bindings/session FIDO2 serta mengembalikan constraint dan
++resolver 0004. Downgrade lebih jauh tetap membawa risiko hilangnya guard OIDC
++sebagaimana ADR-004. Backup dan review independen tetap diperlukan.
++
++Panduan pemilik/Codex lokal: [AUTH0-DEV-TOTP](../AUTH0-DEV-TOTP.md).
+diff --git a/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md b/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md
+index 8e150e2..83c17b7 100644
+--- a/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md
++++ b/maaher-lms-starter/docs/tickets/LMS-01-OIDC.md
+@@ -23,3 +23,20 @@ tangan, negative claims/replay/state/browser/config, SQL privilege/RLS dan
+ migrasi roundtrip pada DB baru; regresi lokal/browser/build yang relevan.
+ Live Auth0 dan security key asli menunggu setup pemilik. Tahap ini bukan klaim
+ seluruh H1 selesai atau operator approval/recovery produksi sudah aktif.
++
++## Tambahan disetujui — autentikator HP development
++
++10 November 2026: pemilik memilih autentikator HP untuk development sintetis
++karena belum mempunyai security key fisik. Lingkup: profile dev-totp eksplisit,
++Action enrollment/challenge OTP terpisah, migration 0005 dan guard session,
++checker profil/schema, panduan Dashboard/HP/Mac dan tes regresi. Produksi tetap
++profile fido2; H1/recovery tidak dianggap selesai.
++
++Acceptance tambahan: start/callback hanya local loopback + DB aktual maaher_test_*,
++claim development berbeda dan ditolak profile FIDO2, perpindahan profile/lingkungan
++menolak session dev lama, state fingerprint mengikat profile, binding tetap
++offline setelah verifikasi pemilik; tenant/RLS tetap terjaga. Migrasi roundtrip
++0005→0004→0005 mencabut session dev dan mempertahankan user/binding/session FIDO2.
++Tes Action mencakup enrollment awal, login kedua, metadata palsu dan client lain;
++browser positif sintetis dijalankan untuk kedua profile. Tidak ada real Auth0
++policy change, binding Mac, merge/deploy oleh sesi cloud ini.
+diff --git a/maaher-lms-starter/infra/auth0/development-totp-post-login.cjs b/maaher-lms-starter/infra/auth0/development-totp-post-login.cjs
+new file mode 100644
+index 0000000..2e6c5ac
+--- /dev/null
++++ b/maaher-lms-starter/infra/auth0/development-totp-post-login.cjs
+@@ -0,0 +1,24 @@
++// DEVELOPMENT ONLY: synthetic accounts, dedicated Development application.
++// Configure MAAHER_DEV_CLIENT_ID as an Action secret (the public Client ID).
++// Owner pre-approves this test subject in app_metadata, then personally enrolls
++// their phone before creating any LMS identity binding. No production trust.
++exports.onExecutePostLogin = async (event, api) => {
++  const client = event.secrets?.MAAHER_DEV_CLIENT_ID;
++  if (!client) {
++    api.access.deny('Development login policy is not configured');
++    return;
++  }
++  if (event.client?.client_id !== client) return;
++  if (event.user?.app_metadata?.maaher_dev_totp_approved !== true) {
++    api.access.deny('Owner approval for synthetic development is required');
++    return;
++  }
++  if (event.user.enrolledFactors?.some(factor => factor.type === 'otp')) {
++    api.authentication.challengeWith({ type: 'otp' });
++  } else {
++    // Auth0 completes enrollment before issuing the token / continuing Actions.
++    // The API still requires fresh auth_time + amr=mfa and an offline binding.
++    api.authentication.enrollWith({ type: 'otp' });
++  }
++  api.idToken.setCustomClaim('https://maaherlms.aimz.my.id/assurance', 'maaher-dev-totp-v1');
++};
+diff --git a/maaher-lms-starter/infra/auth0/development-totp-post-login.test.cjs b/maaher-lms-starter/infra/auth0/development-totp-post-login.test.cjs
+new file mode 100644
+index 0000000..2c3bb93
+--- /dev/null
++++ b/maaher-lms-starter/infra/auth0/development-totp-post-login.test.cjs
+@@ -0,0 +1,59 @@
++const { test } = require('node:test');
++const assert = require('node:assert/strict');
++const { onExecutePostLogin } = require('./development-totp-post-login.cjs');
++
++function input() {
++  const calls = [];
++  return {
++    event: { secrets: { MAAHER_DEV_CLIENT_ID: 'development-client' }, client: { client_id: 'development-client' },
++      user: { app_metadata: { maaher_dev_totp_approved: true }, enrolledFactors: [] } },
++    api: { access: { deny: reason => calls.push(['deny', reason]) },
++      authentication: { challengeWith: factor => calls.push(['challenge', factor]),
++        enrollWith: factor => calls.push(['enroll', factor]) },
++      idToken: { setCustomClaim: (key, value) => calls.push(['claim', key, value]) } }, calls,
++  };
++}
++
++test('approved synthetic user enrolls OTP without a pre-existing factor dead end', async () => {
++  const { event, api, calls } = input(); await onExecutePostLogin(event, api);
++  assert.deepEqual(calls, [['enroll', { type: 'otp' }],
++    ['claim', 'https://maaherlms.aimz.my.id/assurance', 'maaher-dev-totp-v1']]);
++});
++test('subsequent login requires the exact OTP challenge, without fallback', async () => {
++  const { event, api, calls } = input(); event.user.enrolledFactors = [{ type: 'otp' }, { type: 'email' }];
++  await onExecutePostLogin(event, api);
++  assert.deepEqual(calls, [['challenge', { type: 'otp' }],
++    ['claim', 'https://maaherlms.aimz.my.id/assurance', 'maaher-dev-totp-v1']]);
++});
++test('no approval or another approval type cannot enroll or issue a claim', async () => {
++  for (const metadata of [{}, { maaher_dev_totp_approved: 'true' }, { maaher_staff_approved: true }]) {
++    const { event, api, calls } = input(); event.user.app_metadata = metadata;
++    await onExecutePostLogin(event, api); assert.equal(calls.length, 1); assert.equal(calls[0][0], 'deny');
++  }
++});
++test('request data and user_metadata cannot approve an account', async () => {
++  const { event, api, calls } = input(); event.user.app_metadata = {};
++  event.user.user_metadata = { maaher_dev_totp_approved: true };
++  event.request = { query: { maaher_dev_totp_approved: true, assurance: 'maaher-fido2-uv-v1' } };
++  await onExecutePostLogin(event, api); assert.equal(calls.length, 1); assert.equal(calls[0][0], 'deny');
++});
++test('other applications never receive this policy', async () => {
++  const { event, api, calls } = input(); event.client.client_id = 'production-client';
++  await onExecutePostLogin(event, api); assert.deepEqual(calls, []);
++});
++test('missing Action configuration fails closed', async () => {
++  const { event, api, calls } = input(); event.secrets = {};
++  await onExecutePostLogin(event, api); assert.equal(calls.length, 1); assert.equal(calls[0][0], 'deny');
++});
++test('failure to request enrollment or challenge never reaches claim issuance', async () => {
++  for (const enrolled of [false, true]) {
++    const { event, api, calls } = input(); event.user.enrolledFactors = enrolled ? [{ type: 'otp' }] : [];
++    api.authentication[enrolled ? 'challengeWith' : 'enrollWith'] = () => { throw Error('synthetic denial'); };
++    await assert.rejects(onExecutePostLogin(event, api)); assert.deepEqual(calls, []);
++  }
++});
++test('non-OTP factors do not satisfy the development policy', async () => {
++  const { event, api, calls } = input(); event.user.enrolledFactors = [{ type: 'email' }, { type: 'webauthn-roaming' }];
++  await onExecutePostLogin(event, api); assert.equal(calls[0][0], 'enroll');
++  assert.equal(calls.at(-1)[2], 'maaher-dev-totp-v1');
++});
+diff --git a/maaher-lms-starter/scripts/test-lms01-browser.py b/maaher-lms-starter/scripts/test-lms01-browser.py
+index 5864a2f..5468355 100644
+--- a/maaher-lms-starter/scripts/test-lms01-browser.py
++++ b/maaher-lms-starter/scripts/test-lms01-browser.py
+@@ -53,7 +53,10 @@ def ready(process, url):
+ def main():
+     parser = argparse.ArgumentParser()
+     parser.add_argument('--oidc', action='store_true', help='Use the test-only signed OIDC provider probe')
++    parser.add_argument('--dev-totp', action='store_true', help='Exercise local synthetic TOTP assurance with --oidc')
+     args = parser.parse_args()
++    if args.dev_totp and not args.oidc:
++        parser.error('--dev-totp requires --oidc')
+     owner = os.environ["TEST_MIGRATION_DATABASE_URL"]
+     runtime = os.environ["TEST_DATABASE_URL"]
+     with psycopg.connect(owner) as db:
+@@ -73,6 +76,7 @@ def main():
+                PYTHONPATH=str(ROOT/"apps/api"), LMS_TEST_PYTHON=sys.executable,
+                LMS_TEST_ROOT=str(ROOT), NEXT_TELEMETRY_DISABLED="1",
+                AUTH0_DOMAIN="", AUTH0_CLIENT_ID="", AUTH0_CLIENT_SECRET="")
++    env['AUTH0_ASSURANCE_PROFILE'] = 'dev-totp' if args.dev_totp else 'fido2'
+     target = 'app.main:app'
+     test_file = 'auth.spec.ts'
+     if args.oidc:
+diff --git a/maaher-lms-starter/scripts/tests/test_auth0_preflight.py b/maaher-lms-starter/scripts/tests/test_auth0_preflight.py
+index b32a702..ce4d4bb 100644
+--- a/maaher-lms-starter/scripts/tests/test_auth0_preflight.py
++++ b/maaher-lms-starter/scripts/tests/test_auth0_preflight.py
+@@ -31,7 +31,7 @@ def test_response_body_never_becomes_a_diagnostic(capsys):
+ 
+ def start_response(request, malicious=False):
+     if request.url.path.endswith('/config'):
+-        return httpx.Response(200,json={'enabled':True})
++        return httpx.Response(200,json={'enabled':True,'assurance':'maaher-fido2-uv-v1'})
+     params = {'client_id':module['CLIENT_ID'],'response_type':'code','code_challenge_method':'S256',
+               'prompt':'login','max_age':'0','nonce':SENTINEL,'state':SENTINEL,'code_challenge':SENTINEL,
+               'redirect_uri':'https://evil.invalid/' if malicious else ORIGIN+'/api/auth/oidc/callback'}
+@@ -75,3 +75,24 @@ def test_database_errors_do_not_print_credentials(monkeypatch,capsys):
+     module['database']({'MIGRATION_DATABASE_URL':SENTINEL,'AUTH_DATABASE_URL':SENTINEL},Report())
+     output = capsys.readouterr().out
+     assert SENTINEL not in output and 'FAIL' in output
++
++
++def test_service_with_the_wrong_profile_prevents_start_flow(capsys):
++    calls = []
++    def handler(request):
++        calls.append(request.url.path)
++        return start_response(request)
++    report = Report()
++    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
++        module['application'](client,{'APP_ORIGIN':ORIGIN,'AUTH0_ASSURANCE_PROFILE':'dev-totp'},report,True)
++    assert calls == ['/api/auth/oidc/config']
++    assert report.items[-1][1]=='FAIL'
++    assert SENTINEL not in capsys.readouterr().out
++
++
++def test_unknown_profile_prevents_live_probes(tmp_path,monkeypatch,capsys):
++    for name in module['NAMES']:monkeypatch.delenv(name,raising=False)
++    (tmp_path/'.env').write_text(f'AUTH0_DOMAIN={module["DOMAIN"]}\nAUTH0_CLIENT_ID={module["CLIENT_ID"]}\nAUTH0_CLIENT_SECRET={SENTINEL}\nAPP_ENV=local\nAPP_ORIGIN={ORIGIN}\nAUTH0_ASSURANCE_PROFILE=unknown\n')
++    _, valid = module['load_config'](tmp_path,Report())
++    assert valid is False
++    assert SENTINEL not in capsys.readouterr().out
+diff --git a/maaher-lms-starter/scripts/verify-auth0-local.py b/maaher-lms-starter/scripts/verify-auth0-local.py
+index 5e780cc..a15a957 100644
+--- a/maaher-lms-starter/scripts/verify-auth0-local.py
++++ b/maaher-lms-starter/scripts/verify-auth0-local.py
+@@ -17,7 +17,9 @@ DOMAIN = 'dev-hl2un81cojtbhbv4.us.auth0.com'
+ CLIENT_ID = 'FjD4enWFIU9PNdnLjGwc1M1x4p8xsdW3'
+ ISSUER = 'https://' + DOMAIN + '/'
+ NAMES = ('AUTH0_DOMAIN','AUTH0_CLIENT_ID','AUTH0_CLIENT_SECRET','APP_ORIGIN',
+-         'APP_ENV','LOCAL_INSECURE_COOKIES','MIGRATION_DATABASE_URL','AUTH_DATABASE_URL')
++         'APP_ENV','LOCAL_INSECURE_COOKIES','MIGRATION_DATABASE_URL','AUTH_DATABASE_URL',
++         'AUTH0_ASSURANCE_PROFILE')
++ASSURANCES = {'fido2':'maaher-fido2-uv-v1','dev-totp':'maaher-dev-totp-v1'}
+ 
+ 
+ class Report:
+@@ -43,6 +45,8 @@ def load_config(root, report):
+         report.add('.env','FAIL','file lokal belum dapat dibaca sebagai dotenv; isi file tidak ditampilkan')
+         return {},False
+     config = {name: os.environ.get(name,values.get(name) or '') for name in NAMES}
++    if not config['AUTH0_ASSURANCE_PROFILE'] and 'AUTH0_ASSURANCE_PROFILE' not in values and 'AUTH0_ASSURANCE_PROFILE' not in os.environ:
++        config['AUTH0_ASSURANCE_PROFILE'] = 'fido2'
+     ready = True
+     for name, expected in (('AUTH0_DOMAIN',DOMAIN),('AUTH0_CLIENT_ID',CLIENT_ID)):
+         match = config[name] == expected
+@@ -60,7 +64,9 @@ def load_config(root, report):
+     except ValueError:
+         valid = False
+     report.add('development origin','PASS' if valid else 'FAIL','origin loopback local valid' if valid else 'gunakan APP_ENV=local dan APP_ORIGIN loopback exact tanpa trailing slash')
+-    return config, ready and valid
++    profile = config['AUTH0_ASSURANCE_PROFILE'] in ASSURANCES
++    report.add('assurance profile','PASS' if profile else 'FAIL','profil dikenali; dev-totp bukan assurance produksi' if profile else 'gunakan fido2 atau dev-totp secara eksplisit')
++    return config, ready and valid and profile
+ 
+ 
+ def public_provider(client, report):
+@@ -106,10 +112,10 @@ def database(config, report):
+                 report.add('database','FAIL','checker hanya untuk DB development sintetis maaher_test_*; tidak menginspeksi data pengguna')
+                 return
+             revision = owner.execute('SELECT version_num FROM alembic_version').fetchone()[0]
+-            if revision != '0004_auth0_oidc':
+-                report.add('database migration','FAIL','migration 0004 belum aktif; periksa source dan DB yang dipilih')
++            if revision != '0005_dev_totp':
++                report.add('database migration','FAIL','migration 0005 belum aktif; periksa source dan DB development yang dipilih')
+                 return
+-            report.add('database migration','PASS','0004 aktif pada DB sintetis')
++            report.add('database migration','PASS','0005 aktif pada DB sintetis')
+         with psycopg.connect(config['AUTH_DATABASE_URL'],connect_timeout=5,options='-c default_transaction_read_only=on') as auth:
+             if auth.execute('SELECT current_database()').fetchone()[0] != name:
+                 report.add('auth role','FAIL','auth dan migration URL menuju database berbeda')
+@@ -135,6 +141,10 @@ def application(client, config, report, start_flow=False):
+         if response.status_code!=200 or response.json().get('enabled') is not True:
+             report.add('API/web Auth0 config','FAIL','service belum aktif/konfigurasi belum termuat; periksa source dan restart service development')
+             return
++        expected_assurance = ASSURANCES.get(config.get('AUTH0_ASSURANCE_PROFILE','fido2'))
++        if not expected_assurance or response.json().get('assurance') != expected_assurance:
++            report.add('API/web Auth0 config','FAIL','profil service berbeda dari konfigurasi lokal; periksa source dan restart API')
++            return
+         report.add('API/web Auth0 config','PASS','service menyatakan konfigurasi tersedia; secret belum divalidasi provider')
+         if not start_flow:
+             report.add('OIDC start flow','SKIP','jalankan dengan --start-flow untuk memeriksa cookie/state/PKCE; tidak melakukan login')

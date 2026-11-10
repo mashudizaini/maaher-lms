@@ -1,5 +1,9 @@
 # ADR-004 — Auth0/OIDC login staff tahap pertama
 
+Tambahan 10 November 2026: [ADR-005](005-development-phone-totp.md) menambah
+profile TOTP HP yang dibatasi local/synthetic. Assurance FIDO2 di ADR ini tetap
+default dan wajib untuk gate produksi. Head migrasi terbaru 0005.
+
 Status: implementasi development setelah pemilik menyetujui Auth0/OIDC pada
 10 November 2026. Belum diuji dengan tenant Auth0 nyata; tidak membuka gate H1
 produksi. Lihat `docs/tickets/LMS-01-OIDC.md` dan `docs/AUTH0-SETUP.md`.

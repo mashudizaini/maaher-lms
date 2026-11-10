@@ -37,7 +37,7 @@ def handle(request):
     now = int(time.time())
     claims = {'iss':'https://browser-tests.us.auth0.com/','sub':'auth0|synthetic-browser-staff',
               'aud':'synthetic-browser-client','iat':now,'exp':now+300,'auth_time':now,
-              'nonce':transaction['nonce'][0],'amr':['pwd','mfa'],oidc.ASSURANCE_CLAIM:oidc.ASSURANCE}
+              'nonce':transaction['nonce'][0],'amr':['pwd','mfa'],oidc.ASSURANCE_CLAIM:oidc.settings().assurance}
     encoded = jwt.encode({'alg':'RS256','kid':key.kid},claims,key)
     return httpx.Response(200,json={'id_token':encoded,'access_token':'synthetic-browser-access-token',
                                     'token_type':'Bearer','expires_in':300})

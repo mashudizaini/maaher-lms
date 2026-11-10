@@ -55,7 +55,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      - run: node --test infra/auth0/staff-post-login.test.cjs
+      - run: node --test infra/auth0/*.test.cjs
       - run: npm ci --no-audit --no-fund
         working-directory: maaher-lms-starter/apps/web
       - run: npm run build
@@ -90,6 +90,20 @@ jobs:
           TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_oidc_browser_ci
           TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_oidc_browser_ci
         run: python scripts/test-lms01-browser.py --oidc
+      - name: Create separate development TOTP browser test database
+        run: |
+          python - <<'PY'
+          import os,psycopg
+          with psycopg.connect(os.environ['TEST_MIGRATION_DATABASE_URL'],autocommit=True) as db:
+              db.execute('CREATE DATABASE maaher_test_dev_totp_browser_ci')
+          PY
+      - name: Development TOTP browser regression
+        env:
+          TEST_MIGRATION_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
+          TEST_DATABASE_URL: postgresql://maaher_api@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
+          TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
+          TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_dev_totp_browser_ci
+        run: python scripts/test-lms01-browser.py --oidc --dev-totp
   web:
     runs-on: ubuntu-latest
     steps:

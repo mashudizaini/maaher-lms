@@ -48,7 +48,7 @@ def provider(identity, monkeypatch, provider_key):
         assert request.headers["authorization"].startswith("Basic ")
         form = parse_qs(request.content.decode())
         assert form["grant_type"] == ["authorization_code"]
-        assert form["redirect_uri"] == ["https://testserver/api/auth/oidc/callback"]
+        assert form["redirect_uri"] == [os.environ["APP_ORIGIN"] + "/api/auth/oidc/callback"]
         spec = codes.pop(form["code"][0])
         assert create_s256_code_challenge(form["code_verifier"][0]) == spec["challenge"]
         if spec.get("error"):
@@ -91,7 +91,7 @@ def bind(identity, subject=None, operator=False, admin=True):
 
 
 def begin(client, provider, **spec):
-    response = client.post("/auth/oidc/login", json={}, headers=ORIGIN)
+    response = client.post("/auth/oidc/login", json={}, headers={"origin": os.environ["APP_ORIGIN"]})
     assert response.status_code == 200, response.text
     query = parse_qs(urlsplit(response.json()["authorization_url"]).query)
     assert query["response_type"] == ["code"] and query["scope"] == ["openid"]
@@ -141,6 +141,7 @@ def test_oidc_rotates_into_a_private_session_and_keeps_tenant_authorization(iden
     {"claims": {"auth_time": True}},
     {"claims": {"amr": ["pwd"]}},
     {"claims": {oidc.ASSURANCE_CLAIM: "otp-is-not-the-security-key-policy"}},
+    {"claims": {oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE}},
     {"omit": [oidc.ASSURANCE_CLAIM]},
     {"omit": ["nonce"]},
     {"omit": ["auth_time"]},
@@ -280,6 +281,71 @@ def test_runtime_cannot_mint_oidc_sessions_and_auth_cannot_bind_a_subject(identi
     with psycopg.connect(identity[1]) as db:
         assert db.execute("SELECT has_column_privilege('maaher_definer','oidc_login_flows','expires_at','SELECT')").fetchone()[0] is True
         assert db.execute("SELECT has_column_privilege('maaher_definer','oidc_login_flows','encrypted_state','SELECT')").fetchone()[0] is False
+
+
+def use_dev_totp(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "local")
+    monkeypatch.setenv("APP_ORIGIN", "http://127.0.0.1:3000")
+    monkeypatch.setenv("LOCAL_INSECURE_COOKIES", "true")
+    monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp")
+
+
+def test_dev_totp_uses_a_distinct_session_and_checks_tenant_and_policy_on_every_request(identity, provider, monkeypatch):
+    use_dev_totp(monkeypatch)
+    bind(identity)
+    _, owner, user, tenant, foreign = identity[:5]
+    with TestClient(app, base_url=os.environ["APP_ORIGIN"]) as client:
+        assert client.get("/auth/oidc/config").json()["assurance"] == oidc.DEV_TOTP_ASSURANCE
+        flow = begin(client, provider, claims={oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE})
+        assert client.get("/auth/oidc/callback", params=flow).status_code == 200
+        opaque = client.cookies.get("maaher_session")
+        assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).json()["role"] == "admin"
+        assert client.get("/auth/tenant-members", headers={"x-tenant-id": str(tenant)}).status_code == 200
+        assert client.get("/auth/me", headers={"x-tenant-id": str(foreign)}).status_code == 403
+        with psycopg.connect(owner) as db:
+            assert db.execute("SELECT assurance FROM oidc_sessions WHERE token_hash=%s", (token_digest(opaque),)).fetchone()[0] == oidc.DEV_TOTP_ASSURANCE
+        # Direct SQL defaults to FIDO2 and does not inherit app's dev profile.
+        with psycopg.connect(os.environ["TEST_DATABASE_URL"]) as db:
+            assert db.execute("SELECT * FROM resolve_session(%s)", (token_digest(opaque),)).fetchone() is None
+            assert db.execute("SELECT count(*) FROM list_members(%s,%s,NULL)", (token_digest(opaque), tenant)).fetchone() == (0,)
+        monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "fido2")
+        assert client.get("/auth/me", headers={"x-tenant-id": str(tenant)}).status_code == 401
+        monkeypatch.setenv("APP_ENV", "production")
+        assert client.get("/auth/oidc/session").status_code == 401
+        monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "dev-totp")
+        assert client.get("/auth/oidc/config").json() == {"enabled": False}
+        assert client.post("/auth/oidc/login", headers={"origin": os.environ["APP_ORIGIN"]}).status_code == 503
+        assert client.get("/auth/oidc/session").status_code == 401
+        # A request cannot re-enable the dev policy using a header/query value.
+        assert client.get("/auth/me?AUTH0_ASSURANCE_PROFILE=dev-totp", headers={"x-tenant-id": str(tenant), "app-env": "local"}).status_code == 401
+
+
+def test_dev_profile_rejects_a_fido2_claim_and_a_policy_change_invalidates_inflight_state(identity, provider, monkeypatch):
+    bind(identity)
+    use_dev_totp(monkeypatch)
+    with TestClient(app, base_url=os.environ["APP_ORIGIN"]) as client:
+        assert client.get("/auth/oidc/callback", params=begin(client, provider)).status_code == 400
+        flow = begin(client, provider, claims={oidc.ASSURANCE_CLAIM: oidc.DEV_TOTP_ASSURANCE})
+        before = len(provider["calls"])
+        monkeypatch.setenv("AUTH0_ASSURANCE_PROFILE", "fido2")
+        assert client.get("/auth/oidc/callback", params=flow).status_code == 400
+        assert len(provider["calls"]) == before
+        assert not client.cookies.get("maaher_session")
+
+
+def test_dev_profile_rejects_an_actual_non_test_database(identity, provider, monkeypatch):
+    from fastapi import HTTPException
+    from psycopg.conninfo import make_conninfo
+    from psycopg.rows import dict_row
+    use_dev_totp(monkeypatch)
+    config = oidc.settings()
+    assert config.assurance == oidc.DEV_TOTP_ASSURANCE
+    # Read only the actual DB name, with no schema/data writes to this database.
+    with psycopg.connect(make_conninfo(identity[1], dbname="postgres"), row_factory=dict_row,
+                         options="-c default_transaction_read_only=on") as db:
+        with pytest.raises(HTTPException) as denied:
+            oidc.require_policy_database(config, db)
+        assert denied.value.status_code == 503
 
 
 def test_offline_binding_revokes_local_sessions_and_cannot_reassign_a_subject(identity, provider):

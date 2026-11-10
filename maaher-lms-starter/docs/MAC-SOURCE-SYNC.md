@@ -1,5 +1,11 @@
 # Mengambil source Auth0 yang benar ke Mac
 
+Untuk pilihan autentikator HP yang disetujui terbaru, gunakan
+[AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md). Pastikan source mencakup migration 0005
+dan Action development, bukan hanya file 0004 pada pemeriksaan historis ini.
+Database Auth0 development 0004 yang sudah terbukti sintetis boleh di-upgrade
+sesuai panduan baru setelah backup; tidak perlu membuat ulang dataset tersebut.
+
 Hasil Codex lokal yang masih melihat head 0003 menunjukkan folder lokal belum
 memuat implementasi Auth0 yang dibuat di cloud. Verifikasi saja tidak memindahkan
 source. Branch `feat/LMS-01-auth0-development` menyediakan source yang dapat

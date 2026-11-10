@@ -5,6 +5,8 @@ import os
 import psycopg
 from psycopg.rows import dict_row
 
+from .oidc_policy import configured_assurance
+
 # Tests instrument this connector in a separate uvicorn process, never via HTTP.
 _connect = psycopg.connect
 
@@ -23,6 +25,10 @@ def transaction(environment='DATABASE_URL', group='maaher_runtime'):
         """,(group,)).fetchone()
         if flags['unsafe']:
             raise RuntimeError('Koneksi harus memakai role runtime terpisah tanpa owner/BYPASSRLS')
+        # Transaction-local, set by the server on both auth and tenant paths.
+        # The resolver additionally requires the actual DB name for dev TOTP.
+        db.execute("SELECT set_config('app.oidc_assurance',%s,true)",
+                   (configured_assurance() or 'disabled',))
         yield db
         # psycopg's connection context commits here. FastAPI callers must use
         # Depends(..., scope='function'), whose teardown precedes response send.

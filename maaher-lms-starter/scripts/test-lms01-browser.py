@@ -53,7 +53,10 @@ def ready(process, url):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--oidc', action='store_true', help='Use the test-only signed OIDC provider probe')
+    parser.add_argument('--dev-totp', action='store_true', help='Exercise local synthetic TOTP assurance with --oidc')
     args = parser.parse_args()
+    if args.dev_totp and not args.oidc:
+        parser.error('--dev-totp requires --oidc')
     owner = os.environ["TEST_MIGRATION_DATABASE_URL"]
     runtime = os.environ["TEST_DATABASE_URL"]
     with psycopg.connect(owner) as db:
@@ -73,6 +76,7 @@ def main():
                PYTHONPATH=str(ROOT/"apps/api"), LMS_TEST_PYTHON=sys.executable,
                LMS_TEST_ROOT=str(ROOT), NEXT_TELEMETRY_DISABLED="1",
                AUTH0_DOMAIN="", AUTH0_CLIENT_ID="", AUTH0_CLIENT_SECRET="")
+    env['AUTH0_ASSURANCE_PROFILE'] = 'dev-totp' if args.dev_totp else 'fido2'
     target = 'app.main:app'
     test_file = 'auth.spec.ts'
     if args.oidc:

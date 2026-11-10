@@ -1,0 +1,164 @@
+{
+  "base_commit": "e5526649c1e96ba94d87a0f0f2d4cc33208eaeea",
+  "generated_at": "2026-11-10T12:02:35.371724+00:00",
+  "scope": "Development phone TOTP only; production FIDO2 gate remains open",
+  "files": [
+    {
+      "path": ".github/workflows/lms-auth0.yml",
+      "bytes": 6014,
+      "sha256": "25b73098794356ff4a4c749c8aee021b061f7a7feb6ab49652a72aa6abae948b"
+    },
+    {
+      "path": "AUTH0-DEVELOPMENT.md",
+      "bytes": 867,
+      "sha256": "1a0f9f11b0a82bdb0a410a38c94451c014453edc3767be21363660144ccdec2e"
+    },
+    {
+      "path": "maaher-lms-starter/.env.example",
+      "bytes": 1518,
+      "sha256": "2a3251df03664d82046f2ad50df5e2d1debe03af18b90b38e2997458d65a1454"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/database.py",
+      "bytes": 2371,
+      "sha256": "6f06d27d8b08a670319337633b5809c307ef7a24e88bc73b5b3ad3a407b120d5"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/oidc.py",
+      "bytes": 10473,
+      "sha256": "645b2ed8816c00d9ef28b4ac83f04970fb80674b221f515a9f5740b349f80f5b"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/oidc_policy.py",
+      "bytes": 833,
+      "sha256": "c52598368f96ca52040013315005b12eded39b53361b990961714db1e244e2ff"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/migrations/auth0_dev_totp.sql",
+      "bytes": 2468,
+      "sha256": "d21d3946819e52a92a7738b70c348ae14fe5044f6356188576d96f0442e3dcc5"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/migrations/versions/0005_dev_totp.py",
+      "bytes": 1231,
+      "sha256": "c30e20efc4f69cca41daf43f70d25aa6184f393a548bf4a5331657e3447b9e67"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/conftest.py",
+      "bytes": 8753,
+      "sha256": "1bb533b015128885fbe64d1c3c33e46fdb6aa5e958801544f832a1c41af6560c"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/oidc_browser_probe.py",
+      "bytes": 2536,
+      "sha256": "1e81f62efd5a62c09503e916f2de9cb0a28c9fac5be223f6da7df85548623fa2"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_oidc.py",
+      "bytes": 22659,
+      "sha256": "6798259b56f93f4546c20746512916e0bb591667fd628ab9c3bf96dc1d8843a0"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_oidc_policy.py",
+      "bytes": 1525,
+      "sha256": "34230bbed1a992a7170cc17dd1eab54276021cbfd9d7b45843825b0cb5da48a0"
+    },
+    {
+      "path": "maaher-lms-starter/docker-compose.yml",
+      "bytes": 2948,
+      "sha256": "cc66288e8dea1977d6370cf5a42bc1e93297568f28e700b0d5762a386d40972c"
+    },
+    {
+      "path": "maaher-lms-starter/docs/ARCHITECTURE.md",
+      "bytes": 6948,
+      "sha256": "af764a017989bbabf85134917b392a1b8b2ab5043eb4782d09d093740c158dbc"
+    },
+    {
+      "path": "maaher-lms-starter/docs/AUTH0-DEV-TOTP.md",
+      "bytes": 10004,
+      "sha256": "4c987f92dc484b7059bb59aa46d1daba6b396c5d5b684734a8f89cf18c849e51"
+    },
+    {
+      "path": "maaher-lms-starter/docs/AUTH0-LOCAL-LIVE-CHECK.md",
+      "bytes": 4899,
+      "sha256": "53046e82535540742d157a68947bd769283f9d925ed4c04e9b9e985cee8332a1"
+    },
+    {
+      "path": "maaher-lms-starter/docs/AUTH0-SETUP.md",
+      "bytes": 9159,
+      "sha256": "193c5309f67fac12d55a6beb98ab3eeaba93fde9ac1ba9e6871dbef5037393d0"
+    },
+    {
+      "path": "maaher-lms-starter/docs/AUTH0-TENANT-LOCAL.md",
+      "bytes": 4155,
+      "sha256": "ead3859f37c0212fa17b32c9f8cc2cff22027e0618d69750a1e4bedf866861d4"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-01-AUTH0-HANDOFF.md",
+      "bytes": 7228,
+      "sha256": "3ae83395aa932d3712c70f2771853171f21cf97edb03df35557bfe16470e36be"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-01-DEV-TOTP-HANDOFF.md",
+      "bytes": 6437,
+      "sha256": "e6b0647a5c68f101d32c25970a3661fd2fa08b606b8b7743b75eaaa3fb47c7fd"
+    },
+    {
+      "path": "maaher-lms-starter/docs/MAC-SOURCE-SYNC.md",
+      "bytes": 4574,
+      "sha256": "2f9f79013c3694dc8d9985397c85417f2e283b490c8d3f79d39de36edb7f8824"
+    },
+    {
+      "path": "maaher-lms-starter/docs/adr/004-auth0-development-login.md",
+      "bytes": 4937,
+      "sha256": "becf0480876e4ff1a1b9f52d7e7dade096c8d12061f85a7d3c6938b929e465ca"
+    },
+    {
+      "path": "maaher-lms-starter/docs/adr/005-development-phone-totp.md",
+      "bytes": 2518,
+      "sha256": "163a92dc1747fa78c0d59f7436a1d7996f78248f47e8cb1d5b72faac534e71b5"
+    },
+    {
+      "path": "maaher-lms-starter/docs/tickets/LMS-01-OIDC.md",
+      "bytes": 2582,
+      "sha256": "2fd12bdc5eb73399068ad5a4a8eb3ed2f5e5538982fc80bf51bba15ae1ebbe08"
+    },
+    {
+      "path": "maaher-lms-starter/infra/auth0/development-totp-post-login.cjs",
+      "bytes": 1187,
+      "sha256": "0d152658b22a46860fe27ccf5c1dba07f30512c48231302d37a6d3c4c8230a79"
+    },
+    {
+      "path": "maaher-lms-starter/infra/auth0/development-totp-post-login.test.cjs",
+      "bytes": 3493,
+      "sha256": "8f1b7b9277b7a436c12ecfe217d719a7cef8fd4f6f82386e3861465658abc1e5"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/test-lms01-browser.py",
+      "bytes": 4872,
+      "sha256": "c04e19e576cf16798a6898e0de7144f326c78c3c5325deb0828e5432d10d1a63"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/tests/test_auth0_preflight.py",
+      "bytes": 4849,
+      "sha256": "5fb66d615b06383d9c2f61fc8fffb3034139b50b9e22c7400571f72cace720f1"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/verify-auth0-local.py",
+      "bytes": 12075,
+      "sha256": "1e6502e2f65fce2b0b33718724db9072dd4d6abd6fa1378ae2e2b33259d55c1b"
+    }
+  ],
+  "patch_sha256": "e46de6618db8d1df7003c821dcc300d102540eddd7d7aeb9c0ac2d9b660a16a8",
+  "validation": {
+    "api_unit_passed": 143,
+    "browser_passed": 9,
+    "action_passed": 16,
+    "preflight_unit_passed": 8,
+    "skipped": 0,
+    "typecheck": "PASS",
+    "build": "PASS",
+    "live_auth0": "NOT TESTED",
+    "independent_review": "PENDING"
+  }
+}

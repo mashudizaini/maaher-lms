@@ -35,6 +35,9 @@ Implementasi development tahap 1 dan batas produksinya dijelaskan pada
 [ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada
 [AUTH0-SETUP](AUTH0-SETUP.md). Keputusan provider ini menggantikan status
 "belum dipilih" di catatan historis, tanpa membuka gate produksi/operator.
+Pemilik kemudian memilih TOTP HP khusus local development dengan data sintetis;
+[ADR-005](adr/005-development-phone-totp.md) membatasi profile/session/DB tersebut
+secara eksplisit. Kebijakan FIDO2/UV produksi tetap berlaku.
 
 LMS-01 implements PostgreSQL-backed opaque sessions with `HttpOnly`, `Secure`,
 `SameSite=Lax` cookies and exact Origin checks on mutations. Argon2 hashing,

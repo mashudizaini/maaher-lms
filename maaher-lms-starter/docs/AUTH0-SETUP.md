@@ -1,9 +1,14 @@
 # Setup Auth0 development untuk Maaher LMS
 
 Tujuan tahap ini: login admin/operator lewat identity yang diikat sebelumnya,
-tanpa membuka akses produksi. Pemilik sudah memilih Auth0/OIDC tetapi belum
-membuat tenant/aplikasi. Gunakan user dan database sintetis. Panduan tidak
+tanpa membuka akses produksi. Tenant/aplikasi development sudah dibuat; nilai
+publiknya ada pada AUTH0-TENANT-LOCAL.md. Gunakan user dan database sintetis. Panduan tidak
 membutuhkan password, client secret, security key PIN atau recovery code di chat.
+
+**Pilihan terbaru pemilik: autentikator HP untuk development.** Ikuti
+[AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md) untuk profile dev-totp, migration 0005,
+Action OTP dan pemindaian QR. Bagian security key di bawah tetap berlaku untuk
+profile default fido2/produksi, bukan langkah wajib onboarding HP development.
 
 ## 1. Tenant dan aplikasi
 

@@ -1,5 +1,9 @@
 # Tenant Auth0 development yang diberikan pemilik
 
+Pilihan terbaru pemilik adalah autentikator HP untuk local/synthetic. Gunakan
+[AUTH0-DEV-TOTP](AUTH0-DEV-TOTP.md) untuk migration 0005, Action OTP dan enrollment
+HP; instruksi FIDO2 pada catatan historis tetap untuk profile default/produksi.
+
 Domain: `dev-hl2un81cojtbhbv4.us.auth0.com`.
 Client ID: `FjD4enWFIU9PNdnLjGwc1M1x4p8xsdW3`.
 Issuer yang digunakan API:

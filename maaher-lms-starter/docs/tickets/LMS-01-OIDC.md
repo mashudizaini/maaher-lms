@@ -23,3 +23,20 @@ tangan, negative claims/replay/state/browser/config, SQL privilege/RLS dan
 migrasi roundtrip pada DB baru; regresi lokal/browser/build yang relevan.
 Live Auth0 dan security key asli menunggu setup pemilik. Tahap ini bukan klaim
 seluruh H1 selesai atau operator approval/recovery produksi sudah aktif.
+
+## Tambahan disetujui — autentikator HP development
+
+10 November 2026: pemilik memilih autentikator HP untuk development sintetis
+karena belum mempunyai security key fisik. Lingkup: profile dev-totp eksplisit,
+Action enrollment/challenge OTP terpisah, migration 0005 dan guard session,
+checker profil/schema, panduan Dashboard/HP/Mac dan tes regresi. Produksi tetap
+profile fido2; H1/recovery tidak dianggap selesai.
+
+Acceptance tambahan: start/callback hanya local loopback + DB aktual maaher_test_*,
+claim development berbeda dan ditolak profile FIDO2, perpindahan profile/lingkungan
+menolak session dev lama, state fingerprint mengikat profile, binding tetap
+offline setelah verifikasi pemilik; tenant/RLS tetap terjaga. Migrasi roundtrip
+0005→0004→0005 mencabut session dev dan mempertahankan user/binding/session FIDO2.
+Tes Action mencakup enrollment awal, login kedua, metadata palsu dan client lain;
+browser positif sintetis dijalankan untuk kedua profile. Tidak ada real Auth0
+policy change, binding Mac, merge/deploy oleh sesi cloud ini.
