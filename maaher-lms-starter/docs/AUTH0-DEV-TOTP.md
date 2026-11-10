@@ -82,7 +82,11 @@ MFA juga; MFA user LMS tidak melindungi login console.
    [development-totp-post-login.cjs](../infra/auth0/development-totp-post-login.cjs).
    Tambahkan Action secret bernama `MAAHER_DEV_CLIENT_ID`, nilainya **Client ID**
    aplikasi Development di atas, bukan Client Secret. Deploy versi Action ini.
-4. Di **Actions → Flows → Login**, pasang Action tersebut dan Apply perubahan.
+4. Pasang Action ke trigger **post-login**. Cari **Actions → Triggers →
+   post-login (Login/Post Login)** jika Dashboard tidak menampilkan Flows.
+   Pada tampilan yang memakai label lama, jalurnya **Actions → Flows → Login**.
+   Pada editor trigger, pilih Action **Maaher Development TOTP** dari bagian
+   **Custom**, tambahkan di antara Start dan Complete, kemudian **Apply/Save**.
    Jika Action `staff-post-login.cjs` lama saat ini menargetkan Client ID
    Development yang sama, lepaskan Action lama **dari flow development ini**:
    jika keduanya berjalan untuk aplikasi yang sama, policy security key akan
@@ -94,6 +98,59 @@ MFA juga; MFA user LMS tidak melindungi login console.
 Nama menu bisa berbeda antar versi Dashboard. Action meminta **otp** saja,
 tanpa faktor alternatif. Claim yang diterbitkan adalah
 `https://maaherlms.aimz.my.id/assurance = maaher-dev-totp-v1`.
+
+### Audit konfigurasi ketika Action sudah dibuat tetapi QR belum muncul
+
+Object Action di Library, versi yang sudah Deploy, dan pemasangan pada trigger
+adalah tiga pemeriksaan terpisah. Target stabilnya **post-login**, bukan sekadar
+nama menu Dashboard. Jika Triggers/Flows tidak terlihat, kirim hanya tangkapan
+layar sidebar Actions; samarkan data akun dan jangan sertakan secret, QR atau
+token. Nama menu tidak membuktikan fitur tidak tersedia atau perlu upgrade paket.
+
+| Pemeriksaan | Nilai/bukti yang diperlukan |
+|---|---|
+| API lokal | Buka `http://127.0.0.1:3000/api/auth/oidc/config`: enabled=true dan assurance=maaher-dev-totp-v1 |
+| Aplikasi Auth0 | Regular Web Application, OIDC/RS256, Authorization Code, token authentication Basic |
+| Callback aplikasi | `http://127.0.0.1:3000/api/auth/oidc/callback`, tanpa wildcard |
+| Login email | Database connection diaktifkan untuk aplikasi Development; gunakan user dari connection tersebut |
+| User approval | app_metadata.maaher_dev_totp_approved adalah boolean true pada profil yang dipakai login |
+| Faktor | OTP enabled; pengalaman Universal Login mendukung enrollment/challenge yang diminta |
+| Action | Source development-totp-post-login.cjs yang benar pada versi yang sudah Deploy |
+| Action secret | Nama MAAHER_DEV_CLIENT_ID ada; pemilik mengisi Client ID Development yang benar, bukan Client Secret |
+| Trigger binding | Maaher Development TOTP terpasang dan Apply/Save pada post-login |
+| Policy lain | Action FIDO2 lama tidak menargetkan aplikasi Development yang sama |
+| Database lokal | Head 0005_dev_totp pada DB sintetis maaher_test_*, role terpisah |
+| Identity binding | Tetap menunggu enrollment milik pemilik yang sudah diverifikasi |
+
+Response /config hanya membuktikan profile/config API tersedia. Ia tidak
+mengakses Management API atau membuktikan Action aktif, OTP enabled, nilai
+secret benar pada token exchange, enrollment, maupun binding. Preflight lokal
+juga belum memeriksa deployed Action/trigger/Guardian. Hindari menandai seluruh
+Auth0 PASS berdasarkan response itu.
+
+Untuk audit di Mac, Codex lokal boleh menjalankan checker existing dan membaca
+setting tenant melalui koneksi Auth0 terautentikasi yang memang sudah tersedia.
+Periksa tenant/app target sebelum request, gunakan operasi read-only dan output
+ringkasan allowlist. Jangan membaca config credential CLI atau mencetak response
+API lengkap/token/secrets. Jika akses Management API atau izin baca tidak
+tersedia, tandai item tersebut SKIP/belum diverifikasi dan gunakan pemeriksaan
+Dashboard pemilik; jangan mengisi PASS dari asumsi/source test. Pemeriksaan
+secret yang hanya dapat melihat namanya tidak membuktikan nilainya benar.
+
+Prompt audit tambahan untuk Codex lokal:
+
+```text
+Audit read-only setup Auth0 Development dan LMS yang sedang berjalan.
+Gunakan docs/AUTH0-DEV-TOTP.md bagian audit konfigurasi sebagai daftar bukti.
+Jalankan checker existing; muat .env sebagai data, jangan cetak nilainya.
+Periksa deployed Action, binding trigger post-login, OTP, app settings/callback,
+database connection dan app_metadata user uji hanya jika akses baca tenant yang
+benar memang tersedia. Ringkas PASS/FAIL/SKIP tanpa response/token/secret/PII.
+Jika tidak ada akses baca Auth0, tandai SKIP dan sebutkan halaman Dashboard yang
+perlu diperiksa pemilik. Jangan menganggap nama secret membuktikan nilai benar.
+Jangan mengubah tenant/Action/DB, membuat binding, reset faktor, merge atau deploy
+pada audit ini. Laporkan enrollment/login nyata terpisah dari preflight.
+```
 
 ## 4. Daftarkan HP, kemudian binding — pemilik + Codex lokal
 
