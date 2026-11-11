@@ -5,9 +5,12 @@ Latest follow-up: [FIXES-HANDOFF](LMS-05-FIXES-HANDOFF.md), base84dd193.
 Independent4a450d5 review closed F5/F6/F7 Linux in limited synthetic scope;
 F9/F10/F11 author fixes await re-review. F12 remains open.
 
-Tests below are author evidence. Owner reports partial Mac automation; see
-[LMS-05-MAC-VALIDATION-20261111.md](LMS-05-MAC-VALIDATION-20261111.md).
-Independent review and manual real-Auth0 UAT remain pending. Cloud snapshot4a450d5.
+Tests below are author evidence. Current fixes runtime5131f2c; owner now reports
+343 PASS/1 capability SKIP/0 deselected and2 browser PASS on Mac. See
+[fixes Mac relay](LMS-05-FIXES-MAC-VALIDATION-20261111.md):3 cases not yet reconciled
+against347 cloud collection. Original implementation snapshot4a450d5 and its
+[earlier Mac relay](LMS-05-MAC-VALIDATION-20261111.md) remain historical.
+Independent re-review and manual real-Auth0 UAT remain pending.
 
 | Acceptance | Status |
 |---|---|
@@ -32,9 +35,10 @@ Independent review and manual real-Auth0 UAT remain pending. Cloud snapshot4a450
 | Mac Auth0 preflight |Owner reports13 PASS; real login/MFA end-to-end still untested |
 | Real Auth0/manual UAT, Docker image, remote CI, multi-worker |NOT TESTED here; manual real-Auth0 UAT not yet performed per owner |
 | Independent LMS-05 parent review |APPROVED_WITH_NOTES dev/UAT synthetic small–medium only; F5/F6/F7 scoped CLOSED |
-| F9 valid30k /separate Linux assertion /CPU diagnostic |Author Linux PASS; slow reviewer host re-run PENDING |
-| F10 real HTTP2/4/8 accounts, tenant isolation, student drafts |36 author+36 student writes200; fixed capacity/expiry unit PASS; re-review PENDING |
-| F11 date overflow/surrogate422, redaction/valid Unicode |API/browser PASS; independent re-review PENDING |
+| F9 valid30k /separate Linux assertion /CPU diagnostic |Author Linux PASS; Mac343/1 SKIP/0 deselected reported; exact node IDs/calibration need independent review |
+| F10 real HTTP2/4/8 accounts, tenant isolation, student drafts |Cloud36 author+36 student writes200; Mac normal/draft success reported; re-review PENDING |
+| F11 date overflow/surrogate422, redaction/valid Unicode |Cloud API/browser PASS; reconcile Mac coverage from original report; re-review PENDING |
+| Current Mac count reconciliation |343+1=344 vs347 collected in cloud:3 cases unexplained, not declared failed |
 | F12 Draft downtime/key retirement/staff GET budget |OPEN operational notes |
 | Full auth parent8941a79..4733526 |PENDING, outside this delta |
 | F3, N2/N3/N4, tenant pause |OPEN/unchanged |

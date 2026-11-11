@@ -6,6 +6,21 @@
 review APPROVED_WITH_NOTES remains limited to synthetic small–medium dev/UAT;
 no production/auth-parent approval. Original report is on Mac, not rewritten here.
 
+## Update Mac — 11 November 2026 WIB
+
+Pemilik melaporkan source5131f2c aktif, API/web rebuilt/restarted tanpa migrasi,
+343 PASS +1 SKIP capability Linux,0 deselected,2 browser PASS. Seluruh normal
+save/draf siswa pada fairness2/4/8 berhasil; native Mac tetap WARN_MEMORY_UNAVAILABLE.
+[Catatan AUTHOR dan batas bukti](LMS-05-FIXES-MAC-VALIDATION-20261111.md) menjelaskan
+343+1=344 dibanding347 kasus cloud:3 kasus belum terpetakan, bukan otomatis gagal.
+Laporan asli hanya ada di Mac; reviewer harus mencocokkan command/node ID/coverage
+serta sampel kalibrasi. Schema/provider/latensi tidak dirinci di ringkasan terbaru.
+
+Tahap berikutnya review independen F9/F10/F11 melalui rereview-request; tidak perlu
+mengulang setup, restart atau migrasi hanya untuk review. Patch/manifest fixes
+adalah snapshot5131f2c, cek terhadap blob commit itu. Pembaruan dokumentasi sesudahnya
+ditinjau terpisah dan tidak mengubah hasil runtime/cloud yang tercatat di bawah.
+
 ## Behavior
 
 - Parser now queues finite work from validated tenant:user scopes rather than

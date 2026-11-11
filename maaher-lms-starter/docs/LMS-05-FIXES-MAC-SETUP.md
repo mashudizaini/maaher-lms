@@ -5,6 +5,14 @@ reviewed implementation4a450d5. Latest source adds F9/F10/F11 fixes; schema rema
 0012_assignments. See ADR-010 and LMS-05-FIXES-HANDOFF.md. Original review and Mac
 reports, patch/manifest snapshots and existing databases must be preserved.
 
+**Update:** pemilik melaporkan source5131f2c sudah aktif, build/restart tanpa
+migrasi,343 PASS/1 SKIP capability Linux/0 deselected,2 browser PASS dan fairness
+berhasil. [Batas bukti dan selisih3 kasus](LMS-05-FIXES-MAC-VALIDATION-20261111.md).
+Pertahankan laporan asli reviews/LMS-05-fixes-mac-validation-20261111.md. Berikutnya
+review independen; periksa source/schema secara read-only. Langkah setup di bawah
+untuk checkout baru/kebutuhan yang belum selesai, bukan perintah mengulang setup
+Mac yang telah berhasil. Jangan menyentuh DB lama untuk menyamakan jumlah tes.
+
 1. Inspect active Git root, status, source and schema. Fetch source normally;
    use an isolated worktree if needed. Preserve untracked reviews/LMS-05-claude.md
    and LMS-05-mac-validation-20261111.md. Do not reset/clean/stash automatically,

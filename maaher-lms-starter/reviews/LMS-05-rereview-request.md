@@ -4,6 +4,23 @@ AUTHOR has implemented fixes; do not turn author tests into independent approval
 Read CLAUDE.md, AGENTS.md, reviewer skill and original reviews/LMS-05-claude.md on
 Mac, plus its author relay. Preserve every prior report unchanged.
 
+Latest owner report:5131f2c active, API/web rebuilt/restarted without migration;
+343 PASS +1 Linux-memory capability SKIP,0 deselected;2 browser PASS; normal saves
+and student drafts succeed under2/4/8-account pressure. Native Mac remainsWARN.
+Read original reviews/LMS-05-fixes-mac-validation-20261111.md on Mac; cloud only has
+the AUTHOR relay docs/LMS-05-FIXES-MAC-VALIDATION-20261111.md. Verify actual source/
+schema, commands, node IDs, calibration and provider, not only the summary.
+
+Count boundary:343+1=344 reported Mac cases vs347 cloud full-suite/collection.
+Reconcile the3 cases with actual collection/config/file/marker/ignore commands;
+0 deselected does not alone establish full collection. Do not assume3 failures
+or hide any valid-content assertion. Confirm the single SKIP is capability-only.
+
+Fixes implementation snapshot **84dd193..5131f2c**. Fixes patch/manifest are for
+5131f2c: verify snapshot hashes against its Git blobs, then review documentation
+commits after it and actual local modifications separately. Historical initial
+LMS-05 patch/manifest remain for4a450d5.
+
 Base **84dd193**, reviewed runtime **4a450d5**, branch
 feat/LMS-05-assignments-submissions. Review84dd193..HEAD and actual local changes.
 If84dd193 unavailable, fetch normally or use4a450d5..HEAD and record that six
