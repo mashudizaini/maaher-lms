@@ -11,6 +11,7 @@ def retain(db):
     if role['unsafe']:
         raise RuntimeError('Dedicated restricted maintenance role required')
     db.execute('SELECT retain_auth_data()')
+    db.execute("DELETE FROM grading_read_limits WHERE window_start<now()-interval '1 day'")
 
 
 def main():

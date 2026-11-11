@@ -1,5 +1,13 @@
 # LMS-05 — author handoff
 
+**Latest independent update:** [re-review relay](../reviews/LMS-05-claude-rereview-relay-20261111.md)
+records APPROVED_WITH_NOTES on5131f2c, synthetic dev/UAT only: F9/F11 CLOSED and
+F10 CLOSED_WITH_NOTES. Full Mac346+1 platform SKIP/Linux347 PASS; old count gap
+resolved by three previously omitted rollback cases. Earlier pending statements
+below are historical. Parser capacity, full auth and operational gates remain
+separate. LMS-06 grading continues under its own [handoff](LMS-06-HANDOFF.md),
+not under an inherited review approval.
+
 11 November2026 WIB. Branch **feat/LMS-05-assignments-submissions**, base
 **54543a8f63066a44303ab577a70738e614ec226a**, runtime parent5b675e6, schema
 **0012_assignments**. Development implementation; independent review/Mac UAT

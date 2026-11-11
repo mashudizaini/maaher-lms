@@ -61,3 +61,8 @@ th, td { padding: .4rem; text-align: left; border-bottom: 1px solid #888; overfl
 .code-editor,.submission-code { width:100%; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; line-height:1.6; tab-size:4; }
 .submission-code { white-space:pre-wrap; overflow-wrap:anywhere; background:#f1f5f9; padding:1rem; border-radius:.5rem; }
 .editor-form fieldset { display:grid; gap:.7rem; border:0; padding:0; min-width:0; }
+
+.feedback-text { white-space:pre-wrap; overflow-wrap:anywhere; }
+.grade-result { border-top:1px solid #d7e0e8; margin-top:1.5rem; padding-top:1rem; }
+.grade-total { font-size:1.2rem; font-weight:700; }
+.grade-criterion { display:grid; gap:.5rem; padding:1rem; border:1px solid #d7e0e8; border-radius:.5rem; }

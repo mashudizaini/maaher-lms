@@ -1,5 +1,11 @@
 # ADR-010 — bounded fair parser scheduling and validation boundaries
 
+Latest independent result: re-review5131f2c reported APPROVED_WITH_NOTES for
+synthetic dev/UAT, F9/F11 CLOSED and F10 CLOSED_WITH_NOTES. Remaining calibration,
+linear queue wait and saturation notes are recorded in the
+[AUTHOR relay](../../reviews/LMS-05-claude-rereview-relay-20261111.md).
+Pending-review wording below describes the original implementation handoff.
+
 11 November 2026 WIB. Follow-up F9/F10 MEDIUM and F11 LOW on4a450d5; base84dd193
 (documentation only). No schema, DB role, provider or learner execution change.
 Implementation evidence is author evidence; independent re-review still pending.

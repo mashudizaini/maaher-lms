@@ -95,8 +95,23 @@ LMS-05 independent review on4a450d5 closes F5/F6/F7 within limited dev/UAT scope
 [ADR-010](adr/010-parser-fairness-and-validation-boundaries.md) implements author
 follow-up for F9 CPU portability, F10 shared-parser fairness and F11 safe input
 errors. Fixed resource caps, finite tenant-aware queue and safe422 handling;
-no schema change, existing signedv2 content preserved. Re-review/slow-host UAT
-remain pending; F12 and auth parent are separate.
+no schema change, existing signedv2 content preserved. Re-review5131f2c is reported
+APPROVED_WITH_NOTES for synthetic dev/UAT: F9/F11 CLOSED, F10 CLOSED_WITH_NOTES.
+Slow-host calibration/saturation notes, F12 and auth parent remain separate; see
+the [AUTHOR relay](../reviews/LMS-05-claude-rereview-relay-20261111.md).
+
+## LMS-06 development continuation
+
+[ADR-011](adr/011-teacher-grading-and-release.md) adds schema0013_grading:
+private immutable teacher grading revisions/events, explicit student publication,
+reasoned correction/withdrawal and original submitted-version rubric. Students
+read only their own current disclosure snapshot, never private grade history
+even through runtime SQL. Database-derived totals/actors/time, versioned locks,
+fresh authority checks after waiting and INVOKER triggers enforce transitions.
+`/grading` is staff-only; `/work` shows released feedback as escaped plain text.
+No new definer, role, secret or learner execution; grades do not complete lessons.
+Author validation is in [LMS-06-HANDOFF](LMS-06-HANDOFF.md). Independent LMS-06
+review and Mac UAT remain pending; historical parent approvals do not cover it.
 
 ## Coding lab / auto-grader: high-risk system
 - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.

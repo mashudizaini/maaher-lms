@@ -46,7 +46,7 @@ def test_assignment_seeded_upgrade_offline_guard_rollback_and_reupgrade(database
         cfg.cmd_opts=SimpleNamespace(x=flags)
         with pytest.raises(DBAPIError,match='allow_assignment_data_loss'):command.downgrade(cfg,'0010_learning_progress')
         with psycopg.connect(owner) as db:
-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0012_assignments'
+            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0013_grading'
             assert db.execute('SELECT source_code FROM submissions WHERE id=%s',(sid,)).fetchone()[0]=='Preserve answer'
     output=io.StringIO();offline=Config(str(Path(__file__).parents[1]/'alembic.ini'),output_buffer=output)
     command.downgrade(offline,'0012_assignments:0010_learning_progress',sql=True)

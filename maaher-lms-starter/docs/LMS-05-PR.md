@@ -1,5 +1,12 @@
 # Add versioned assignments, immutable submissions and bounded parser scheduling
 
+Latest independent re-review5131f2c: APPROVED_WITH_NOTES for synthetic dev/UAT;
+F9/F11 CLOSED, F10 CLOSED_WITH_NOTES. Reviewer Mac346+1 SKIP/Linux347 PASS with
+identical347 node IDs resolve the historical gap described below (three author
+rollback modules omitted). [Relay](../reviews/LMS-05-claude-rereview-relay-20261111.md)
+preserves remaining slow-host/queue-capacity notes. Earlier pending statements
+describe the prior handoff; full auth and production gates remain separate.
+
 Staff can author lesson-bound tasks with immutable exercise versions, rubric,
 WIB deadline/late policy and total attempt cap. Saving a draft version preserves
 the version students currently see until explicit publish. Enrolled students save

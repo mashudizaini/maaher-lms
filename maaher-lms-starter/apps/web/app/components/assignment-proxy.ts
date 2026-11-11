@@ -4,10 +4,10 @@ import { isIP } from 'node:net';
 
 export const dynamic = 'force-dynamic';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
-export async function assignmentProxy(root: 'assignments' | 'work' | 'assignment-submissions', request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
+export async function assignmentProxy(root: 'assignments' | 'work' | 'assignment-submissions' | 'grading', request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
   const path = (await context.params).path?.join('/') ?? '';
-  const read = new RegExp(root === 'assignments' ? `^(?:${uuid}(?:/versions)?)?$` : root === 'work' ? `^(?:assignments(?:/${uuid})?|submissions(?:/${uuid})?)$` : `^(?:${uuid})?$`);
-  const write = new RegExp(root === 'assignments' ? `^(?:${uuid}(?:/(?:publish|unpublish|archive|restore))?)?$` : root === 'work' ? `^assignments/${uuid}/(?:draft|submit)$` : '^$a');
+  const read = new RegExp(root === 'assignments' ? `^(?:${uuid}(?:/versions)?)?$` : root === 'work' ? `^(?:assignments(?:/${uuid})?|submissions(?:/${uuid}(?:/grade)?)?)$` : root === 'grading' ? `^submissions(?:/${uuid}(?:/history)?)?$` : `^(?:${uuid})?$`);
+  const write = new RegExp(root === 'assignments' ? `^(?:${uuid}(?:/(?:publish|unpublish|archive|restore))?)?$` : root === 'work' ? `^assignments/${uuid}/(?:draft|submit)$` : root === 'grading' ? `^submissions/${uuid}/(?:draft|release|withdraw)$` : '^$a');
   if (!(request.method === 'GET' ? read : write).test(path)) return Response.json({ detail: 'Halaman tidak tersedia' }, { status: 404 });
   const origin = process.env.APP_ORIGIN;
   const base = process.env.API_BASE_URL;
@@ -47,12 +47,14 @@ export async function assignmentProxy(root: 'assignments' | 'work' | 'assignment
     const upstream = new URL(base);
     if (!['http:', 'https:'].includes(upstream.protocol) || upstream.username || upstream.password || upstream.pathname !== '/' || upstream.search || upstream.hash) throw new Error('Invalid API origin');
     upstream.pathname = '/' + root + (path ? '/' + path : '');
-    const list = root === 'work' ? ['assignments','submissions'].includes(path) : path === '';
+    const list = root === 'work' ? ['assignments','submissions'].includes(path) : root === 'grading' ? path === 'submissions' : path === '';
     for (const key of request.nextUrl.searchParams.keys()) {
       const value = request.nextUrl.searchParams.get(key)!;
       const versionPage = root === 'assignments' && path.endsWith('/versions') && key === 'after' && /^[0-9]{1,3}$/.test(value);
+      const historyPage = root === 'grading' && path.endsWith('/history') && key === 'after' && /^[0-9]{1,3}$/.test(value) && Number(value) <= 300;
+      const stateFilter = root === 'grading' && list && key === 'state' && ['all','ungraded','draft','released','withdrawn','pending'].includes(value);
       const keys = root === 'assignments' || path === 'assignments' ? ['course_id','lesson_id','after'] : ['course_id','assignment_id','after'];
-      if (request.method !== 'GET' || request.nextUrl.searchParams.getAll(key).length !== 1 || (!versionPage && (!list || !keys.includes(key) || !new RegExp(`^${uuid}$`).test(value)))) return Response.json({ detail: 'Parameter tidak valid' }, { status: 400 });
+      if (request.method !== 'GET' || request.nextUrl.searchParams.getAll(key).length !== 1 || (!versionPage && !historyPage && !stateFilter && (!list || !keys.includes(key) || !new RegExp(`^${uuid}$`).test(value)))) return Response.json({ detail: 'Parameter tidak valid' }, { status: 400 });
       upstream.searchParams.set(key, value);
     }
     const result = await fetch(upstream, { method: request.method, headers, body: body as BodyInit | undefined,

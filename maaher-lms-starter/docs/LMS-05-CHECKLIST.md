@@ -3,14 +3,14 @@
 11 November2026 WIB; schema0012, base54543a8. Evidence in HANDOFF/performance.json.
 Latest follow-up: [FIXES-HANDOFF](LMS-05-FIXES-HANDOFF.md), base84dd193.
 Independent4a450d5 review closed F5/F6/F7 Linux in limited synthetic scope;
-F9/F10/F11 author fixes await re-review. F12 remains open.
+Re-review5131f2c closes F9/F11 and F10 with capacity notes. F12 remains open.
 
-Tests below are author evidence. Current fixes runtime5131f2c; owner now reports
-343 PASS/1 capability SKIP/0 deselected and2 browser PASS on Mac. See
-[fixes Mac relay](LMS-05-FIXES-MAC-VALIDATION-20261111.md):3 cases not yet reconciled
-against347 cloud collection. Original implementation snapshot4a450d5 and its
-[earlier Mac relay](LMS-05-MAC-VALIDATION-20261111.md) remain historical.
-Independent re-review and manual real-Auth0 UAT remain pending.
+Tests below mix explicitly labelled author evidence and the independent results
+relayed by the owner. Reviewer full Mac346 PASS/1 SKIP and Linux347 PASS/0 SKIP,
+same347 node IDs, resolve the old344/347 gap: three rollback cases were omitted
+from the earlier author Mac run. See [re-review relay](../reviews/LMS-05-claude-rereview-relay-20261111.md).
+Original implementation4a450d5 and earlier Mac relays remain historical.
+Manual real-Auth0 UAT/full auth parent review remain separate and pending.
 
 | Acceptance | Status |
 |---|---|
@@ -23,7 +23,7 @@ Independent re-review and manual real-Auth0 UAT remain pending.
 | No UPDATE/DELETE grant; owner immutability trigger; no learner execution |SQL/source/browser PASS |
 | Task archive/unpublish history, explicit restore/publish, parent FK preservation |API PASS |
 | Existing rate budgets/body bounds, explicit BFF methods/query/Origin |API/browser PASS |
-| F5 publish/legacy |Independent parent CLOSED/functionally CLOSED; new signed-v2 compatibility regression PASS, re-review pending |
+| F5 publish/legacy |Independent parent CLOSED/functionally CLOSED; signed-v2 compatibility re-review PASS |
 | F5 1500×29KB publish plus concurrent writer |Independent parent CLOSED; author regression904.23ms,8 writes200 |
 | F6 controls/frame/child PID; F7 Linux cap |Independent parent CLOSED; new dense CPU test separated from OS capability |
 | Missing memory capability local WARN vs production503 |Cloud simulated IPC PASS; Mac cap absence reported, original evidence/exclusion needs review |
@@ -35,11 +35,12 @@ Independent re-review and manual real-Auth0 UAT remain pending.
 | Mac Auth0 preflight |Owner reports13 PASS; real login/MFA end-to-end still untested |
 | Real Auth0/manual UAT, Docker image, remote CI, multi-worker |NOT TESTED here; manual real-Auth0 UAT not yet performed per owner |
 | Independent LMS-05 parent review |APPROVED_WITH_NOTES dev/UAT synthetic small–medium only; F5/F6/F7 scoped CLOSED |
-| F9 valid30k /separate Linux assertion /CPU diagnostic |Author Linux PASS; Mac343/1 SKIP/0 deselected reported; exact node IDs/calibration need independent review |
-| F10 real HTTP2/4/8 accounts, tenant isolation, student drafts |Cloud36 author+36 student writes200; Mac normal/draft success reported; re-review PENDING |
-| F11 date overflow/surrogate422, redaction/valid Unicode |Cloud API/browser PASS; reconcile Mac coverage from original report; re-review PENDING |
-| Current Mac count reconciliation |343+1=344 vs347 collected in cloud:3 cases unexplained, not declared failed |
+| F9 valid30k /separate Linux assertion /CPU diagnostic |Independent CLOSED; real CPU262/256/374ms, timeout1007–1012ms; pathological valid content still needs target calibration |
+| F10 real HTTP2/4/8 accounts, tenant isolation, student drafts |Independent CLOSED_WITH_NOTES; no innocent429/503 at2/4/8, saturation at16/20 hostile tenants remains |
+| F11 date overflow/surrogate422, redaction/valid Unicode |Independent CLOSED;12 surrogate positions/four dates422, valid Unicode accepted |
+| Current Mac count reconciliation |RESOLVED: reviewer347 node IDs both platforms; earlier author omitted3 rollback modules |
 | F12 Draft downtime/key retirement/staff GET budget |OPEN operational notes |
 | Full auth parent8941a79..4733526 |PENDING, outside this delta |
 | F3, N2/N3/N4, tenant pause |OPEN/unchanged |
-| Merge/deploy/runner/grading |Not performed; grading LMS-06 |
+| Parser re-review N1/N2/N3 |OPEN calibration/linear queue wait/per-tenant saturation notes; distinct from parent N2/N3 |
+| Merge/deploy/runner |Not performed; LMS-06 grading has its own pending review |

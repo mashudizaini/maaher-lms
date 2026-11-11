@@ -43,6 +43,19 @@ def main():
             db.execute('INSERT INTO users(id,email,password_hash) VALUES(%s,%s,%s)',(uid,email,passwords.hash(password)))
             db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'student')",(uuid4(),payload['tenant'],uid))
             result={'user':str(uid),'email':email,'password':password}
+        elif operation == 'grading-seed':
+            # Test-only trusted owner bridge. API receives only synthetic data.
+            from uuid import UUID
+            tid,user,pupil=(UUID(payload[key]) for key in ('tenant','user','student'))
+            db.execute("UPDATE memberships SET role='teacher' WHERE tenant_id=%s AND user_id=%s",(tid,user))
+            cid,mid,lid,hid,eid=(uuid4() for _ in range(5))
+            db.execute("INSERT INTO courses(id,tenant_id,owner_id,title,state) VALUES(%s,%s,%s,'Kursus penilaian','published')",(cid,tid,user))
+            db.execute('INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s)',(tid,cid,user))
+            db.execute("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,'Modul penilaian',1)",(mid,tid,cid))
+            db.execute("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,position) VALUES(%s,%s,%s,%s,'Pelajaran penilaian','Materi sintetis',1)",(lid,tid,cid,mid))
+            db.execute("INSERT INTO cohorts(id,tenant_id,course_id,title) VALUES(%s,%s,%s,'Cohort penilaian')",(hid,tid,cid))
+            db.execute('INSERT INTO enrollments(id,tenant_id,course_id,cohort_id,student_id) VALUES(%s,%s,%s,%s,%s)',(eid,tid,cid,hid,pupil))
+            result={'course':str(cid),'lesson':str(lid),'enrollment':str(eid)}
         elif operation == 'course-budget':
             # Test-only owner bridge; never part of the API/runtime image.
             assert payload['mode'] in {'exhaust','expire'}

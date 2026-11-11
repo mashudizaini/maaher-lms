@@ -1,5 +1,12 @@
 # LMS-05 review fixes — author handoff
 
+**Latest:** independent re-review5131f2c is reported APPROVED_WITH_NOTES for
+synthetic dev/UAT: F9/F11 CLOSED, F10 CLOSED_WITH_NOTES. Reviewer full Mac346+1 SKIP,
+Linux347 PASS, identical347 node IDs resolve earlier count gap (three omitted
+rollback modules). [Relay](../reviews/LMS-05-claude-rereview-relay-20261111.md)
+records remaining pathological-content/queue saturation notes. The pending/count
+statements below are historical; full auth/UAT/operations remain separate.
+
 11 November 2026 WIB. Branch **feat/LMS-05-assignments-submissions**, base
 **84dd193709f7cb126e655f7f143e16b3577058a1**; reviewed runtime4a450d5, schema remains
 **0012_assignments**. F9/F10 MEDIUM and F11 LOW implemented for re-review. Parent

@@ -32,7 +32,7 @@ def test_seeded_enrollment_upgrade_rollback_guard_and_reupgrade(database,monkeyp
         db.execute('INSERT INTO enrollments(id,tenant_id,course_id,cohort_id,student_id) VALUES(%s,%s,%s,%s,%s)',(eid,tid,cid,hid,uid))
     with pytest.raises(DBAPIError,match='allow_enrollment_data_loss'): command.downgrade(cfg,'0007_course_review')
     with psycopg.connect(url) as db:
-        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0012_assignments'
+        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0013_grading'
         assert db.execute('SELECT status FROM enrollments WHERE id=%s',(eid,)).fetchone()[0]=='active'
     import io
     output=io.StringIO();offline=Config(str(Path(__file__).parents[1]/'alembic.ini'),output_buffer=output)

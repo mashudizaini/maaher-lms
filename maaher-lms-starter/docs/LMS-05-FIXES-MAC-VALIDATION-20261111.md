@@ -1,5 +1,13 @@
 # LMS-05 fixes — hasil Mac yang dilaporkan pemilik
 
+**Pembaruan terbaru:** re-review independen5131f2c telah dilaporkan selesai,
+APPROVED_WITH_NOTES dev/UAT sintetis. Reviewer346 PASS+1 SKIP Mac dan347 PASS
+Linux;347 node ID identik. Selisih3 kasus di bawah RESOLVED: tiga modul rollback
+tidak ikut run author sebelumnya. F9/F11 CLOSED, F10 CLOSED_WITH_NOTES.
+Lihat [relay baru](../reviews/LMS-05-claude-rereview-relay-20261111.md) untuk bukti
+dan kapasitas yang masih terbatas. Isi berikut mempertahankan status historis
+saat ringkasan author diterima; bukan klaim bahwa gap/re-review masih pending.
+
 11 November 2026, Asia/Jakarta. Catatan AUTHOR berdasarkan ringkasan Codex CLI
 yang dikirim pemilik; bukan review independen atau pengujian ulang di Mac.
 Laporan asli `reviews/LMS-05-fixes-mac-validation-20261111.md` belum ada pada

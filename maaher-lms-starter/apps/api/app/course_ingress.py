@@ -7,6 +7,7 @@ from starlette.responses import JSONResponse
 
 from .course_limits import admit_course_write
 from .learning_limits import admit_learning
+from .grading_limits import admit_grading_read
 
 MAX_BODY = 262144
 
@@ -18,18 +19,19 @@ class CourseIngress:
     async def __call__(self, scope, receive, send):
         path = scope.get('path', '')
         mutation = scope['type'] == 'http' and scope['method'] == 'POST' and any(
-            path == root or path.startswith(root + '/') for root in ('/courses', '/cohorts', '/enrollments','/assignments'))
+            path == root or path.startswith(root + '/') for root in ('/courses', '/cohorts', '/enrollments','/assignments','/grading'))
         learning = scope['type']=='http' and scope['method'] in {'GET','POST'} and (path=='/learning/courses' or path.startswith('/learning/courses/') or path=='/work' or path.startswith('/work/'))
-        if not mutation and not learning:
+        grading_read=scope['type']=='http' and scope['method']=='GET' and (path=='/grading' or path.startswith('/grading/'))
+        if not mutation and not learning and not grading_read:
             return await self.app(scope, receive, send)
         try:
-            allowed = await run_in_threadpool(admit_learning if learning else admit_course_write, Request(scope))
+            allowed = await run_in_threadpool(admit_learning if learning else admit_grading_read if grading_read else admit_course_write, Request(scope))
         except HTTPException as error:
             return await self.reject(scope, receive, send, error.status_code, error.detail)
         except DatabaseError:
             return await self.reject(scope, receive, send, 503, 'Layanan penyimpanan sementara tidak tersedia')
         if not allowed:
-            return await self.reject(scope, receive, send, 429, 'Terlalu banyak permintaan belajar. Coba lagi sebentar lagi' if learning else 'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi', {'Retry-After':'60'})
+            return await self.reject(scope, receive, send, 429, 'Terlalu banyak permintaan belajar. Coba lagi sebentar lagi' if learning else 'Terlalu banyak permintaan penilaian. Coba lagi sebentar lagi' if grading_read else 'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi', {'Retry-After':'60'})
         if scope['method']=='GET':
             return await self.app(scope,receive,send)
         body = bytearray()
