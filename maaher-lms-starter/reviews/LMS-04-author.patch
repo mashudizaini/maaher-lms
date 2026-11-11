@@ -1,0 +1,2266 @@
+diff --git a/.github/workflows/lms-auth0.yml b/.github/workflows/lms-auth0.yml
+index 93c57c4..ce05ebe 100644
+--- a/.github/workflows/lms-auth0.yml
++++ b/.github/workflows/lms-auth0.yml
+@@ -2,7 +2,7 @@ name: CI
+ on:
+   pull_request:
+   push:
+-    branches: [main, feat/LMS-01-auth0-development, feat/LMS-02-course-management, feat/LMS-03-enrollment]
++    branches: [main, feat/LMS-01-auth0-development, feat/LMS-02-course-management, feat/LMS-03-enrollment, feat/LMS-04-student-learning]
+ permissions:
+   contents: read
+ 
+@@ -132,6 +132,20 @@ jobs:
+           TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_enrollment_browser_ci
+           TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_enrollment_browser_ci
+         run: python scripts/test-lms01-browser.py --oidc --dev-totp --enrollment
++      - name: Create separate learning browser test database
++        run: |
++          python - <<'PYTEST'
++          import os,psycopg
++          with psycopg.connect(os.environ['TEST_MIGRATION_DATABASE_URL'],autocommit=True) as db:
++              db.execute('CREATE DATABASE maaher_test_learning_browser_ci')
++          PYTEST
++      - name: Learning completion and next-step browser regression
++        env:
++          TEST_MIGRATION_DATABASE_URL: postgresql://postgres@127.0.0.1:5432/maaher_test_learning_browser_ci
++          TEST_DATABASE_URL: postgresql://maaher_api@127.0.0.1:5432/maaher_test_learning_browser_ci
++          TEST_AUTH_DATABASE_URL: postgresql://maaher_auth_login@127.0.0.1:5432/maaher_test_learning_browser_ci
++          TEST_OPERATOR_DATABASE_URL: postgresql://maaher_operator_login@127.0.0.1:5432/maaher_test_learning_browser_ci
++        run: python scripts/test-lms01-browser.py --oidc --dev-totp --learning
+   web:
+     runs-on: ubuntu-latest
+     steps:
+diff --git a/maaher-lms-starter/apps/api/app/course_content.py b/maaher-lms-starter/apps/api/app/course_content.py
+index 5a2231b..3e4d2a2 100644
+--- a/maaher-lms-starter/apps/api/app/course_content.py
++++ b/maaher-lms-starter/apps/api/app/course_content.py
+@@ -4,7 +4,6 @@ import re
+ import unicodedata
+ from urllib.parse import unquote, urlsplit
+ 
+-from markdown_it import MarkdownIt
+ 
+ 
+ def https_resource(value):
+@@ -36,24 +35,7 @@ def https_resource(value):
+     return value
+ 
+ 
+-def validate_markdown(value):
+-    # Tokenize only: never render this parser's HTML. Disabling its default URL
+-    # rejection exposes ALL parsed link destinations to our stricter validator,
+-    # including javascript/mailto/relative targets. Preserve raw destinations so
+-    # IDNA/percent normalization cannot erase hidden Unicode before inspection.
+-    parser = MarkdownIt("commonmark", {"html": False})
+-    parser.validateLink = lambda _: True
+-    parser.normalizeLink = lambda url: url
+-    try:
+-        pending = parser.parse(value)
+-        while pending:
+-            token = pending.pop()
+-            if token.children:
+-                pending.extend(token.children)
+-            if token.type in {"link_open", "image"}:
+-                target = token.attrGet("href" if token.type == "link_open" else "src")
+-                if target is not None:
+-                    https_resource(target)
+-    except RecursionError:
+-        raise ValueError("Struktur Markdown terlalu dalam") from None
+-    return value
++def validate_markdown(value, cache_scope="library"):
++    # API callers supply validated tenant/user scope; no cross-tenant cache keys.
++    from .markdown_service import validate
++    return validate(value, cache_scope)
+diff --git a/maaher-lms-starter/apps/api/app/course_ingress.py b/maaher-lms-starter/apps/api/app/course_ingress.py
+index fee2fde..c8969be 100644
+--- a/maaher-lms-starter/apps/api/app/course_ingress.py
++++ b/maaher-lms-starter/apps/api/app/course_ingress.py
+@@ -6,6 +6,7 @@ from starlette.requests import Request
+ from starlette.responses import JSONResponse
+ 
+ from .course_limits import admit_course_write
++from .learning_limits import admit_learning
+ 
+ MAX_BODY = 262144
+ 
+@@ -18,16 +19,19 @@ class CourseIngress:
+         path = scope.get('path', '')
+         mutation = scope['type'] == 'http' and scope['method'] == 'POST' and any(
+             path == root or path.startswith(root + '/') for root in ('/courses', '/cohorts', '/enrollments'))
+-        if not mutation:
++        learning = scope['type']=='http' and scope['method'] in {'GET','POST'} and (path=='/learning/courses' or path.startswith('/learning/courses/'))
++        if not mutation and not learning:
+             return await self.app(scope, receive, send)
+         try:
+-            allowed = await run_in_threadpool(admit_course_write, Request(scope))
++            allowed = await run_in_threadpool(admit_learning if learning else admit_course_write, Request(scope))
+         except HTTPException as error:
+             return await self.reject(scope, receive, send, error.status_code, error.detail)
+         except DatabaseError:
+             return await self.reject(scope, receive, send, 503, 'Layanan penyimpanan sementara tidak tersedia')
+         if not allowed:
+-            return await self.reject(scope, receive, send, 429, 'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi', {'Retry-After':'60'})
++            return await self.reject(scope, receive, send, 429, 'Terlalu banyak permintaan belajar. Coba lagi sebentar lagi' if learning else 'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi', {'Retry-After':'60'})
++        if scope['method']=='GET':
++            return await self.app(scope,receive,send)
+         body = bytearray()
+         while True:
+             message = await receive()
+diff --git a/maaher-lms-starter/apps/api/app/courses.py b/maaher-lms-starter/apps/api/app/courses.py
+index cbdab52..71c210e 100644
+--- a/maaher-lms-starter/apps/api/app/courses.py
++++ b/maaher-lms-starter/apps/api/app/courses.py
+@@ -9,6 +9,7 @@ from psycopg.errors import CheckViolation, ForeignKeyViolation
+ from .auth import connection, principal, verify_origin
+ from .security import Principal
+ from .course_content import https_resource, validate_markdown
++from .markdown_service import MarkdownComplexity
+ 
+ router = APIRouter(prefix="/courses")
+ 
+@@ -56,11 +57,14 @@ class Lesson(Title, Version):
+ 
+ 
+ 
+-def validate_lesson_content(body):
++def validate_lesson_content(body,actor=None):
+     # Called inside synchronous endpoints, which FastAPI runs in a worker.
+     # CommonMark adversarial input must not block the ASGI event loop.
+     try:
+-        validate_markdown(body.content)
++        if actor is None:validate_markdown(body.content)
++        else:validate_markdown(body.content,f"{actor.tenant_id}:{actor.user_id}")
++    except MarkdownComplexity as error:
++        raise HTTPException(422,str(error)) from None
+     except ValueError:
+         raise HTTPException(422, [{"type":"value_error", "loc":["body","content"],
+             "msg":"Materi hanya boleh memakai tautan HTTPS publik tanpa karakter tersembunyi"}]) from None
+@@ -180,7 +184,7 @@ def publish(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connect
+             cursor.itersize = 20
+             cursor.execute("SELECT content,resources FROM course_lessons WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid))
+             for lesson in cursor:
+-                validate_markdown(lesson["content"])
++                validate_markdown(lesson["content"],f"{actor.tenant_id}:{actor.user_id}")
+                 for resource in lesson["resources"]:
+                     Resource.model_validate(resource)
+     except ValueError:
+@@ -281,7 +285,7 @@ def delete_module(cid: UUID, mid: UUID, body: Version, actor=Depends(manager), d
+ 
+ @router.post("/{cid}/modules/{mid}/lessons", dependencies=[Depends(verify_origin)], status_code=201)
+ def create_lesson(cid: UUID, mid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
+-    validate_lesson_content(body)
++    validate_lesson_content(body,actor)
+     locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid)
+     count = db.execute("SELECT count(*) AS n FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s", (actor.tenant_id, cid, mid)).fetchone()["n"]
+     if count >= 50: raise HTTPException(409, "Batas 50 pelajaran per modul telah tercapai")
+@@ -301,7 +305,7 @@ def lesson_detail(cid: UUID, mid: UUID, lid: UUID, actor=Depends(manager), db=De
+ 
+ @router.post("/{cid}/modules/{mid}/lessons/{lid}", dependencies=[Depends(verify_origin)])
+ def edit_lesson(cid: UUID, mid: UUID, lid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
+-    validate_lesson_content(body)
++    validate_lesson_content(body,actor)
+     locked(db, actor, cid, body.version); draft(db, actor, cid)
+     row = db.execute("UPDATE course_lessons SET title=%s,content=%s,resources=%s WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id",
+         (body.title, body.content, Jsonb([r.model_dump() for r in body.resources]), actor.tenant_id, cid, mid, lid)).fetchone()
+diff --git a/maaher-lms-starter/apps/api/app/learning.py b/maaher-lms-starter/apps/api/app/learning.py
+index a058c22..5686789 100644
+--- a/maaher-lms-starter/apps/api/app/learning.py
++++ b/maaher-lms-starter/apps/api/app/learning.py
+@@ -1,35 +1,99 @@
+-"""Read-only student access, backed by live enrollment/membership/course RLS."""
++"""Published lessons, revision-aware own completion and ordered next steps."""
+ from uuid import UUID
+ from fastapi import APIRouter,Depends,HTTPException,Query
+-from .auth import principal,connection
++from pydantic import Field
++from .auth import principal,connection,verify_origin
+ from .enrollment import page
+-from .courses import course_detail,lesson_detail
++from .courses import Input,audit
+ 
+ router=APIRouter(prefix='/learning/courses')
+ 
+ 
++class Completion(Input): revision:int=Field(ge=1)
++
++
+ def student(actor=Depends(principal)):
+-    if actor.role!='student': raise HTTPException(403,'Halaman ini tersedia untuk akun siswa')
++    if actor.role!='student':raise HTTPException(403,'Halaman ini tersedia untuk akun siswa')
+     return actor
+ 
+ 
++def enrollment(db,actor,cid):
++    row=db.execute("SELECT id FROM enrollments WHERE tenant_id=%s AND course_id=%s AND student_id=%s AND status='active'",
++                   (actor.tenant_id,cid,actor.user_id)).fetchone()
++    if not row:raise HTTPException(404,'Kursus tidak tersedia untuk enrollment Anda')
++    return row['id']
++
++
++def summaries(db,actor,cid,eid):
++    return db.execute("""SELECT l.id,l.module_id,l.title,l.position,l.revision,
++      (p.lesson_revision=l.revision) IS TRUE AS completed,
++      (p.lesson_id IS NOT NULL AND p.lesson_revision<>l.revision) AS needs_review
++      FROM course_lessons l JOIN course_modules m ON m.tenant_id=l.tenant_id AND m.course_id=l.course_id AND m.id=l.module_id
++      LEFT JOIN lesson_progress p ON p.tenant_id=l.tenant_id AND p.course_id=l.course_id AND p.lesson_id=l.id AND p.enrollment_id=%s
++      WHERE l.tenant_id=%s AND l.course_id=%s ORDER BY m.position,m.id,l.position,l.id""",(eid,actor.tenant_id,cid)).fetchall()
++
++
+ @router.get('')
+ def catalog(after:UUID|None=None,limit:int=Query(30,ge=1,le=50),actor=Depends(student),db=Depends(connection,scope='function')):
++    db.execute("SET LOCAL statement_timeout='2s'")
+     rows=db.execute("""SELECT id,title,description,state,version,updated_at FROM courses WHERE tenant_id=%s AND state='published'
+-        AND (id>%s::uuid OR %s::uuid IS NULL) ORDER BY id LIMIT %s""",(actor.tenant_id,after,after,limit+1)).fetchall()
++      AND (id>%s::uuid OR %s::uuid IS NULL) ORDER BY id LIMIT %s""",(actor.tenant_id,after,after,limit+1)).fetchall()
+     return page(rows,limit,'courses')
+ 
+ 
+ @router.get('/{cid}')
+ def outline(cid:UUID,actor=Depends(student),db=Depends(connection,scope='function')):
+-    # Shared explicit projections. RLS grants students only a published course
+-    # with their active enrollment/cohort; no management dependency is bypassed
+-    # on any authoring route. Assignment table itself remains staff-only.
+-    result=course_detail(cid,actor,db)
+-    result.pop('teachers',None)
+-    return result
++    db.execute("SET LOCAL statement_timeout='2s'")
++    eid=enrollment(db,actor,cid)
++    row=db.execute('SELECT id,title,description,state,version FROM courses WHERE tenant_id=%s AND id=%s',(actor.tenant_id,cid)).fetchone()
++    if not row:raise HTTPException(404,'Kursus tidak tersedia')
++    modules=db.execute('SELECT id,title,position FROM course_modules WHERE tenant_id=%s AND course_id=%s ORDER BY position,id',(actor.tenant_id,cid)).fetchall()
++    lessons=summaries(db,actor,cid,eid)
++    grouped={}
++    for lesson in lessons:grouped.setdefault(lesson['module_id'],[]).append(lesson)
++    for module in modules:module['lessons']=grouped.get(module['id'],[])
++    complete=sum(l['completed'] for l in lessons)
++    row.update(modules=modules,progress={'completed':complete,'total':len(lessons)},
++               resume=next(({'id':l['id'],'module_id':l['module_id']} for l in lessons if not l['completed']),None))
++    return row
+ 
+ 
+ @router.get('/{cid}/modules/{mid}/lessons/{lid}')
+ def lesson(cid:UUID,mid:UUID,lid:UUID,actor=Depends(student),db=Depends(connection,scope='function')):
+-    return lesson_detail(cid,mid,lid,actor,db)
++    db.execute("SET LOCAL statement_timeout='2s'")
++    eid=enrollment(db,actor,cid)
++    row=db.execute('SELECT id,title,content,resources,revision FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s',
++                   (actor.tenant_id,cid,mid,lid)).fetchone()
++    if not row:raise HTTPException(404,'Pelajaran tidak tersedia')
++    lessons=summaries(db,actor,cid,eid); index=next(i for i,l in enumerate(lessons) if l['id']==lid)
++    def link(i):return {'id':lessons[i]['id'],'module_id':lessons[i]['module_id'],'title':lessons[i]['title']} if 0<=i<len(lessons) else None
++    row.update(completed=lessons[index]['completed'],needs_review=lessons[index]['needs_review'],previous=link(index-1),next=link(index+1))
++    return row
++
++
++def change_completion(cid,mid,lid,body,actor,db,complete):
++    eid=enrollment(db,actor,cid)
++    row=db.execute('SELECT id,revision FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s',
++                   (actor.tenant_id,cid,mid,lid)).fetchone()
++    if not row:raise HTTPException(404,'Pelajaran tidak tersedia')
++    if row['revision']!=body.revision:raise HTTPException(409,'Materi telah berubah. Muat ulang pelajaran sebelum menandai selesai')
++    if complete:
++        changed=db.execute("""INSERT INTO lesson_progress(tenant_id,course_id,enrollment_id,student_id,lesson_id,lesson_revision)
++          VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(enrollment_id,lesson_id) DO UPDATE SET lesson_revision=excluded.lesson_revision,completed_at=now()
++          WHERE lesson_progress.lesson_revision<>excluded.lesson_revision RETURNING lesson_id""",
++          (actor.tenant_id,cid,eid,actor.user_id,lid,body.revision)).fetchone()
++    else:
++        changed=db.execute('DELETE FROM lesson_progress WHERE tenant_id=%s AND enrollment_id=%s AND lesson_id=%s RETURNING lesson_id',
++                           (actor.tenant_id,eid,lid)).fetchone()
++    if changed:audit(db,actor,'lesson.completed' if complete else 'lesson.uncompleted',lid,'lesson')
++    return {'id':lid,'revision':row['revision'],'completed':complete}
++
++
++@router.post('/{cid}/modules/{mid}/lessons/{lid}/complete',dependencies=[Depends(verify_origin)])
++def complete(cid:UUID,mid:UUID,lid:UUID,body:Completion,actor=Depends(student),db=Depends(connection,scope='function')):
++    return change_completion(cid,mid,lid,body,actor,db,True)
++
++
++@router.post('/{cid}/modules/{mid}/lessons/{lid}/uncomplete',dependencies=[Depends(verify_origin)])
++def uncomplete(cid:UUID,mid:UUID,lid:UUID,body:Completion,actor=Depends(student),db=Depends(connection,scope='function')):
++    return change_completion(cid,mid,lid,body,actor,db,False)
+diff --git a/maaher-lms-starter/apps/api/app/learning_limits.py b/maaher-lms-starter/apps/api/app/learning_limits.py
+new file mode 100644
+index 0000000..53425d4
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/learning_limits.py
+@@ -0,0 +1,18 @@
++"""Independent committed admission: 120 learning requests/minute per member."""
++from fastapi import HTTPException
++from .auth import principal,verify_origin
++from .database import transaction
++
++
++def admit_learning(request):
++    if request.method=='POST':verify_origin(request)
++    with transaction() as db:
++        actor=principal(request,db)
++        if actor.role!='student':raise HTTPException(403,'Halaman ini tersedia untuk akun siswa')
++        row=db.execute("""INSERT INTO learning_request_limits(tenant_id,user_id,attempts,window_start)
++          VALUES(%s,%s,1,now()) ON CONFLICT(tenant_id,user_id) DO UPDATE SET
++          attempts=CASE WHEN learning_request_limits.window_start<=now()-interval '1 minute' THEN 1 ELSE LEAST(learning_request_limits.attempts+1,121) END,
++          window_start=CASE WHEN learning_request_limits.window_start<=now()-interval '1 minute' THEN now() ELSE learning_request_limits.window_start END
++          WHERE learning_request_limits.attempts<121 OR learning_request_limits.window_start<=now()-interval '1 minute'
++          RETURNING attempts""",(actor.tenant_id,actor.user_id)).fetchone()
++        return row is not None and row['attempts']<=120
+diff --git a/maaher-lms-starter/apps/api/app/markdown_parse.py b/maaher-lms-starter/apps/api/app/markdown_parse.py
+new file mode 100644
+index 0000000..19b9dd6
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/markdown_parse.py
+@@ -0,0 +1,25 @@
++"""Trusted CommonMark policy, executed only by the isolated worker."""
++from markdown_it import MarkdownIt
++from .course_content import https_resource
++
++def validate_markdown_raw(value):
++    # Tokenize only: never render this parser's HTML. Disabling its default URL
++    # rejection exposes ALL parsed link destinations to our stricter validator,
++    # including javascript/mailto/relative targets. Preserve raw destinations so
++    # IDNA/percent normalization cannot erase hidden Unicode before inspection.
++    parser = MarkdownIt("commonmark", {"html": False})
++    parser.validateLink = lambda _: True
++    parser.normalizeLink = lambda url: url
++    try:
++        pending = parser.parse(value)
++        while pending:
++            token = pending.pop()
++            if token.children:
++                pending.extend(token.children)
++            if token.type in {"link_open", "image"}:
++                target = token.attrGet("href" if token.type == "link_open" else "src")
++                if target is not None:
++                    https_resource(target)
++    except RecursionError:
++        raise ValueError("Struktur Markdown terlalu dalam") from None
++    return value
+diff --git a/maaher-lms-starter/apps/api/app/markdown_service.py b/maaher-lms-starter/apps/api/app/markdown_service.py
+new file mode 100644
+index 0000000..4d160f8
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/markdown_service.py
+@@ -0,0 +1,84 @@
++"""Single bounded parser process; fail closed on CPU/wall/crash/busy."""
++import atexit
++from collections import OrderedDict
++import hashlib
++import json
++import os
++from pathlib import Path
++import selectors
++import subprocess
++import sys
++import threading
++import time
++
++from fastapi import HTTPException
++
++
++class MarkdownComplexity(ValueError): pass
++
++
++class Parser:
++    def __init__(self):
++        self.lock=threading.Lock();self.cache_lock=threading.Lock();self.cache=OrderedDict();self.process=None
++
++    def close(self):
++        p=self.process;self.process=None
++        if p:
++            if p.poll() is None:
++                p.terminate()
++                try:p.wait(timeout=.3)
++                except subprocess.TimeoutExpired:p.kill();p.wait(timeout=.3)
++            for pipe in (p.stdin,p.stdout):
++                if pipe:pipe.close()
++
++    def start(self):
++        if self.process is None or self.process.poll() is not None:
++            self.close()
++            self.process=subprocess.Popen([sys.executable,'-m','app.markdown_worker'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,
++                stderr=subprocess.DEVNULL,bufsize=0,close_fds=True,
++                env={'PYTHONPATH':str(Path(__file__).resolve().parents[1]),'PYTHONUNBUFFERED':'1','PYTHONUTF8':'1'})
++            os.set_blocking(self.process.stdin.fileno(),False);os.set_blocking(self.process.stdout.fileno(),False)
++
++    def exchange(self,value):
++        self.start();p=self.process
++        payload=json.dumps({'content':value},ensure_ascii=False).encode()+b'\n';offset=0;reply=bytearray();deadline=time.monotonic()+1.5
++        with selectors.DefaultSelector() as ready:
++            ready.register(p.stdin,selectors.EVENT_WRITE);ready.register(p.stdout,selectors.EVENT_READ)
++            while time.monotonic()<deadline:
++                for key,_ in ready.select(max(0,deadline-time.monotonic())):
++                    if key.fileobj is p.stdin:
++                        offset+=os.write(p.stdin.fileno(),payload[offset:])
++                        if offset==len(payload):ready.unregister(p.stdin)
++                    else:
++                        chunk=os.read(p.stdout.fileno(),4096)
++                        if not chunk:raise EOFError()
++                        reply.extend(chunk)
++                        if len(reply)>4096:raise ValueError()
++                        if b'\n' in reply:return json.loads(reply)['result']
++        raise TimeoutError()
++
++    def validate(self,value,cache_scope="library"):
++        if not isinstance(value,str) or len(value)>30000:raise ValueError('Materi terlalu panjang')
++        try:encoded=value.encode('utf8')
++        except UnicodeError:raise ValueError('Encoding materi tidak valid') from None
++        digest=hashlib.sha256(cache_scope.encode()+b"\0"+encoded).digest()
++        with self.cache_lock:
++            if digest in self.cache:self.cache.move_to_end(digest);return value
++        if not self.lock.acquire(blocking=False):
++            raise HTTPException(429,'Validasi materi sedang sibuk. Coba lagi sebentar lagi',headers={'Retry-After':'1'})
++        try:
++            try:result=self.exchange(value)
++            except (OSError,ValueError,EOFError,TimeoutError,KeyError):
++                self.close();raise HTTPException(503,'Validasi materi sementara tidak tersedia. Coba lagi') from None
++            if result=='complexity':raise MarkdownComplexity('Materi terlalu kompleks. Sederhanakan struktur Markdown lalu simpan kembali')
++            if result!='ok':raise ValueError('Tautan materi tidak valid')
++            with self.cache_lock:
++                self.cache[digest]=True
++                while len(self.cache)>128:self.cache.popitem(last=False)
++            return value
++        finally:self.lock.release()
++
++
++parser=Parser()
++atexit.register(parser.close)
++validate=parser.validate
+diff --git a/maaher-lms-starter/apps/api/app/markdown_worker.py b/maaher-lms-starter/apps/api/app/markdown_worker.py
+new file mode 100644
+index 0000000..c52b934
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/markdown_worker.py
+@@ -0,0 +1,36 @@
++"""Trusted parser worker: text data only, no learner program execution."""
++import json
++import resource
++import signal
++import sys
++
++from .markdown_parse import validate_markdown_raw
++
++
++class CpuBudget(BaseException): pass
++
++def expired(*_): raise CpuBudget()
++
++
++def main():
++    # Worker receives no DB/Auth0/encryption credentials. Memory is bounded on
++    # supported POSIX hosts; hard wall timeout is always enforced by the parent.
++    try: resource.setrlimit(resource.RLIMIT_AS,(256*1024*1024,256*1024*1024))
++    except (ValueError,OSError): pass
++    signal.signal(signal.SIGPROF,expired)
++    for line in sys.stdin.buffer:
++        if len(line)>131072: return 1
++        result='invalid'
++        try:
++            value=json.loads(line)['content']
++            if not isinstance(value,str) or len(value)>30000: raise ValueError()
++            signal.setitimer(signal.ITIMER_PROF,.12)
++            validate_markdown_raw(value); result='ok'
++        except CpuBudget: result='complexity'
++        except (ValueError,RecursionError,MemoryError): result='invalid'
++        finally: signal.setitimer(signal.ITIMER_PROF,0)
++        sys.stdout.buffer.write(json.dumps({'result':result}).encode()+b'\n');sys.stdout.buffer.flush()
++    return 0
++
++
++if __name__=='__main__': raise SystemExit(main())
+diff --git a/maaher-lms-starter/apps/api/migrations/learning_progress.sql b/maaher-lms-starter/apps/api/migrations/learning_progress.sql
+new file mode 100644
+index 0000000..0ebee2e
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/learning_progress.sql
+@@ -0,0 +1,76 @@
++ALTER TABLE course_lessons ADD COLUMN revision integer NOT NULL DEFAULT 1 CHECK(revision>0);
++-- statement
++ALTER TABLE course_lessons ADD CONSTRAINT lesson_progress_parent UNIQUE(tenant_id,course_id,id);
++-- statement
++ALTER TABLE enrollments ADD CONSTRAINT enrollment_progress_owner UNIQUE(tenant_id,course_id,id,student_id);
++-- statement
++CREATE FUNCTION lesson_revision_changed() RETURNS trigger LANGUAGE plpgsql SET search_path=pg_catalog,public,pg_temp AS $$
++BEGIN
++ IF OLD.content IS DISTINCT FROM NEW.content OR OLD.resources IS DISTINCT FROM NEW.resources THEN NEW.revision:=OLD.revision+1; END IF;
++ RETURN NEW;
++END $$;
++-- statement
++CREATE TRIGGER lesson_revision_changed BEFORE UPDATE OF content,resources ON course_lessons
++ FOR EACH ROW EXECUTE FUNCTION lesson_revision_changed();
++-- statement
++CREATE TABLE lesson_progress (
++ tenant_id uuid NOT NULL, course_id uuid NOT NULL, enrollment_id uuid NOT NULL, student_id uuid NOT NULL,
++ lesson_id uuid NOT NULL, lesson_revision integer NOT NULL CHECK(lesson_revision>0), completed_at timestamptz NOT NULL DEFAULT now(),
++ PRIMARY KEY(enrollment_id,lesson_id),
++ FOREIGN KEY(tenant_id,course_id,enrollment_id,student_id) REFERENCES enrollments(tenant_id,course_id,id,student_id),
++ FOREIGN KEY(tenant_id,course_id,lesson_id) REFERENCES course_lessons(tenant_id,course_id,id) ON DELETE CASCADE
++);
++-- statement
++CREATE INDEX progress_student_course ON lesson_progress(tenant_id,student_id,course_id);
++-- statement
++ALTER TABLE lesson_progress ENABLE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE lesson_progress FORCE ROW LEVEL SECURITY;
++-- statement
++CREATE POLICY own_progress_read ON lesson_progress FOR SELECT TO maaher_runtime USING(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND student_id=(SELECT (access_context()->>'user')::uuid)
++ AND enrollment_id=ANY((SELECT access_student_enrollments())::uuid[]));
++-- statement
++CREATE POLICY own_progress_insert ON lesson_progress FOR INSERT TO maaher_runtime WITH CHECK(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND student_id=(SELECT (access_context()->>'user')::uuid)
++ AND enrollment_id=ANY((SELECT access_student_enrollments())::uuid[])
++ AND EXISTS(SELECT 1 FROM course_lessons l WHERE l.tenant_id=lesson_progress.tenant_id AND l.course_id=lesson_progress.course_id AND l.id=lesson_progress.lesson_id AND l.revision=lesson_progress.lesson_revision));
++-- statement
++CREATE POLICY own_progress_update ON lesson_progress FOR UPDATE TO maaher_runtime USING(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND student_id=(SELECT (access_context()->>'user')::uuid)
++ AND enrollment_id=ANY((SELECT access_student_enrollments())::uuid[])) WITH CHECK(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND student_id=(SELECT (access_context()->>'user')::uuid)
++ AND enrollment_id=ANY((SELECT access_student_enrollments())::uuid[])
++ AND EXISTS(SELECT 1 FROM course_lessons l WHERE l.tenant_id=lesson_progress.tenant_id AND l.course_id=lesson_progress.course_id AND l.id=lesson_progress.lesson_id AND l.revision=lesson_progress.lesson_revision));
++-- statement
++CREATE POLICY own_progress_delete ON lesson_progress FOR DELETE TO maaher_runtime USING(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND student_id=(SELECT (access_context()->>'user')::uuid)
++ AND enrollment_id=ANY((SELECT access_student_enrollments())::uuid[]));
++-- statement
++REVOKE ALL ON lesson_progress FROM PUBLIC,maaher_auth,maaher_definer,maaher_access_reader;
++-- statement
++GRANT SELECT,INSERT,DELETE ON lesson_progress TO maaher_runtime;
++-- statement
++GRANT UPDATE(lesson_revision,completed_at) ON lesson_progress TO maaher_runtime;
++-- statement
++CREATE TABLE learning_request_limits (
++ tenant_id uuid NOT NULL, user_id uuid NOT NULL, attempts integer NOT NULL CHECK(attempts BETWEEN 1 AND 121),
++ window_start timestamptz NOT NULL DEFAULT now(), PRIMARY KEY(tenant_id,user_id),
++ FOREIGN KEY(tenant_id,user_id) REFERENCES memberships(tenant_id,user_id) ON DELETE CASCADE
++);
++-- statement
++ALTER TABLE learning_request_limits ENABLE ROW LEVEL SECURITY;
++-- statement
++ALTER TABLE learning_request_limits FORCE ROW LEVEL SECURITY;
++-- statement
++CREATE POLICY own_learning_budget ON learning_request_limits TO maaher_runtime USING(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND user_id=(SELECT (access_context()->>'user')::uuid)
++ AND (SELECT access_context()->>'role')='student') WITH CHECK(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND user_id=(SELECT (access_context()->>'user')::uuid)
++ AND (SELECT access_context()->>'role')='student');
++-- statement
++REVOKE ALL ON learning_request_limits FROM PUBLIC,maaher_auth,maaher_access_reader;
++-- statement
++GRANT SELECT,INSERT,UPDATE ON learning_request_limits TO maaher_runtime;
++-- statement
++GRANT DELETE,SELECT(window_start) ON learning_request_limits TO maaher_definer;
+diff --git a/maaher-lms-starter/apps/api/migrations/read_scope.sql b/maaher-lms-starter/apps/api/migrations/read_scope.sql
+new file mode 100644
+index 0000000..216a427
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/read_scope.sql
+@@ -0,0 +1,124 @@
++DO $$ BEGIN
++ IF NOT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='maaher_access_reader') THEN
++   CREATE ROLE maaher_access_reader NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT;
++ END IF;
++ IF EXISTS(SELECT 1 FROM pg_roles WHERE rolname='maaher_access_reader' AND (rolcanlogin OR rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb OR rolreplication OR rolinherit))
++    OR EXISTS(SELECT 1 FROM pg_auth_members WHERE member=(SELECT oid FROM pg_roles WHERE rolname='maaher_access_reader') OR roleid=(SELECT oid FROM pg_roles WHERE rolname='maaher_access_reader'))
++    OR pg_has_role('maaher_runtime','maaher_access_reader','MEMBER') OR pg_has_role('maaher_auth','maaher_access_reader','MEMBER') THEN
++   RAISE EXCEPTION 'unsafe access reader role';
++ END IF;
++END $$;
++-- statement
++GRANT USAGE ON SCHEMA public TO maaher_access_reader;
++-- statement
++GRANT EXECUTE ON FUNCTION runtime_identity() TO maaher_access_reader;
++-- statement
++GRANT SELECT(tenant_id,user_id,role,status) ON memberships TO maaher_access_reader;
++-- statement
++GRANT SELECT(id,status) ON tenants TO maaher_access_reader;
++-- statement
++GRANT SELECT(id,tenant_id,state) ON courses TO maaher_access_reader;
++-- statement
++GRANT SELECT(tenant_id,course_id,user_id) ON courses_teachers TO maaher_access_reader;
++-- statement
++GRANT SELECT(id,tenant_id,course_id,state) ON cohorts TO maaher_access_reader;
++-- statement
++GRANT SELECT(id,tenant_id,course_id,cohort_id,student_id,status) ON enrollments TO maaher_access_reader;
++-- statement
++CREATE POLICY access_reader ON memberships FOR SELECT TO maaher_access_reader USING(true);
++-- statement
++CREATE POLICY access_reader ON tenants FOR SELECT TO maaher_access_reader USING(true);
++-- statement
++CREATE POLICY access_reader ON courses FOR SELECT TO maaher_access_reader USING(true);
++-- statement
++CREATE POLICY access_reader ON courses_teachers FOR SELECT TO maaher_access_reader USING(true);
++-- statement
++CREATE POLICY access_reader ON cohorts FOR SELECT TO maaher_access_reader USING(true);
++-- statement
++CREATE POLICY access_reader ON enrollments FOR SELECT TO maaher_access_reader USING(true);
++-- statement
++CREATE FUNCTION access_context() RETURNS jsonb LANGUAGE plpgsql STABLE SECURITY DEFINER
++SET search_path=pg_catalog,public,pg_temp AS $$
++DECLARE actor uuid; row record;
++BEGIN
++ actor:=public.runtime_identity();
++ IF actor IS NULL THEN RETURN NULL; END IF;
++ SELECT m.tenant_id,m.role INTO row FROM public.memberships m JOIN public.tenants t ON t.id=m.tenant_id
++ WHERE m.user_id=actor AND m.tenant_id::text=current_setting('app.tenant_id',true) AND m.status='active' AND t.status='active';
++ IF NOT FOUND THEN RETURN NULL; END IF;
++ RETURN jsonb_build_object('tenant',row.tenant_id,'user',actor,'role',row.role);
++END $$;
++-- statement
++CREATE FUNCTION access_course_ids() RETURNS uuid[] LANGUAGE plpgsql STABLE SECURITY DEFINER
++SET search_path=pg_catalog,public,pg_temp AS $$
++DECLARE ctx jsonb;
++BEGIN
++ ctx:=public.access_context();
++ IF ctx IS NULL THEN RETURN ARRAY[]::uuid[]; END IF;
++ RETURN ARRAY(SELECT c.id FROM public.courses c WHERE c.tenant_id=(ctx->>'tenant')::uuid AND (
++  ctx->>'role'='admin' OR (ctx->>'role'='teacher' AND c.state<>'archived' AND EXISTS(
++    SELECT 1 FROM public.courses_teachers a WHERE a.tenant_id=c.tenant_id AND a.course_id=c.id AND a.user_id=(ctx->>'user')::uuid))
++  OR (ctx->>'role'='student' AND c.state='published' AND EXISTS(
++    SELECT 1 FROM public.enrollments e JOIN public.cohorts h ON h.tenant_id=e.tenant_id AND h.course_id=e.course_id AND h.id=e.cohort_id
++    WHERE e.tenant_id=c.tenant_id AND e.course_id=c.id AND e.student_id=(ctx->>'user')::uuid AND e.status='active' AND h.state='active'))));
++END $$;
++-- statement
++CREATE FUNCTION access_student_cohorts() RETURNS uuid[] LANGUAGE plpgsql STABLE SECURITY DEFINER
++SET search_path=pg_catalog,public,pg_temp AS $$
++DECLARE ctx jsonb;
++BEGIN
++ ctx:=public.access_context();
++ IF ctx IS NULL OR ctx->>'role'<>'student' THEN RETURN ARRAY[]::uuid[]; END IF;
++ RETURN ARRAY(SELECT e.cohort_id FROM public.enrollments e
++  JOIN public.cohorts h ON h.tenant_id=e.tenant_id AND h.course_id=e.course_id AND h.id=e.cohort_id
++  JOIN public.courses c ON c.tenant_id=e.tenant_id AND c.id=e.course_id
++  WHERE e.tenant_id=(ctx->>'tenant')::uuid AND e.student_id=(ctx->>'user')::uuid
++    AND e.status='active' AND h.state='active' AND c.state='published');
++END $$;
++-- statement
++CREATE FUNCTION access_student_enrollments() RETURNS uuid[] LANGUAGE plpgsql STABLE SECURITY DEFINER
++SET search_path=pg_catalog,public,pg_temp AS $$
++DECLARE ctx jsonb;
++BEGIN
++ ctx:=public.access_context();
++ IF ctx IS NULL OR ctx->>'role'<>'student' THEN RETURN ARRAY[]::uuid[]; END IF;
++ RETURN ARRAY(SELECT e.id FROM public.enrollments e
++  JOIN public.cohorts h ON h.tenant_id=e.tenant_id AND h.course_id=e.course_id AND h.id=e.cohort_id
++  JOIN public.courses c ON c.tenant_id=e.tenant_id AND c.id=e.course_id
++  WHERE e.tenant_id=(ctx->>'tenant')::uuid AND e.student_id=(ctx->>'user')::uuid
++    AND e.status='active' AND h.state='active' AND c.state='published');
++END $$;
++-- statement
++ALTER FUNCTION access_context() OWNER TO maaher_access_reader;
++-- statement
++ALTER FUNCTION access_course_ids() OWNER TO maaher_access_reader;
++-- statement
++ALTER FUNCTION access_student_cohorts() OWNER TO maaher_access_reader;
++-- statement
++ALTER FUNCTION access_student_enrollments() OWNER TO maaher_access_reader;
++-- statement
++REVOKE ALL ON FUNCTION access_context(),access_course_ids(),access_student_cohorts(),access_student_enrollments() FROM PUBLIC;
++-- statement
++GRANT EXECUTE ON FUNCTION access_context(),access_course_ids(),access_student_cohorts(),access_student_enrollments() TO maaher_runtime;
++-- statement
++ALTER POLICY course_read ON courses USING(tenant_id::text=(SELECT access_context()->>'tenant') AND ((SELECT access_context()->>'role')='admin' OR id=ANY((SELECT access_course_ids())::uuid[])));
++-- statement
++ALTER POLICY module_read ON course_modules USING(tenant_id::text=current_setting('app.tenant_id',true) AND course_id=ANY((SELECT access_course_ids())::uuid[]));
++-- statement
++ALTER POLICY lesson_read ON course_lessons USING(tenant_id::text=current_setting('app.tenant_id',true) AND course_id=ANY((SELECT access_course_ids())::uuid[]));
++-- statement
++ALTER POLICY assignment_read ON courses_teachers USING(
++ tenant_id::text=(SELECT access_context()->>'tenant') AND ((SELECT access_context()->>'role')='admin'
++ OR ((SELECT access_context()->>'role')='teacher' AND user_id=(SELECT (access_context()->>'user')::uuid))));
++-- statement
++ALTER POLICY cohort_read ON cohorts USING(tenant_id::text=(SELECT access_context()->>'tenant') AND (
++ (SELECT access_context()->>'role')='admin'
++ OR ((SELECT access_context()->>'role')='teacher' AND state='active' AND course_id=ANY((SELECT access_course_ids())::uuid[]))
++ OR id=ANY((SELECT access_student_cohorts())::uuid[])));
++-- statement
++ALTER POLICY enrollment_read ON enrollments USING(tenant_id::text=(SELECT access_context()->>'tenant') AND (
++ (SELECT access_context()->>'role')='admin'
++ OR ((SELECT access_context()->>'role')='teacher' AND status='active' AND course_id=ANY((SELECT access_course_ids())::uuid[])
++     AND cohort_id IN(SELECT id FROM cohorts WHERE state='active'))
++ OR (student_id=(SELECT (access_context()->>'user')::uuid) AND status='active'
++     AND id=ANY((SELECT access_student_enrollments())::uuid[]))));
+diff --git a/maaher-lms-starter/apps/api/migrations/versions/0009_read_scope.py b/maaher-lms-starter/apps/api/migrations/versions/0009_read_scope.py
+new file mode 100644
+index 0000000..d87695d
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/versions/0009_read_scope.py
+@@ -0,0 +1,44 @@
++"""Statement-scoped validated RLS reads; dedicated non-BYPASS read-only owner."""
++from pathlib import Path
++from alembic import op
++revision='0009_read_scope'
++down_revision='0008_enrollment'
++branch_labels=None
++depends_on=None
++
++
++def old_write(table):
++    return f"course_can_manage(tenant_id,course_id) AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id={table}.tenant_id AND c.id={table}.course_id AND c.state='draft')"
++
++
++def upgrade():
++    for s in (Path(__file__).parent.parent/'read_scope.sql').read_text().split('\n-- statement\n'): op.execute(s)
++    # FOR ALL policies also run on SELECT. Separate them so old expensive write
++    # authorization cannot re-enter each row of a read query via a permissive OR.
++    for table,prefix in [('course_modules','module'),('course_lessons','lesson')]:
++        expr=old_write(table); op.execute(f'DROP POLICY {prefix}_write ON {table}')
++        op.execute(f'CREATE POLICY {prefix}_insert ON {table} FOR INSERT TO maaher_runtime WITH CHECK({expr})')
++        op.execute(f'CREATE POLICY {prefix}_update ON {table} FOR UPDATE TO maaher_runtime USING({expr}) WITH CHECK({expr})')
++        op.execute(f'CREATE POLICY {prefix}_delete ON {table} FOR DELETE TO maaher_runtime USING({expr})')
++
++
++def downgrade():
++    source=(Path(__file__).parent.parent/'enrollment.sql').read_text().split('\n-- statement\n')
++    for s in source:
++        if s.startswith(('ALTER POLICY course_read','ALTER POLICY module_read','ALTER POLICY lesson_read')): op.execute(s)
++    for name,table in [('cohort_read','cohorts'),('enrollment_read','enrollments')]:
++        op.execute(f'DROP POLICY {name} ON {table}')
++        op.execute(next(s for s in source if s.startswith(f'CREATE POLICY {name} ')))
++    original=(Path(__file__).parent.parent/'courses.sql').read_text().split('\n-- statement\n')
++    op.execute(next(s for s in original if s.startswith('CREATE POLICY assignment_read')).replace('CREATE POLICY','ALTER POLICY',1).replace(' FOR SELECT TO maaher_runtime',''))
++    for table,prefix in [('course_modules','module'),('course_lessons','lesson')]:
++        for action in ('insert','update','delete'): op.execute(f'DROP POLICY {prefix}_{action} ON {table}')
++        expr=old_write(table);op.execute(f'CREATE POLICY {prefix}_write ON {table} FOR ALL TO maaher_runtime USING({expr}) WITH CHECK({expr})')
++    for fn in ('access_student_enrollments','access_student_cohorts','access_course_ids','access_context'): op.execute(f'DROP FUNCTION {fn}()')
++    for table in ('memberships','tenants','courses','courses_teachers','cohorts','enrollments'):
++        op.execute(f'DROP POLICY access_reader ON {table}')
++    for table,columns in [('memberships','tenant_id,user_id,role,status'),('tenants','id,status'),('courses','id,tenant_id,state'),('courses_teachers','tenant_id,course_id,user_id'),('cohorts','id,tenant_id,course_id,state'),('enrollments','id,tenant_id,course_id,cohort_id,student_id,status')]:
++        op.execute(f'REVOKE SELECT({columns}) ON {table} FROM maaher_access_reader')
++    op.execute('REVOKE EXECUTE ON FUNCTION runtime_identity() FROM maaher_access_reader')
++
++    op.execute('REVOKE USAGE ON SCHEMA public FROM maaher_access_reader')
+diff --git a/maaher-lms-starter/apps/api/migrations/versions/0010_learning_progress.py b/maaher-lms-starter/apps/api/migrations/versions/0010_learning_progress.py
+new file mode 100644
+index 0000000..c0d28cd
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/migrations/versions/0010_learning_progress.py
+@@ -0,0 +1,31 @@
++"""Revision-aware own lesson completion and bounded learning requests."""
++from pathlib import Path
++from alembic import context,op
++revision='0010_learning_progress'
++down_revision='0009_read_scope'
++branch_labels=None
++depends_on=None
++
++
++def retention():
++    source=(Path(__file__).parent.parent/'auth0_oidc.sql').read_text()
++    statement=next(s for s in source.split('\n-- statement\n') if s.startswith('CREATE OR REPLACE FUNCTION retain_auth_data'))
++    return statement.replace('BEGIN\n',"BEGIN\n    DELETE FROM public.course_write_limits WHERE window_start<now()-interval '1 day';\n",1)
++
++
++def upgrade():
++    for s in (Path(__file__).parent.parent/'learning_progress.sql').read_text().split('\n-- statement\n'):op.execute(s)
++    op.execute(retention().replace('BEGIN\n',"BEGIN\n    DELETE FROM public.learning_request_limits WHERE window_start<now()-interval '1 day';\n",1))
++
++
++def downgrade():
++    # Serialize the check with concurrent completion writes, including offline SQL.
++    op.execute('LOCK TABLE lesson_progress IN ACCESS EXCLUSIVE MODE')
++    if context.get_x_argument(as_dictionary=True).get('allow_progress_data_loss')!='yes':
++        op.execute("DO $$ BEGIN IF EXISTS(SELECT 1 FROM lesson_progress) THEN RAISE EXCEPTION 'Downgrade would delete lesson progress; back up and pass -x allow_progress_data_loss=yes'; END IF; END $$")
++    op.execute(retention())
++    op.execute('DROP TABLE lesson_progress,learning_request_limits')
++    op.execute('DROP TRIGGER lesson_revision_changed ON course_lessons')
++    op.execute('DROP FUNCTION lesson_revision_changed()')
++    op.execute('ALTER TABLE course_lessons DROP CONSTRAINT lesson_progress_parent, DROP COLUMN revision')
++    op.execute('ALTER TABLE enrollments DROP CONSTRAINT enrollment_progress_owner')
+diff --git a/maaher-lms-starter/apps/api/tests/conftest.py b/maaher-lms-starter/apps/api/tests/conftest.py
+index 645b22a..33de501 100644
+--- a/maaher-lms-starter/apps/api/tests/conftest.py
++++ b/maaher-lms-starter/apps/api/tests/conftest.py
+@@ -60,7 +60,7 @@ def database():
+         with pytest.raises(RuntimeError, match='allow_course_data_loss'):
+             command.downgrade(config, "0005_dev_totp")
+         with psycopg.connect(owner_url) as db:
+-            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0008_enrollment'
++            assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0] == '0010_learning_progress'
+             assert db.execute("SELECT content FROM course_lessons WHERE id=%s", (legacy_lesson,)).fetchone()[0] == 'Preserve course content'
+         config.cmd_opts = SimpleNamespace(x=['allow_course_data_loss=yes'])
+         try:
+@@ -117,11 +117,11 @@ def database():
+                           "invitations", "password_resets", "mfa_factors", "auth_events", "auth_mail_outbox",
+                           "mfa_requests", "mfa_enrollments", "auth_rate_buckets", "mfa_operator_audit",
+                           "oidc_identities", "oidc_login_flows", "oidc_sessions",
+-                          "courses", "courses_teachers", "course_modules", "course_lessons", "course_write_limits", "cohorts", "enrollments"):
++                          "courses", "courses_teachers", "course_modules", "course_lessons", "course_write_limits", "cohorts", "enrollments", "lesson_progress", "learning_request_limits"):
+                 assert db.execute("SELECT to_regclass(%s)", (f"public.{table}",)).fetchone()[0] is None
+         command.upgrade(config, "head")
+         with psycopg.connect(owner_url) as db:
+-            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0008_enrollment"
++            assert db.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "0010_learning_progress"
+         yield owner_url
+     finally:
+         if previous is None:
+diff --git a/maaher-lms-starter/apps/api/tests/test_enrollment_migration.py b/maaher-lms-starter/apps/api/tests/test_enrollment_migration.py
+index deb0c59..b9bedfb 100644
+--- a/maaher-lms-starter/apps/api/tests/test_enrollment_migration.py
++++ b/maaher-lms-starter/apps/api/tests/test_enrollment_migration.py
+@@ -32,7 +32,7 @@ def test_seeded_enrollment_upgrade_rollback_guard_and_reupgrade(database,monkeyp
+         db.execute('INSERT INTO enrollments(id,tenant_id,course_id,cohort_id,student_id) VALUES(%s,%s,%s,%s,%s)',(eid,tid,cid,hid,uid))
+     with pytest.raises(DBAPIError,match='allow_enrollment_data_loss'): command.downgrade(cfg,'0007_course_review')
+     with psycopg.connect(url) as db:
+-        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0008_enrollment'
++        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0010_learning_progress'
+         assert db.execute('SELECT status FROM enrollments WHERE id=%s',(eid,)).fetchone()[0]=='active'
+     import io
+     output=io.StringIO();offline=Config(str(Path(__file__).parents[1]/'alembic.ini'),output_buffer=output)
+diff --git a/maaher-lms-starter/apps/api/tests/test_learning.py b/maaher-lms-starter/apps/api/tests/test_learning.py
+new file mode 100644
+index 0000000..2602312
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_learning.py
+@@ -0,0 +1,147 @@
++"""Own revision-aware lesson completion, navigation and authorization."""
++from concurrent.futures import ThreadPoolExecutor
++from uuid import uuid4
++import os
++import psycopg
++import pytest
++from fastapi.testclient import TestClient
++from app.main import app
++from app.database import transaction,session_context,tenant_context,user_context
++from app.security import token_digest
++from test_enrollment import enrollment_case,enroll,action
++from test_courses import author,detail,filled,write
++
++
++def path(c,suffix=''):
++    return f'/learning/courses/{c["author"][2]}/modules/{c["mid"]}/lessons/{c["lid"]}'+suffix
++
++
++def mark(c,revision=1,complete=True,client=None,**extra):
++    identity,headers,_=c['author']
++    return (client or c['student']).post(path(c,'/complete' if complete else '/uncomplete'),json={'revision':revision,**extra},headers=headers)
++
++
++def outline(c):return c['student'].get('/learning/courses/'+c['author'][2],headers=c['author'][1])
++
++
++@pytest.fixture
++def learning(enrollment_case):
++    c=enrollment_case
++    response=enroll(c);assert response.status_code==201;c['eid']=response.json()['id']
++    assert write(c['author'],'/publish').status_code==200
++    return c
++
++
++def test_completion_idempotent_reload_and_uncomplete(learning):
++    c=learning
++    assert outline(c).json()['progress']=={'completed':0,'total':1}
++    assert mark(c).status_code==200
++    assert mark(c).status_code==200
++    assert outline(c).json()['progress']=={'completed':1,'total':1}
++    with TestClient(app,base_url='https://testserver') as restarted:
++        restarted.cookies.update(c['student'].cookies)
++        assert restarted.get(path(c),headers=c['author'][1]).json()['completed'] is True
++    assert mark(c,complete=False).status_code==200
++    assert mark(c,complete=False).status_code==200
++    assert outline(c).json()['progress']['completed']==0
++    with psycopg.connect(c['author'][0][1]) as db:
++        assert db.execute("SELECT count(*) FROM audit_events WHERE target_id=%s AND action='lesson.completed'",(c['lid'],)).fetchone()[0]==1
++        assert db.execute("SELECT count(*) FROM audit_events WHERE target_id=%s AND action='lesson.uncompleted'",(c['lid'],)).fetchone()[0]==1
++
++
++def test_material_revision_requires_fresh_completion(learning):
++    c=learning;assert mark(c).status_code==200
++    response=write(c['author'],f'/modules/{c["mid"]}/lessons/{c["lid"]}',title='Updated',content='New material')
++    assert response.status_code==200
++    assert mark(c).status_code==404
++    assert write(c['author'],'/publish').status_code==200
++    l=c['student'].get(path(c),headers=c['author'][1]).json()
++    assert l['revision']==2 and not l['completed'] and l['needs_review']
++    assert mark(c).status_code==409
++    assert mark(c,2).status_code==200
++    assert outline(c).json()['progress']['completed']==1
++
++
++def test_title_only_change_and_explicit_reactivation_keep_current_completion(learning):
++    c=learning;mark(c)
++    write(c['author'],f'/modules/{c["mid"]}/lessons/{c["lid"]}',title='New title',content='# Halo\n\n```python\nprint("Halo")\n```',resources=[{'label':'Dokumentasi Python','url':'https://docs.python.org/3/'}])
++    write(c['author'],'/publish')
++    assert outline(c).json()['progress']['completed']==1
++    assert action(c,c['eid'],'revoke').status_code==200
++    assert mark(c).status_code==404
++    assert outline(c).status_code==404
++    assert action(c,c['eid'],'reactivate',2,cohort_id=c['hid']).status_code==200
++    assert outline(c).json()['progress']['completed']==1
++
++
++def test_ordered_previous_next_and_resume_across_modules(learning):
++    c=learning;mid=write(c['author'],'/modules',title='Next module').json()['id']
++    lid=write(c['author'],f'/modules/{mid}/lessons',title='Next lesson',content='Continue').json()['id']
++    write(c['author'],'/publish')
++    first=c['student'].get(path(c),headers=c['author'][1]).json()
++    assert first['previous'] is None and first['next']['id']==lid
++    mark(c)
++    assert outline(c).json()['resume']=={'id':lid,'module_id':mid}
++    next_path=f'/learning/courses/{c["author"][2]}/modules/{mid}/lessons/{lid}'
++    last=c['student'].get(next_path,headers=c['author'][1]).json()
++    assert last['previous']['id']==c['lid'] and last['next'] is None
++
++
++def test_foreign_and_extra_authority_input_denied(learning):
++    c=learning
++    assert mark(c,tenant_id=str(c['author'][0][4])).status_code==422
++    assert mark(c,student_id=str(uuid4())).status_code==422
++    assert mark(c,0).status_code==422
++    assert mark(c,client=c['author'][0][0]).status_code==403
++    headers={**c['author'][1],'x-tenant-id':str(c['author'][0][4])}
++    assert c['student'].post(path(c,'/complete'),json={'revision':1},headers=headers).status_code==403
++    with TestClient(app,base_url='https://testserver') as anon:
++        assert anon.post(path(c,'/complete'),json={'revision':1},headers=c['author'][1]).status_code==401
++    assert mark(c).status_code==200
++
++
++def test_student_sql_cannot_access_other_students_progress(learning):
++    c=learning;identity,headers,cid=c['author'];mark(c)
++    with transaction() as db:
++        session_context(db,token_digest(c['student'].cookies['maaher_session']));tenant_context(db,identity[3])
++        assert len(db.execute('SELECT lesson_id FROM lesson_progress').fetchall())==1
++        user_context(db,identity[2]);tenant_context(db,identity[4])
++        assert db.execute('SELECT lesson_id FROM lesson_progress').fetchall()==[]
++    with transaction() as db:
++        session_context(db,token_digest(identity[0].cookies['maaher_session']));tenant_context(db,identity[3])
++        assert db.execute('SELECT lesson_id FROM lesson_progress').fetchall()==[]
++    with transaction() as db:
++        tenant_context(db,identity[3]);user_context(db,c['uid'])
++        assert db.execute('SELECT lesson_id FROM lesson_progress').fetchall()==[]
++
++
++def test_concurrent_complete_is_idempotent(learning):
++    c=learning
++    def save(_):
++        with TestClient(app,base_url='https://testserver') as client:
++            client.cookies.update(c['student'].cookies);return mark(c,client=client).status_code
++    with ThreadPoolExecutor(max_workers=2) as pool:assert list(pool.map(save,range(2)))==[200,200]
++    with psycopg.connect(c['author'][0][1]) as db:
++        assert db.execute('SELECT count(*) FROM lesson_progress WHERE enrollment_id=%s',(c['eid'],)).fetchone()[0]==1
++
++
++def test_learning_budget_and_missing_origin(learning):
++    c=learning;identity,headers,cid=c['author']
++    assert c['student'].post(path(c,'/complete'),json={'revision':1},headers={'x-tenant-id':str(identity[3])}).status_code==403
++    outline(c)
++    with psycopg.connect(identity[1]) as db:db.execute('UPDATE learning_request_limits SET attempts=120,window_start=now() WHERE tenant_id=%s AND user_id=%s',(identity[3],c['uid']))
++    limited=outline(c);assert limited.status_code==429 and limited.headers['retry-after']=='60'
++
++
++def test_sql_revision_and_cross_owner_completion_constraints(learning):
++    c=learning;identity,headers,cid=c['author']
++    with pytest.raises(psycopg.errors.InsufficientPrivilege),transaction() as db:
++        session_context(db,token_digest(c['student'].cookies['maaher_session']));tenant_context(db,identity[3])
++        db.execute('INSERT INTO lesson_progress(tenant_id,course_id,enrollment_id,student_id,lesson_id,lesson_revision) VALUES(%s,%s,%s,%s,%s,999)',(identity[3],cid,c['eid'],c['uid'],c['lid']))
++    with pytest.raises(psycopg.errors.InsufficientPrivilege),transaction() as db:
++        session_context(db,token_digest(c['student'].cookies['maaher_session']));tenant_context(db,identity[3])
++        db.execute('INSERT INTO lesson_progress(tenant_id,course_id,enrollment_id,student_id,lesson_id,lesson_revision) VALUES(%s,%s,%s,%s,%s,1)',(identity[3],cid,c['eid'],identity[2],c['lid']))
++    with psycopg.connect(identity[1]) as db:
++        db.execute('UPDATE course_lessons SET content=%s WHERE id=%s',('Owner SQL change',c['lid']))
++        assert db.execute('SELECT revision FROM course_lessons WHERE id=%s',(c['lid'],)).fetchone()[0]==2
++    assert mark(c).status_code==409
+diff --git a/maaher-lms-starter/apps/api/tests/test_learning_migration.py b/maaher-lms-starter/apps/api/tests/test_learning_migration.py
+new file mode 100644
+index 0000000..3bad672
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_learning_migration.py
+@@ -0,0 +1,47 @@
++"""Seeded progress upgrade and locked destructive downgrade guard."""
++from pathlib import Path
++from uuid import uuid4
++from urllib.parse import urlsplit,urlunsplit
++from types import SimpleNamespace
++import os,io
++import psycopg
++from psycopg import sql
++import pytest
++from alembic import command
++from alembic.config import Config
++from sqlalchemy.exc import DBAPIError
++
++
++def test_progress_upgrade_guard_downgrade_and_revision_preservation(database,monkeypatch):
++    url=urlsplit(os.environ['TEST_MIGRATION_DATABASE_URL']);name='maaher_test_lms04_migration_'+uuid4().hex[:12]
++    with psycopg.connect(urlunsplit(url._replace(path='/postgres')),autocommit=True) as db:db.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(name)))
++    url=urlunsplit(url._replace(path='/'+name));monkeypatch.setenv('MIGRATION_DATABASE_URL',url)
++    cfg=Config(str(Path(__file__).parents[1]/'alembic.ini'));command.upgrade(cfg,'0008_enrollment')
++    uid,tid,cid,hid,eid,mid,lid=(uuid4() for _ in range(7))
++    with psycopg.connect(url) as db:
++        db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'preserve-learning-hash')",(uid,f'{uid}@example.invalid'))
++        db.execute("INSERT INTO tenants(id,slug,name) VALUES(%s,%s,'Learning fixture')",(tid,str(tid)))
++        db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'student')",(uuid4(),tid,uid))
++        db.execute("INSERT INTO courses(id,tenant_id,owner_id,title,state) VALUES(%s,%s,%s,'Preserve course','published')",(cid,tid,uid))
++        db.execute("INSERT INTO cohorts(id,tenant_id,course_id,title) VALUES(%s,%s,%s,'Preserve cohort')",(hid,tid,cid))
++        db.execute('INSERT INTO enrollments(id,tenant_id,course_id,cohort_id,student_id) VALUES(%s,%s,%s,%s,%s)',(eid,tid,cid,hid,uid))
++        db.execute("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,'Module',1)",(mid,tid,cid))
++        db.execute("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,position) VALUES(%s,%s,%s,%s,'Lesson','Preserve material',1)",(lid,tid,cid,mid))
++    command.upgrade(cfg,'head')
++    with psycopg.connect(url) as db:
++        assert db.execute('SELECT content,revision FROM course_lessons WHERE id=%s',(lid,)).fetchone()==('Preserve material',1)
++        db.execute('INSERT INTO lesson_progress(tenant_id,course_id,enrollment_id,student_id,lesson_id,lesson_revision) VALUES(%s,%s,%s,%s,%s,1)',(tid,cid,eid,uid,lid))
++    with pytest.raises(DBAPIError,match='allow_progress_data_loss'):command.downgrade(cfg,'0008_enrollment')
++    with psycopg.connect(url) as db:
++        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0010_learning_progress'
++        assert db.execute('SELECT count(*) FROM lesson_progress').fetchone()[0]==1
++    output=io.StringIO();offline=Config(str(Path(__file__).parents[1]/'alembic.ini'),output_buffer=output)
++    command.downgrade(offline,'0010_learning_progress:0009_read_scope',sql=True)
++    assert output.getvalue().index('LOCK TABLE')<output.getvalue().index('RAISE EXCEPTION')
++    cfg.cmd_opts=SimpleNamespace(x=['allow_progress_data_loss=yes']);command.downgrade(cfg,'0008_enrollment')
++    with psycopg.connect(url) as db:
++        assert db.execute('SELECT content FROM course_lessons WHERE id=%s',(lid,)).fetchone()[0]=='Preserve material'
++        assert db.execute('SELECT status FROM enrollments WHERE id=%s',(eid,)).fetchone()[0]=='active'
++        assert db.execute("SELECT password_hash FROM users WHERE id=%s",(uid,)).fetchone()[0]=='preserve-learning-hash'
++    command.upgrade(cfg,'head')
++    with psycopg.connect(url) as db:assert db.execute('SELECT count(*) FROM lesson_progress').fetchone()[0]==0
+diff --git a/maaher-lms-starter/apps/api/tests/test_learning_performance.py b/maaher-lms-starter/apps/api/tests/test_learning_performance.py
+new file mode 100644
+index 0000000..4377a58
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_learning_performance.py
+@@ -0,0 +1,96 @@
++"""Reproducible F1 SQL baseline/current + current HTTP at the documented caps."""
++import json
++from pathlib import Path
++import time
++from uuid import uuid4
++import psycopg
++import pytest
++from app.database import transaction,session_context,tenant_context,user_context
++from app.security import token_digest
++from test_courses import author,write
++from test_enrollment import enrollment_case,enroll
++
++
++def set_read_policies(owner,legacy):
++    with psycopg.connect(owner) as db:
++        if legacy:
++            for s in (Path(__file__).parents[1]/'migrations/enrollment.sql').read_text().split('\n-- statement\n'):
++                if s.startswith(('ALTER POLICY course_read','ALTER POLICY module_read','ALTER POLICY lesson_read')):db.execute(s)
++            for table,prefix in [('course_modules','module'),('course_lessons','lesson')]:
++                expr=f"course_can_manage(tenant_id,course_id) AND EXISTS(SELECT 1 FROM courses c WHERE c.tenant_id={table}.tenant_id AND c.id={table}.course_id AND c.state='draft')"
++                db.execute(f'CREATE POLICY {prefix}_legacy_perf ON {table} FOR ALL TO maaher_runtime USING({expr}) WITH CHECK({expr})')
++        else:
++            for s in (Path(__file__).parents[1]/'migrations/read_scope.sql').read_text().split('\n-- statement\n'):
++                if s.startswith(('ALTER POLICY course_read','ALTER POLICY module_read','ALTER POLICY lesson_read')):db.execute(s)
++            for table,prefix in [('course_modules','module'),('course_lessons','lesson')]:db.execute(f'DROP POLICY IF EXISTS {prefix}_legacy_perf ON {table}')
++
++
++def test_rls_caps_benchmark_and_statement_initplans(enrollment_case,tmp_path):
++    c=enrollment_case;identity,headers,cid=c['author'];assert enroll(c).status_code==201;write(c['author'],'/publish')
++    small=uuid4(); data={'courses':[],'modules':[],'lessons':[]}
++    with psycopg.connect(identity[1]) as db:
++        # Replace only this fixture's single lesson with the documented 30x50 cap.
++        db.execute('DELETE FROM course_lessons WHERE tenant_id=%s AND course_id=%s',(identity[3],cid))
++        db.execute('DELETE FROM course_modules WHERE tenant_id=%s AND course_id=%s',(identity[3],cid))
++        for course,count in [(cid,1500),(small,100)]:
++            if course!=cid:db.execute("INSERT INTO courses(id,tenant_id,owner_id,title,state) VALUES(%s,%s,%s,'Small benchmark','published')",(course,identity[3],identity[2]))
++            for n in range((count+49)//50):
++                mid=uuid4();data['modules'].append((mid,identity[3],course,'Module',n+1))
++                for pos in range(min(50,count-n*50)):data['lessons'].append((uuid4(),identity[3],course,mid,'Lesson','Valid content',pos+1))
++        for _ in range(449):
++            course,mid=uuid4(),uuid4();data['courses'].append((course,identity[3],identity[2],'Catalog benchmark','published'))
++            data['modules'].append((mid,identity[3],course,'Module',1));data['lessons'].append((uuid4(),identity[3],course,mid,'Lesson','Valid content',1))
++        with db.cursor() as cur:
++            cur.executemany('INSERT INTO courses(id,tenant_id,owner_id,title,state) VALUES(%s,%s,%s,%s,%s)',data['courses'])
++            cur.executemany('INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,%s,%s)',data['modules'])
++            cur.executemany('INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,position) VALUES(%s,%s,%s,%s,%s,%s,%s)',data['lessons'])
++        hid=uuid4();db.execute("INSERT INTO cohorts(id,tenant_id,course_id,title) VALUES(%s,%s,%s,'Small')",(hid,identity[3],small))
++        db.execute('INSERT INTO enrollments(id,tenant_id,course_id,cohort_id,student_id) VALUES(%s,%s,%s,%s,%s)',(uuid4(),identity[3],small,hid,c['uid']))
++        db.execute('ANALYZE courses');db.execute('ANALYZE course_lessons');db.execute('ANALYZE enrollments')
++    metrics={}
++    queries=[('student_100',c['student'],small),('student_1500',c['student'],cid),('admin_1500',identity[0],cid),('catalog_451',c['student'],None)]
++    try:
++        for mode in ('legacy','current'):
++            set_read_policies(identity[1],mode=='legacy')
++            for name,client,course in queries:
++                with transaction() as db:
++                    session_context(db,token_digest(client.cookies['maaher_session']));tenant_context(db,identity[3]);db.execute("SET LOCAL statement_timeout='60s'")
++                    start=time.perf_counter()
++                    rows=db.execute('SELECT id,title,module_id,position FROM course_lessons WHERE tenant_id=%s AND course_id=%s ORDER BY position,id',(identity[3],course)).fetchall() if course else db.execute("SELECT id,title FROM courses WHERE tenant_id=%s AND state='published' ORDER BY id LIMIT 31",(identity[3],)).fetchall()
++                    metrics[mode+'_'+name+'_ms']=round((time.perf_counter()-start)*1000,2)
++                    assert len(rows)==(100 if course==small else 1500 if course else 2)
++        with transaction() as db:
++            session_context(db,token_digest(c['student'].cookies['maaher_session']));tenant_context(db,identity[3])
++            plan=db.execute('EXPLAIN (ANALYZE,FORMAT JSON,VERBOSE) SELECT id FROM course_lessons WHERE tenant_id=%s AND course_id=%s',(identity[3],cid)).fetchone()['QUERY PLAN']
++            serialized=json.dumps(plan)
++            assert 'InitPlan' in serialized and 'course_student_access' not in serialized and 'course_can_manage' not in serialized
++        start=time.perf_counter();response=c['student'].get('/learning/courses/'+str(cid),headers=headers)
++        metrics['current_http_1500_ms']=round((time.perf_counter()-start)*1000,2)
++        assert response.status_code==200,response.text
++        assert response.json()['progress']['total']==1500
++        assert metrics['current_http_1500_ms']<2000
++        assert metrics['current_student_1500_ms']<metrics['legacy_student_1500_ms']/3
++    finally:set_read_policies(identity[1],False)
++    report=tmp_path/'rls-performance.json';report.write_text(json.dumps(metrics,indent=2))
++    print('LMS04_RLS_BENCHMARK '+json.dumps(metrics,sort_keys=True))
++
++
++def test_scope_revalidates_same_connection_after_membership_revocation(enrollment_case):
++    c=enrollment_case;identity,headers,cid=c['author'];enroll(c);write(c['author'],'/publish')
++    with transaction() as db:
++        session_context(db,token_digest(c['student'].cookies['maaher_session']));tenant_context(db,identity[3])
++        db.execute('PREPARE visible_courses AS SELECT id FROM courses')
++        assert len(db.execute('EXECUTE visible_courses').fetchall())==1
++        with psycopg.connect(identity[1]) as owner:owner.execute("UPDATE memberships SET status='revoked' WHERE tenant_id=%s AND user_id=%s",(identity[3],c['uid']))
++        assert db.execute('EXECUTE visible_courses').fetchall()==[]
++
++
++def test_reader_role_is_non_bypass_read_only_and_not_assumable(enrollment_case):
++    c=enrollment_case;identity=c['author'][0]
++    with psycopg.connect(identity[1]) as db:
++        flags=db.execute("SELECT rolsuper,rolcanlogin,rolbypassrls,rolcreaterole,rolinherit FROM pg_roles WHERE rolname='maaher_access_reader'").fetchone();assert not any(flags)
++        for table in ('users','sessions','mfa_factors','lesson_progress'):
++            assert not db.execute("SELECT has_table_privilege('maaher_access_reader',%s,'SELECT')",(table,)).fetchone()[0]
++        for table in ('memberships','tenants','courses','courses_teachers','cohorts','enrollments'):
++            assert not db.execute("SELECT has_table_privilege('maaher_access_reader',%s,'UPDATE')",(table,)).fetchone()[0]
++    with pytest.raises(psycopg.errors.InsufficientPrivilege),transaction() as db:db.execute('SET ROLE maaher_access_reader')
+diff --git a/maaher-lms-starter/apps/api/tests/test_markdown_process.py b/maaher-lms-starter/apps/api/tests/test_markdown_process.py
+new file mode 100644
+index 0000000..92ba726
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_markdown_process.py
+@@ -0,0 +1,122 @@
++"""Real CPU work in a bounded child, no Event-based isolation claim."""
++from concurrent.futures import ThreadPoolExecutor
++import os
++import time
++import pytest
++from fastapi import HTTPException
++from app.markdown_service import Parser,MarkdownComplexity
++from test_enrollment import enrollment_case
++from test_courses import author
++
++
++def test_cpu_budget_and_child_process_separation():
++    parser=Parser()
++    try:
++        assert parser.validate('# Trusted parser')=='# Trusted parser'
++        assert parser.process.pid!=os.getpid()
++        start=time.monotonic()
++        with pytest.raises(MarkdownComplexity):parser.validate('['*30000)
++        assert time.monotonic()-start<1.5
++        assert parser.validate('[valid](https://example.org)')
++    finally:parser.close()
++
++
++def test_busy_is_bounded_and_does_not_queue_unlimited_cpu():
++    parser=Parser()
++    try:
++        parser.validate('Warm up')
++        with ThreadPoolExecutor(max_workers=8) as pool:
++            def parse(i):
++                try:parser.validate('['*(29990+i));return 200
++                except MarkdownComplexity:return 422
++                except HTTPException as e:return e.status_code
++            statuses=list(pool.map(parse,range(8)))
++        assert 422 in statuses and 429 in statuses and set(statuses)<={422,429}
++    finally:parser.close()
++
++
++def test_child_crash_restarts_without_weakening_policy():
++    parser=Parser()
++    try:
++        parser.validate('First');parser.process.kill();parser.process.wait()
++        assert parser.validate('Second')=='Second'
++        with pytest.raises(ValueError):parser.validate('[bad](javascript:alert(1))')
++    finally:parser.close()
++
++
++def test_actual_http_cpu_pressure_with_original_account_budget(enrollment_case):
++    import json, socket, subprocess, sys
++    from pathlib import Path
++    import httpx
++    from test_courses import write
++    c=enrollment_case;identity,headers,cid=c['author']
++    port_probe=socket.socket();port_probe.bind(('127.0.0.1',0));port=port_probe.getsockname()[1];port_probe.close()
++    env=os.environ.copy();env['PYTHONPATH']=str(Path(__file__).parents[1])
++    process=subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(port),'--no-access-log','--log-level','error'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
++    stats={}
++    try:
++        with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=6) as client:
++            deadline=time.monotonic()+15
++            while True:
++                try:
++                    if client.get('/healthz').status_code==200:break
++                except httpx.TransportError:pass
++                assert time.monotonic()<deadline and process.poll() is None
++                time.sleep(.03)
++            def health():
++                start=time.perf_counter();assert client.get('/healthz').status_code==200;return (time.perf_counter()-start)*1000
++            def p95(values):return round(sorted(values)[int((len(values)-1)*.95)],2)
++            stats['baseline_p95_ms']=p95([health() for _ in range(20)])
++            version=identity[0].get('/courses/'+cid,headers=headers).json()['version']
++            auth={**headers,'cookie':'maaher_session='+identity[0].cookies['maaher_session']}
++            target=f'/courses/{cid}/modules/{c["mid"]}/lessons/{c["lid"]}'
++            for concurrency,repeats in ((2,4),(8,4),(1,8)):
++                def save(i):
++                    codes=[]
++                    for repeat in range(repeats):
++                        response=client.post(target,headers=auth,json={'version':version,'title':'CPU policy probe','content':'['*(29980+i)+str(repeat)})
++                        codes.append(response.status_code)
++                    return codes
++                with ThreadPoolExecutor(max_workers=concurrency) as pool:
++                    pending=[pool.submit(save,i) for i in range(concurrency)];samples=[]
++                    while any(not f.done() for f in pending):samples.append(health())
++                    codes=[code for f in pending for code in f.result()]
++                stats[f'load_{concurrency}_p95_ms']=p95(samples)
++                stats[f'load_{concurrency}_samples']=len(samples)
++                stats[f'load_{concurrency}_statuses']={str(code):codes.count(code) for code in set(codes)}
++                assert set(codes)<={422,429} and 422 in codes
++                # Fixed headroom for shared CI hosts, still below the reported
++                # 513ms/8 writers; exact numbers are recorded, not generalized.
++                assert stats[f'load_{concurrency}_p95_ms']<max(100,stats['baseline_p95_ms']*8+25)
++            import psycopg
++            with psycopg.connect(identity[1]) as owner:
++                budget=owner.execute('SELECT attempts FROM course_write_limits WHERE tenant_id=%s AND user_id=%s',(identity[3],identity[2])).fetchone()[0]
++            assert budget<=60
++            stats['actual_account_budget_attempts']=budget
++            print('LMS04_CPU_HTTP_BENCHMARK '+json.dumps(stats,sort_keys=True))
++    finally:
++        process.terminate()
++        try:process.wait(timeout=5)
++        except subprocess.TimeoutExpired:process.kill();process.wait(timeout=2)
++
++
++def test_worker_timeout_and_invalid_unicode_fail_closed(monkeypatch):
++    parser=Parser()
++    try:
++        with pytest.raises(ValueError):parser.validate('\ud800')
++        monkeypatch.setattr(parser,'exchange',lambda _:(_ for _ in ()).throw(TimeoutError()))
++        with pytest.raises(HTTPException) as error:parser.validate('Unvalidated content')
++        assert error.value.status_code==503 and not parser.cache
++    finally:parser.close()
++
++
++def test_valid_digest_cache_is_scoped_per_validated_actor(monkeypatch):
++    parser=Parser();seen=[]
++    monkeypatch.setattr(parser,'exchange',lambda content:seen.append(content) or 'ok')
++    try:
++        parser.validate('Same content','tenant-A:user-A')
++        parser.validate('Same content','tenant-A:user-A')
++        parser.validate('Same content','tenant-B:user-A')
++        parser.validate('Same content','tenant-A:user-B')
++        assert len(seen)==3 and len(parser.cache)==3
++    finally:parser.close()
+diff --git a/maaher-lms-starter/apps/api/tests/test_review_regressions.py b/maaher-lms-starter/apps/api/tests/test_review_regressions.py
+index 6ee77b0..1b96e5c 100644
+--- a/maaher-lms-starter/apps/api/tests/test_review_regressions.py
++++ b/maaher-lms-starter/apps/api/tests/test_review_regressions.py
+@@ -127,11 +127,11 @@ def test_m6_definers_are_nonlogin_nonsuperuser_minimum_privilege(identity):
+                     WHERE a.grantee=0 AND a.privilege_type='EXECUTE') AS public_execute
+              FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_roles r ON r.oid=p.proowner
+              WHERE n.nspname='public' AND p.prosecdef""").fetchall()
+-        assert len(rows) == 14
++        assert len(rows) == 18
+         assert {row['proname'] for row in rows} == {'resolve_session','tenant_admin','list_members','change_member',
+-            'reset_password','accept_invitation','authorize_mfa_request','retain_auth_data','runtime_identity','course_member_role','course_assignment_guard','course_student_access','enrollment_lock_student','enrollment_guard'}
++            'reset_password','accept_invitation','authorize_mfa_request','retain_auth_data','runtime_identity','course_member_role','course_assignment_guard','course_student_access','enrollment_lock_student','enrollment_guard','access_context','access_course_ids','access_student_cohorts','access_student_enrollments'}
+         for row in rows:
+-            assert row['rolname']=='maaher_definer'
++            assert row['rolname']==('maaher_access_reader' if row['proname'].startswith('access_') else 'maaher_definer')
+             assert not any(row[k] for k in ('rolsuper','rolcanlogin','rolcreaterole','public_execute'))
+             assert 'search_path=pg_catalog,public,pg_temp' in [v.replace(' ','') for v in row['proconfig']]
+         assert not db.execute("SELECT has_table_privilege('maaher_definer','sessions','INSERT') AS ok").fetchone()['ok']
+diff --git a/maaher-lms-starter/apps/web/app/api/enrollment/[[...path]]/route.ts b/maaher-lms-starter/apps/web/app/api/enrollment/[[...path]]/route.ts
+index 9ff676c..7f7c291 100644
+--- a/maaher-lms-starter/apps/web/app/api/enrollment/[[...path]]/route.ts
++++ b/maaher-lms-starter/apps/web/app/api/enrollment/[[...path]]/route.ts
+@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
+ export const dynamic = 'force-dynamic';
+ const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
+ const read = new RegExp(`^(?:cohorts|enrollments|learning/courses(?:/${uuid}(?:/modules/${uuid}/lessons/${uuid})?)?)$`);
+-const write = new RegExp(`^(?:cohorts(?:/${uuid}(?:/(?:archive|restore))?)?|enrollments(?:/${uuid}/(?:move|revoke|reactivate))?)$`);
++const write = new RegExp(`^(?:learning/courses/${uuid}/modules/${uuid}/lessons/${uuid}/(?:complete|uncomplete)|cohorts(?:/${uuid}(?:/(?:archive|restore))?)?|enrollments(?:/${uuid}/(?:move|revoke|reactivate))?)$`);
+ 
+ async function proxy(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
+   const path = (await context.params).path?.join('/') ?? '';
+diff --git a/maaher-lms-starter/apps/web/app/globals.css b/maaher-lms-starter/apps/web/app/globals.css
+index db498db..bdbb15a 100644
+--- a/maaher-lms-starter/apps/web/app/globals.css
++++ b/maaher-lms-starter/apps/web/app/globals.css
+@@ -53,3 +53,7 @@ th, td { padding: .4rem; text-align: left; border-bottom: 1px solid #888; overfl
+ .home-cards > a { border: 1px solid #dce3ed; border-radius: .8rem; padding: 1.5rem; color: #173c64; background: white; text-decoration: none; }
+ .home-cards > a:hover { border-color: #2863a3; }
+ @media(max-width: 740px) { .studio-grid, .home-cards { grid-template-columns: 1fr; } .studio-header { display: block; } .studio-panel { padding: 1rem; } }
++#course-progress { width: 100%; height: 1rem; accent-color: #176540; }
++.learning-actions { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: 1.25rem; }
++.learning-success { border-left: 3px solid #176540; padding-left: .8rem; color: #176540; }
++.learning-notice { background: #fff2d9; padding: .8rem; border-radius: .4rem; }
+diff --git a/maaher-lms-starter/apps/web/app/learn/page.tsx b/maaher-lms-starter/apps/web/app/learn/page.tsx
+index 246710f..c7c3ff0 100644
+--- a/maaher-lms-starter/apps/web/app/learn/page.tsx
++++ b/maaher-lms-starter/apps/web/app/learn/page.tsx
+@@ -1,37 +1,121 @@
+ 'use client';
+-import { useEffect,useState } from 'react';
+-import { api,ApiError,Membership } from '../components/lms-client';
++import { useEffect, useState } from 'react';
++import { api, ApiError, Membership } from '../components/lms-client';
+ import LessonContent from '../components/lesson-content';
+-type Course = { id:string;title:string;description:string };
+-type Module = { id:string;title:string;lessons:{id:string;title:string}[] };
+-type Outline = Course & {modules:Module[]};
+-type Lesson = {id:string;title:string;content:string;resources:{label:string;url:string}[]};
++
++type Course = { id: string; title: string; description: string };
++type Step = { id: string; module_id: string; title?: string };
++type Summary = { id: string; title: string; revision: number; completed: boolean; needs_review: boolean };
++type Module = { id: string; title: string; lessons: Summary[] };
++type Outline = Course & { modules: Module[]; progress: { completed: number; total: number }; resume: Step | null };
++type Lesson = Summary & { content: string; resources: { label: string; url: string }[]; previous: Step | null; next: Step | null };
++const base = '/api/enrollment/learning/courses';
++
+ export default function Learn() {
+-  const [members,setMembers]=useState<Membership[]>([]); const [tenant,setTenant]=useState('');
+-  const [courses,setCourses]=useState<Course[]>([]);const [next,setNext]=useState<string|null>(null);
+-  const [outline,setOutline]=useState<Outline|null>(null);const [lesson,setLesson]=useState<Lesson|null>(null);
+-  const [busy,setBusy]=useState(false);const [message,setMessage]=useState('Memuat organisasi…');
+-  async function run(work:()=>Promise<void>) {
+-    setBusy(true);setMessage('');
+-    try { await work(); } catch(error) {
+-      if (error instanceof ApiError && [401,403,404].includes(error.status)) {setLesson(null);setOutline(null);setCourses([]);}
++  const [members, setMembers] = useState<Membership[]>([]);
++  const [tenant, setTenant] = useState('');
++  const [courses, setCourses] = useState<Course[]>([]);
++  const [next, setNext] = useState<string | null>(null);
++  const [outline, setOutline] = useState<Outline | null>(null);
++  const [lesson, setLesson] = useState<Lesson | null>(null);
++  const [moduleId, setModuleId] = useState('');
++  const [busy, setBusy] = useState(false);
++  const [message, setMessage] = useState('Memuat organisasi…');
++
++  async function run(work: () => Promise<void>) {
++    setBusy(true); setMessage('');
++    try { await work(); } catch (error) {
++      if (error instanceof ApiError && [401, 403, 404].includes(error.status)) {
++        setLesson(null); setOutline(null); setCourses([]);
++      }
+       setMessage(error instanceof Error ? error.message : 'Layanan sementara tidak tersedia');
+-    } finally {setBusy(false);}
++    } finally { setBusy(false); }
+   }
+-  async function load(tid:string,after?:string) {
+-    const result=await api('/api/enrollment/learning/courses'+(after?'?after='+after:''),tid);
+-    setCourses(current=>after?[...current,...result.courses]:result.courses);setNext(result.next_cursor);
+-    if (!after) {setOutline(null);setLesson(null);}
++
++  async function load(tid: string, after?: string) {
++    const result = await api(base + (after ? '?after=' + after : ''), tid);
++    setCourses(current => after ? [...current, ...result.courses] : result.courses);
++    setNext(result.next_cursor);
++    if (!after) { setOutline(null); setLesson(null); }
+     setMessage(result.courses.length ? 'Pilih kursus untuk membuka materi.' : 'Belum ada kursus terbit dengan enrollment aktif. Hubungi admin organisasi Anda.');
+   }
+-  useEffect(()=>{void run(async()=>{
+-    const rows:Membership[]=await api('/api/auth/memberships');const students=rows.filter(row=>row.role==='student');setMembers(students);
+-    if(students.length){setTenant(students[0].tenant_id);await load(students[0].tenant_id);}else setMessage('Akun ini belum memiliki keanggotaan siswa aktif.');
+-  });},[]);
+-  return <main className="courses-page"><header className="studio-header"><div><p className="eyebrow">MAAHER LMS / BELAJAR</p><h1>Kursus saya</h1><p>Materi coding untuk langkah belajar Anda.</p></div><nav><a href="/">Beranda</a><a href="/auth">Akun &amp; keluar</a></nav></header>
+-    <div className="studio-toolbar"><label htmlFor="learning-tenant">Organisasi</label><select id="learning-tenant" value={tenant} disabled={busy} onChange={event=>{const tid=event.target.value;setTenant(tid);setCourses([]);setOutline(null);setLesson(null);void run(()=>load(tid));}}>{!members.length&&<option value="">Pilih organisasi</option>}{members.map(m=><option key={m.tenant_id} value={m.tenant_id}>{m.name}</option>)}</select><button disabled={busy||!tenant} onClick={()=>void run(()=>load(tenant))}>Muat ulang kursus</button></div>
+-    <p className="studio-status" role="status" aria-live="polite">{busy?'Memuat…':message}</p>
+-    <div className="studio-grid"><aside className="studio-panel"><h2>Daftar kursus</h2><ul className="course-list">{courses.map(c=><li key={c.id}><button className="course-card" disabled={busy} onClick={()=>void run(async()=>{setLesson(null);setOutline(await api('/api/enrollment/learning/courses/'+c.id,tenant));setMessage('Pilih pelajaran.');})}><strong>{c.title}</strong><span>{c.description}</span></button></li>)}</ul>{next&&<button disabled={busy} onClick={()=>void run(()=>load(tenant,next))}>Muat kursus berikutnya</button>}</aside>
+-      <section className="studio-workspace" aria-label="Materi kursus">{outline&&<><section className="studio-panel"><h2>{outline.title}</h2>{outline.modules.map(m=><section key={m.id}><h3>{m.title}</h3><ol>{m.lessons.map(l=><li key={l.id}><button disabled={busy} onClick={()=>void run(async()=>{setLesson(await api(`/api/enrollment/learning/courses/${outline.id}/modules/${m.id}/lessons/${l.id}`,tenant));setMessage('Pelajaran siap dibaca.');})}>{l.title}</button></li>)}</ol></section>)}</section>{lesson&&<article className="studio-panel lesson-preview" aria-label="Materi pelajaran"><h2>{lesson.title}</h2><LessonContent content={lesson.content} resources={lesson.resources}/></article>}</>}</section>
+-    </div></main>;
++
++  async function openCourse(cid: string) {
++    setLesson(null); setModuleId('');
++    setOutline(await api(base + '/' + cid, tenant));
++    setMessage('Pilih pelajaran atau lanjutkan yang belum selesai.');
++  }
++
++  async function openLesson(cid: string, step: Step) {
++    setLesson(await api(`${base}/${cid}/modules/${step.module_id}/lessons/${step.id}`, tenant));
++    setModuleId(step.module_id); setMessage('Pelajaran siap dibaca.');
++  }
++
++  async function complete(advance = false) {
++    if (!outline || !lesson) return;
++    const wasComplete = lesson.completed;
++    await api(`${base}/${outline.id}/modules/${moduleId}/lessons/${lesson.id}/${wasComplete && !advance ? 'uncomplete' : 'complete'}`,
++      tenant, { revision: lesson.revision });
++    const fresh: Outline = await api(base + '/' + outline.id, tenant);
++    setOutline(fresh);
++    const step = advance && lesson.next ? lesson.next : { id: lesson.id, module_id: moduleId };
++    await openLesson(outline.id, step);
++    setMessage(wasComplete && !advance ? 'Pelajaran ditandai belum selesai.' : 'Pelajaran ditandai selesai.');
++  }
++
++  useEffect(() => { void run(async () => {
++    const rows: Membership[] = await api('/api/auth/memberships');
++    const students = rows.filter(row => row.role === 'student'); setMembers(students);
++    const requested = new URL(window.location.href).searchParams.get('tenant');
++    const selected = students.find(row => row.tenant_id === requested) ?? students[0];
++    if (selected) { setTenant(selected.tenant_id); await load(selected.tenant_id); }
++    else setMessage('Akun ini belum memiliki keanggotaan siswa aktif.');
++  }); }, []);
++
++  return <main className="courses-page">
++    <header className="studio-header"><div><p className="eyebrow">MAAHER LMS / BELAJAR</p><h1>Kursus saya</h1><p>Belajar bertahap, simpan kemajuan, dan lanjutkan langkah berikutnya.</p></div>
++      <nav><a href="/">Beranda</a><a href="/auth">Akun &amp; keluar</a></nav></header>
++    <div className="studio-toolbar">
++      <label htmlFor="learning-tenant">Organisasi</label>
++      <select id="learning-tenant" value={tenant} disabled={busy} onChange={event => {
++        const tid = event.target.value; setTenant(tid); setCourses([]); setOutline(null); setLesson(null); void run(() => load(tid));
++      }}>{!members.length && <option value="">Pilih organisasi</option>}{members.map(m => <option key={m.tenant_id} value={m.tenant_id}>{m.name}</option>)}</select>
++      <button disabled={busy || !tenant} onClick={() => void run(() => load(tenant))}>Muat ulang kursus</button>
++    </div>
++    <p className="studio-status" role="status" aria-live="polite">{busy ? 'Memuat…' : message}</p>
++    <div className="studio-grid">
++      <aside className="studio-panel"><h2>Daftar kursus</h2>
++        <ul className="course-list">{courses.map(c => <li key={c.id}><button className={'course-card' + (outline?.id === c.id ? ' selected' : '')} disabled={busy} onClick={() => void run(() => openCourse(c.id))}>
++          <strong>{c.title}</strong><span>{c.description}</span></button></li>)}</ul>
++        {next && <button disabled={busy} onClick={() => void run(() => load(tenant, next))}>Muat kursus berikutnya</button>}
++      </aside>
++      <section className="studio-workspace" aria-label="Materi kursus">{outline && <>
++        <section className="studio-panel"><h2>{outline.title}</h2>
++          <label htmlFor="course-progress">Progres kursus</label>
++          <progress id="course-progress" value={outline.progress.completed} max={Math.max(1, outline.progress.total)} />
++          <p>{outline.progress.completed} dari {outline.progress.total} pelajaran selesai</p>
++          {outline.resume ? <button disabled={busy} onClick={() => void run(() => openLesson(outline.id, outline.resume!))}>Lanjutkan belajar</button>
++            : outline.progress.total > 0 && <p className="learning-success">Semua pelajaran pada revisi ini selesai. Anda dapat membacanya kembali.</p>}
++          {outline.modules.map(m => <section key={m.id}><h3>{m.title}</h3><ol>{m.lessons.map(l => <li key={l.id}>
++            <button aria-current={lesson?.id === l.id ? 'step' : undefined} disabled={busy} onClick={() => void run(() => openLesson(outline.id, { id: l.id, module_id: m.id }))}>
++              {l.completed && <span aria-hidden="true">✓ </span>}{l.title}</button>
++            {l.needs_review && <span className="muted"> · Materi diperbarui</span>}
++          </li>)}</ol></section>)}
++        </section>
++        {lesson && <article className="studio-panel lesson-preview" aria-label="Materi pelajaran"><p className="eyebrow">{lesson.completed ? 'SELESAI' : 'SEDANG DIPELAJARI'}</p><h2>{lesson.title}</h2>
++          {lesson.needs_review && <p className="learning-notice">Materi telah diperbarui. Baca kembali lalu tandai selesai untuk menyimpan kemajuan pada revisi ini.</p>}
++          <LessonContent content={lesson.content} resources={lesson.resources} />
++          <div className="learning-actions">
++            <button disabled={busy} onClick={() => void run(() => complete())}>{lesson.completed ? 'Tandai belum selesai' : 'Tandai selesai'}</button>
++            {!lesson.completed && lesson.next && <button disabled={busy} onClick={() => void run(() => complete(true))}>Selesai &amp; lanjutkan</button>}
++            <button disabled={busy} onClick={() => void run(() => openLesson(outline.id, { id: lesson.id, module_id: moduleId }))}>Muat ulang pelajaran</button>
++          </div>
++          <nav className="learning-actions" aria-label="Navigasi pelajaran">
++            <button disabled={busy || !lesson.previous} onClick={() => lesson.previous && void run(() => openLesson(outline.id, lesson.previous!))}>← Pelajaran sebelumnya</button>
++            <button disabled={busy || !lesson.next} onClick={() => lesson.next && void run(() => openLesson(outline.id, lesson.next!))}>Pelajaran berikutnya →</button>
++          </nav>
++        </article>}
++      </>}</section>
++    </div>
++  </main>;
+ }
+diff --git a/maaher-lms-starter/apps/web/tests/learning.spec.ts b/maaher-lms-starter/apps/web/tests/learning.spec.ts
+new file mode 100644
+index 0000000..d596549
+--- /dev/null
++++ b/maaher-lms-starter/apps/web/tests/learning.spec.ts
+@@ -0,0 +1,71 @@
++import { execFileSync } from 'node:child_process';
++import { test, expect } from '@playwright/test';
++function fixture(operation: string, body = {}) {
++  return JSON.parse(execFileSync(process.env.LMS_TEST_PYTHON!, [`${process.env.LMS_TEST_ROOT}/scripts/lms01-browser-fixtures.py`, operation], { input: JSON.stringify(body), encoding: 'utf8' }));
++}
++
++test('student completion persists; next steps work; edited material invalidates completion; revoke stops writes', async ({ page, context, browser }) => {
++  const staff = fixture('oidc-seed'); const pupil = fixture('student-seed', { tenant: staff.tenant });
++  await page.route('https://browser-tests.us.auth0.com/authorize*', async route => {
++    const url = new URL(route.request().url()); const state = url.searchParams.get('state')!;
++    const callback = new URL(url.searchParams.get('redirect_uri')!); callback.searchParams.set('state', state); callback.searchParams.set('code', state);
++    await route.fulfill({ status: 302, headers: { location: callback.toString() } });
++  });
++  await page.goto('/auth'); await page.getByRole('button', { name: 'Masuk dengan Auth0', exact: true }).click();
++  await expect(page.getByRole('status')).toContainText('Berhasil masuk melalui Auth0');
++  await page.getByRole('button', { name: 'Gunakan organisasi', exact: true }).click();
++  const headers = { origin: process.env.APP_ORIGIN!, 'x-tenant-id': staff.tenant };
++  const created = await context.request.post('/api/courses', { headers, data: { title: 'Belajar bertahap' } }); expect(created.status()).toBe(201);
++  const cid = (await created.json()).id;
++  const mod = await context.request.post(`/api/courses/${cid}/modules`, { headers, data: { title: 'Modul pertama', version: 1 } }); expect(mod.status()).toBe(201);
++  const mid = (await mod.json()).id;
++  const lesson1 = await context.request.post(`/api/courses/${cid}/modules/${mid}/lessons`, { headers, data: { title: 'Langkah pertama', content: 'Materi pertama', version: 2 } }); expect(lesson1.status()).toBe(201);
++  const first = (await lesson1.json()).id;
++  const lesson2 = await context.request.post(`/api/courses/${cid}/modules/${mid}/lessons`, { headers, data: { title: 'Langkah kedua', content: 'Materi kedua', version: 3 } }); expect(lesson2.status()).toBe(201);
++  const second = (await lesson2.json()).id;
++  expect((await context.request.post(`/api/courses/${cid}/publish`, { headers, data: { version: 4 } })).status()).toBe(200);
++  const cohort = await context.request.post('/api/enrollment/cohorts', { headers, data: { course_id: cid, title: 'Kelompok belajar' } }); expect(cohort.status()).toBe(201);
++  const enrolled = await context.request.post('/api/enrollment/enrollments', { headers, data: { course_id: cid, cohort_id: (await cohort.json()).id, student_id: pupil.user } }); expect(enrolled.status()).toBe(201);
++  const eid = (await enrolled.json()).id;
++  const studentContext = await browser.newContext(); const student = await studentContext.newPage();
++  try {
++    await student.goto(process.env.APP_ORIGIN! + '/auth'); await student.getByLabel('Email', { exact: true }).fill(pupil.email);
++    await student.getByLabel('Kata sandi', { exact: true }).fill(pupil.password); await student.getByRole('button', { name: 'Masuk', exact: true }).click();
++    await expect(student.getByRole('status')).toContainText('Berhasil masuk'); await student.getByRole('button', { name: 'Gunakan organisasi', exact: true }).click();
++    await student.getByRole('link', { name: 'Kursus saya', exact: true }).click(); await student.getByRole('button', { name: 'Belajar bertahap', exact: true }).click();
++    await expect(student.getByText('0 dari 2 pelajaran selesai', { exact: true })).toBeVisible();
++    await student.getByRole('button', { name: 'Lanjutkan belajar', exact: true }).click();
++    await expect(student.getByRole('article', { name: 'Materi pelajaran' })).toContainText('Materi pertama');
++    await expect(student.getByRole('button', { name: '← Pelajaran sebelumnya', exact: true })).toBeDisabled();
++    await student.getByRole('button', { name: 'Selesai & lanjutkan', exact: true }).click();
++    await expect(student.getByText('1 dari 2 pelajaran selesai', { exact: true })).toBeVisible();
++    await expect(student.getByRole('article', { name: 'Materi pelajaran' })).toContainText('Materi kedua');
++    await student.getByRole('button', { name: 'Tandai selesai', exact: true }).click();
++    await expect(student.getByText('2 dari 2 pelajaran selesai', { exact: true })).toBeVisible();
++    await expect(student.getByRole('progressbar', { name: 'Progres kursus', exact: true })).toHaveAttribute('value', '2');
++    await student.reload(); await student.getByRole('button', { name: 'Belajar bertahap', exact: true }).click();
++    await expect(student.getByText('2 dari 2 pelajaran selesai', { exact: true })).toBeVisible();
++    await student.getByRole('button', { name: 'Langkah pertama', exact: true }).click();
++    await student.getByRole('button', { name: 'Tandai belum selesai', exact: true }).click();
++    await expect(student.getByText('1 dari 2 pelajaran selesai', { exact: true })).toBeVisible();
++    const version = (await (await context.request.get('/api/courses/' + cid, { headers })).json()).version;
++    const edit = await context.request.post(`/api/courses/${cid}/modules/${mid}/lessons/${second}`, { headers, data: { title: 'Langkah kedua', content: 'Materi kedua diperbarui', version } }); expect(edit.status()).toBe(200);
++    expect((await context.request.post(`/api/courses/${cid}/publish`, { headers, data: { version: (await edit.json()).version } })).status()).toBe(200);
++    await student.getByRole('button', { name: 'Muat ulang kursus', exact: true }).click(); await student.getByRole('button', { name: 'Belajar bertahap', exact: true }).click();
++    await expect(student.getByText('0 dari 2 pelajaran selesai', { exact: true })).toBeVisible(); await student.getByRole('button', { name: 'Langkah kedua', exact: true }).click();
++    await expect(student.getByRole('article', { name: 'Materi pelajaran' })).toContainText('Materi telah diperbarui');
++    await student.getByRole('button', { name: 'Tandai selesai', exact: true }).click(); await expect(student.getByText('1 dari 2 pelajaran selesai', { exact: true })).toBeVisible();
++    expect((await context.request.post(`/api/enrollment/enrollments/${eid}/revoke`, { headers, data: { version: 1 } })).status()).toBe(200);
++    await student.getByRole('button', { name: 'Tandai belum selesai', exact: true }).click(); await expect(student.getByRole('status')).toContainText('Kursus tidak tersedia');
++    await expect(student.getByRole('article', { name: 'Materi pelajaran' })).toHaveCount(0);
++    const denied = await studentContext.request.post(process.env.APP_ORIGIN! + `/api/enrollment/learning/courses/${cid}/modules/${mid}/lessons/${first}/complete`, { headers: { origin: process.env.APP_ORIGIN!, 'x-tenant-id': staff.tenant }, data: { revision: 1 } }); expect(denied.status()).toBe(404);
++  } finally { await studentContext.close(); }
++});
++
++test('completion BFF accepts only explicit mutations and validates Origin/query', async ({ request }) => {
++  const id = '00000000-0000-0000-0000-000000000001'; const path = `/api/enrollment/learning/courses/${id}/modules/${id}/lessons/${id}`;
++  expect((await request.get(path + '/complete')).status()).toBe(404);
++  expect((await request.post(path + '/complete', { data: { revision: 1 } })).status()).toBe(403);
++  expect((await request.post(path + '/complete?tenant_id=' + id, { headers: { origin: process.env.APP_ORIGIN! }, data: { revision: 1 } })).status()).toBe(400);
++  expect((await request.post(path + '/delete', { headers: { origin: process.env.APP_ORIGIN! }, data: {} })).status()).toBe(404);
++});
+diff --git a/maaher-lms-starter/docs/ARCHITECTURE.md b/maaher-lms-starter/docs/ARCHITECTURE.md
+index 7ddeeb4..0863a21 100644
+--- a/maaher-lms-starter/docs/ARCHITECTURE.md
++++ b/maaher-lms-starter/docs/ARCHITECTURE.md
+@@ -38,8 +38,11 @@ Contract permission, RLS, version/publish, safe Markdown server dan
+ rollback dijelaskan pada [ADR-006](adr/006-course-authoring.md). Kelanjutan development LMS-03 menambah 0008 untuk cohort/enrollment dan SELECT
+ materi siswa yang enrollment-nya aktif pada course published. Kontrak lifecycle,
+ lock order, grants dan rollback ada pada [ADR-007](adr/007-enrollment-access.md).
+-LMS-03 development belum UAT Mac atau mendapat review independen. Belum ada
+-completion/progress, runner atau upload service pada kelanjutan ini.
++LMS-03 kini mempunyai laporan validasi Mac sintetis dan review source110c9be
++berisi F1/F2 MEDIUM. Kelanjutan development LMS-04 memperbaiki scope RLS dan
++isolasi parser, menambah completion per revisi/next-step pada0010; lihat
++[ADR-008](adr/008-learning-progress-and-bounded-work.md). Review independen
++delta baru dan UAT Mac masih pending; belum ada runner/upload service.
+ Pemilik menyetujui Auth0/OIDC untuk admin/operator pada 10 November 2026.
+ Implementasi development tahap 1 dan batas produksinya dijelaskan pada
+ [ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada
+diff --git a/maaher-lms-starter/docs/LMS-03-CHECKLIST.md b/maaher-lms-starter/docs/LMS-03-CHECKLIST.md
+index 845baea..182628d 100644
+--- a/maaher-lms-starter/docs/LMS-03-CHECKLIST.md
++++ b/maaher-lms-starter/docs/LMS-03-CHECKLIST.md
+@@ -1,5 +1,12 @@
+ # LMS-03 — checklist development
+ 
++**Update review 11 November:** pemilik menyampaikan review110c9be dengan dua
++MEDIUM F1 (RLS per row) dan F2 (CPU parser), bukan approval. Verdict formal tidak
++disebut. Lihat [relay author](../reviews/LMS-03-review-relay-20261111.md).
++Pemilik mengizinkan LMS-04; perbaikannya berada pada branch terpisah dan tetap
++menunggu re-review. Pernyataan pending review di snapshot lama di bawah adalah
++sebelum laporan ini. Auth parent full review tetap terbuka.
++
+ Source runtime **110c9be**, base fe54142; branch feat/LMS-03-enrollment.
+ Head schema 0008_enrollment.
+ Validasi final: **272 API, 12 scripts, 16 Action, 13 browser**, 0 skip,
+diff --git a/maaher-lms-starter/docs/LMS-03-HANDOFF.md b/maaher-lms-starter/docs/LMS-03-HANDOFF.md
+index bcb3d6f..7120c7e 100644
+--- a/maaher-lms-starter/docs/LMS-03-HANDOFF.md
++++ b/maaher-lms-starter/docs/LMS-03-HANDOFF.md
+@@ -1,5 +1,12 @@
+ # LMS-03 — cohort dan enrollment siap review development
+ 
++**Update review 11 November:** pemilik menyampaikan review110c9be dengan dua
++MEDIUM F1 (RLS per row) dan F2 (CPU parser), bukan approval. Verdict formal tidak
++disebut. Lihat [relay author](../reviews/LMS-03-review-relay-20261111.md).
++Pemilik mengizinkan LMS-04; perbaikannya berada pada branch terpisah dan tetap
++menunggu re-review. Pernyataan pending review di snapshot lama di bawah adalah
++sebelum laporan ini. Auth parent full review tetap terbuka.
++
+ **Pembaruan validasi Mac, 11 November:** pemilik melaporkan source **110c9be**
+ aktif, backup/upgrade 0008 selesai, API/web dibangun ulang, alur dua sesi
+ cohort→enroll→read→move→revoke→reactivate lulus, dan archive/restore cohort maupun
+diff --git a/maaher-lms-starter/docs/LMS-04-CHECKLIST.md b/maaher-lms-starter/docs/LMS-04-CHECKLIST.md
+new file mode 100644
+index 0000000..34b36d0
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-04-CHECKLIST.md
+@@ -0,0 +1,25 @@
++# LMS-04 — checklist development
++
++Base4870287; head schema0010_learning_progress. Bukti rinci LMS-04-HANDOFF.md.
++
++| Item | Status |
++|---|---|
++| Student complete/uncomplete idempotent, reload/restart | API/browser PASS |
++| Next/previous, resume, course count | API/browser PASS |
++| Material revision invalidates; title only preserves | API/browser PASS |
++| Own enrollment/tenant/revision/FK, no peer/admin writes | RLS/API PASS |
++| Revoke/archive/draft/membership revalidation | Parent/API/browser PASS |
++| F1 maximum1500 lessons/451 catalog, InitPlan/prepared revoke | Bench/API/SQL PASS, re-review pending |
++| F2 actual CPU load2/8/1, original budget60, child crash/timeout | Bench/HTTP/unit PASS, re-review pending |
++| Reader grants minimal, NOLOGIN/NOBYPASS, not assumable | PostgreSQL PASS |
++| Seeded upgrade/guarded downgrade/offline0010 | Migration fixture PASS |
++| Full regression | **291 API, 12 scripts, 16 Action, 15 browser**, 0 skip |
++| Build/typecheck/compile/pip check, npm/PyPI audit | PASS, 0 findings/errors on audits |
++| Mac UAT / real Auth0 / Docker image / remote CI | PENDING/UNVERIFIED |
++| Independent review F1/F2 + LMS-04 | PENDING |
++| Full auth parent review | PENDING |
++| N2/N3/N4, old definer LOW, tenant pause | OPEN/unchanged scope |
++| Merge/deploy/runner | Tidak dilakukan |
++
++Approval tidak disimpulkan dari tes author atau dari laporan LMS-02. Scope belajar
++ini self-report completion, bukan grading/analytics guru/sertifikat/pembayaran.
+diff --git a/maaher-lms-starter/docs/LMS-04-HANDOFF.md b/maaher-lms-starter/docs/LMS-04-HANDOFF.md
+new file mode 100644
+index 0000000..d2d0a44
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-04-HANDOFF.md
+@@ -0,0 +1,121 @@
++# LMS-04 — learning completion dan perbaikan F1/F2 siap review
++
++11 November 2026 WIB. Branch **feat/LMS-04-student-learning**, base **4870287**
++(runtime parent 110c9be). Pemilik meminta LMS-04 setelah menyampaikan dua MEDIUM
++pada review LMS-03. Verdict formal tidak disampaikan. Lihat relay author
++reviews/LMS-03-review-relay-20261111.md; laporan asli tetap di Mac. Tidak ada
++klaim LMS-03/auth parent sudah disetujui. F1/F2 implemented/tested author,
++menunggu re-review independen.
++
++## Perilaku akhir
++
++/learn kini menyediakan progres completed/total, lanjutkan yang belum selesai,
++previous/next lesson, tandai selesai/belum selesai, selesai & lanjutkan dan
++persistence setelah reload/API restart. Materi/resources yang berubah menaikkan
++lesson revision; completion lama menjadi needs_review, tidak dihitung sampai
++siswa membaca dan menandai ulang. Title/reorder saja tidak membatalkan. Completion
++adalah self-report, bukan nilai/sertifikat. Hanya siswa pemilik enrollment aktif
++pada course terbit; teacher/admin/peer/tenant asing tidak diberi progress access.
++Revoke/draft/archive/role/status membatasi akses sesuai LMS-03. Tenant disable
++masih pause, bukan revoke permanen. Semua perubahan progress terikat FK tenant/
++course/enrollment/student/lesson dan revision; duplikat tidak membuat audit baru.
++
++F1: policy SELECT memakai scope tervalidasi pada InitPlan, bukan memanggil
++resolver pada setiap lesson. FOR ALL write policy dipisahkan dari SELECT.
++Empat helper memakai dedicated role NOLOGIN/NOBYPASSRLS read-only kolom minimum;
++14 definer lama tidak diperluas untuk membaca content/progress. F2: trusted parser
++child dengan satu slot per API process, CPU/wall/memory budget, cache digest valid
++128 dan busy429. Tidak menjalankan kode learner, tidak memberi child secret env.
++
++File inti: migrations read_scope/0009, learning_progress/0010; learning API/limits,
++markdown_parse/service/worker, course_content/courses/ingress; UI /learn, BFF,
++CSS, tests/benchmark, scripts checker/browser, CI, ADR-008 dan ticket LMS-04.
++Tidak ada dependency baru, auth.py/oidc.py/Action/MFA/session tidak diubah.
++
++## Validasi final cloud
++
++| Pemeriksaan | Hasil |
++|---|---|
++| `PYTHONPATH=apps/api python -m pytest -s -q -x --tb=short apps/api/tests` | **291 passed**, 0 skip, 2 existing deprecation warnings, 245.23s |
++| Parent 272 + tambahan | 9 completion API/SQL + 1 migration + 3 scope/perf + 6 parser/CPU/cache = **19 baru** |
++| Subset course/enrollment setelah 0009 | 50 passed, 74.11s |
++| Subset completion awal | 8 passed, 28.17s sebelum case SQL tambahan; final full 291 di atas |
++| Scope + CPU subset awal | 7 passed, 61.09s sebelum tambahan timeout; final benchmark full di atas |
++| Script / Action | **12 / 16 passed**, 0 skip |
++| Browser learning / enrollment / courses | **2 / 2 / 2 passed**, 11.1s / 10.0s / 11.0s |
++| Browser auth / OIDC FIDO2 / dev-TOTP | **7 / 1 / 1 passed**, 20.0s / 3.0s / 3.1s |
++| Browser total | **15 passed**, 0 skip |
++| Next build/typecheck / compileall / pip check | PASS |
++| npm production audit / PyPI runtime advisory | 0 vulnerabilities / 41 pins, 0 findings/errors |
++
++Python 3.12.14/Linux, Node24.22.1, Next production build, real Chromium,
++PostgreSQL16.15; runtime non-owner/non-BYPASSRLS, auth/operator/mail/maintenance
++terpisah. Signed synthetic provider, bukan tenant Auth0 nyata atau security key.
++
++F1 final: student SQL 1500 lesson **26078.94→18.08ms**, admin **10618.93→14.74ms**,
++student100 **2333.96→20.15ms**, catalog tenant451 **4467.99→16.17ms**. Outline baru
++plus progress melalui ASGI TestClient **133.03ms**. Bukan pengukuran TCP/browser/
++TLS produksi. Baseline merekonstruksi policy 0008+FOR ALL di DB test yang sama,
++bukan binary/API lama. Plan memakai InitPlan, tanpa per-row helper lama. Koneksi
++prepared statement yang sama segera kehilangan scope setelah revoke membership.
++
++F2 menggunakan TCP HTTP uvicorn sungguhan dengan 30KB adversarial, bukan Event.
++Health p95 **1.71ms baseline, 2.93ms/2 saves, 11.31ms/8, 2.46ms/sequential**.
++Budget asli satu akun **52/60 attempts** untuk setup dan 48 save probes;
++422 complexity/429 busy yang disengaja, tanpa cache hasil invalid. Timeout,
++child crash/restart, bad Unicode dan policy URL tetap fail-closed. Ini bukti
++lokal; parser tetap kuadratik dan multi-worker perlu sizing terpisah. JSON dan
++respons per temuan ada pada reviews/LMS-04-performance.json dan author-response.md.
++
++Browser siswa/admin dua sesi menguji completion→next→all done→reload→uncomplete,
++edit/publish lesson baru membuat completion stale, confirm lagi, revoke menolak
++write dan membersihkan layar. BFF completion hanya menerima route/metode/query/
++Origin yang diizinkan. Regresi editor utuh setelah 429 masih dijalankan pada
++course browser. Semua old auth/tenant/race/migration tests tetap disertakan.
++
++Masa implementasi awal 0009 sempat menolak INSERT RETURNING course admin karena
++scope ID menggunakan snapshot sebelum row baru ada. Clause admin tervalidasi
++pada SELECT policy memperbaikinya; subset50 dan full291 kemudian lulus. Run awal290 lulus; satu uji cache-scoping baru
++menambah total menjadi291, dengan key validator dipisahkan per tenant/user.
++Pengukuran awal bukan source approval dan tidak dipakai sebagai pengganti full.
++
++## Migrasi dan rollback
++
++Head **0010_learning_progress**. Upgrade maju 0008→0009→0010 menjaga data auth/
++course/enrollment dan mengisi lesson.revision=1, progress kosong. Dedicated reader
++role perlu provision/ownership oleh DBA migration credential, tanpa membership
++ke role API/auth dan tanpa superuser/BYPASS/CREATE. Aplikasi tidak memakai
++credential migrasi. Counter learning120/min tenant/student di-retain satu hari.
++
++Downgrade 0010→0009 menghapus progress/counter/revision; data progress berisi
++menuntut `-x allow_progress_data_loss=yes` setelah ACCESS EXCLUSIVE guard lock.
++Downgrade0009→0008 memulihkan policy/grants lama tanpa menghapus course/enrollment.
++Seeded test menjaga identity/material/enrollment; default rollback gagal menjaga
++head/progress; ack hanya di DB disposable lalu re-upgrade tidak menghidupkan data
++progress yang sudah dihapus. Offline SQL0010 memuat lock/guard. N2 offline0006
++belum diperbaiki. Restore checkpoint tetap keputusan operator setelah backup.
++
++DB baru final maaher_test_lms04_release_20261111; full awal
++maaher_test_lms04_full_20261111 juga dipertahankan; scope_v2, learning, perf dan scope
++awal yang gagal juga dipertahankan. Browser DB terpisah:
++maaher_test_lms04_learning_release_20261111, enrollment_release, courses_release,
++auth_release, fido_release, totp_release (semua prefix maaher_test_lms04_ dan
++suffix _20261111). Enam DB *_browser_20261111 pada run awal juga dipertahankan. Seeded migration membuat maaher_test_lms04_migration_<random>
++dan legacy enrollment migration juga DB acak baru, semuanya dipertahankan.
++Container cloud maaher-cloud-review-20261109, port tes127.0.0.1:32775, dihentikan
++setelah validasi tanpa menghapus DB. Tidak menyentuh container/DB/config Mac.
++
++## Langkah berikut
++
++Ikuti LMS-04-MAC-SETUP.md: source branch baru, backup DB sintetis existing,
++upgrade0008→0010 dengan migration credential, rebuild API/web, pertahankan .env/
++keyring/binding/dev-TOTP/Action. Owner login sendiri, uji siswa sintetis terpisah
++completion/reload/next/material revision/revoke. Jangan menjalankan pytest pada
++DB UAT yang berisi atau melakukan downgrade untuk setup. Suite/benchmark hanya
++pada DB kosong baru yang memang disposable; test F1 mengubah policy sementara.
++
++Re-review F1/F2 bersama delta learning melalui reviews/LMS-04-review-request.md.
++Mac UAT baru, real Auth0 staff/student, CI remote, image Docker dan full auth
++review 8941a79..4733526 belum diverifikasi di sini. N2/N3/N4, LOW definer lama,
++ASGI notes yang tidak dirinci dan tenant pause tidak dinyatakan CLOSED.
++Tidak ada merge/deploy atau learner runner. Laporan Claude LMS-01 historis utuh.
+diff --git a/maaher-lms-starter/docs/LMS-04-MAC-SETUP.md b/maaher-lms-starter/docs/LMS-04-MAC-SETUP.md
+new file mode 100644
+index 0000000..358d5d2
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-04-MAC-SETUP.md
+@@ -0,0 +1,66 @@
++# LMS-04 — menjalankan completion dan perbaikan performa di Mac
++
++Branch feat/LMS-04-student-learning, base4870287; root aplikasi GitHub
++maaher-lms-starter/. Checkout Mac terakhir dapat bernama maaher-lms-auth0;
++periksa Git root/status dan runtime aktif, jangan menebak atau menimpa folder.
++
++1. Ambil branch baru dengan checkout/worktree terpisah jika perubahan lokal
++   bertabrakan. Pertahankan semua laporan Claude/catatan Mac yang untracked.
++   Tidak reset, stash otomatis atau menerapkan patch berulang.
++2. Pertahankan .env, keyring, DB role terpisah, Auth0/dev-TOTP, Action/binding dan
++   volume yang sudah berhasil. Tidak ada secret/variable/dependency baru.
++   Parser memakai proses Python library terpercaya, bukan runner learner.
++3. Identifikasi dan backup **DB development sintetis** existing head0008.
++   Credential migrasi/DBA yang sudah terpisah perlu membuat/own role baru
++   maaher_access_reader NOLOGIN/NOBYPASS/NOINHERIT, tanpa grant membership ke
++   runtime/auth atau role lain. Migration menolak konfigurasi role tidak aman.
++   Jangan memberi API CREATEROLE/superuser untuk meloloskan upgrade.
++4. Dari root aplikasi, konfigurasi URL migrasi lokal tanpa mencetak secret,
++   jalankan `python -m alembic -c apps/api/alembic.ini upgrade head` ke
++   **0010_learning_progress**, melewati0009. Data lama dipertahankan, lesson
++   revision dimulai1 dan progress kosong. Tidak perlu reset/downgrade.
++5. Rebuild/restart API/web development dengan workflow sebelumnya dan lockfile
++   existing. Checker mengenali head0009/0010. Buka /learn dengan siswa sintetis
++   yang telah di-enroll; login admin existing dilakukan sendiri oleh pemilik.
++
++## UAT
++
++- Course terbit dengan minimal dua lesson: Lanjutkan belajar → Tandai selesai /
++  Selesai & lanjutkan → previous/next. Reload kursus dan pastikan count/status
++  tersimpan. Tandai belum selesai harus mengurangi count.
++- Admin edit **isi/resources** lesson yang sudah selesai, publish. Siswa reload:
++  completion lama tidak dihitung, ada notifikasi materi diperbarui, kemudian
++  tandai ulang. Title/reorder saja mempertahankan status selesai.
++- Revoke/draft/archive menutup read/write. Reaktivasi enrollment eksplisit tetap
++  diperlukan sesuai LMS-03; progress revisi yang masih valid boleh muncul lagi
++  setelah regrant. Tenant disable tetap pause seperti parent.
++- Akun peer/teacher/admin tidak mendapat mutasi progress siswa. Logout dan periksa
++  akses ditolak. Catat real Auth0 vs provider sintetis, manual vs otomatis.
++- Input Markdown terlalu kompleks dapat ditolak422 dengan pesan menyederhanakan;
++  save lain saat parser sibuk mendapat429 Retry-After1 tanpa membuang editor.
++  Jangan membanjiri DB UAT untuk benchmark. CPU/memory limit Mac perlu diuji
++  lokal; child wall timeout tetap fail-closed. Learning read/write120/min dan
++  course writes60/min tetap diberlakukan.
++
++Semua pytest/benchmark harus memakai **DB kosong baru terpisah**. Fixture
++melakukan rollback destruktif ber-ack pada DB disposable. F1 benchmark mengubah
++policy sementara lalu mengembalikannya; jangan arahkan ke DB UAT/DB lama.
++Data completion baru tidak boleh dihapus untuk sekadar menjalankan aplikasi.
++Rollback0010 memerlukan backup/operator ack jika progress berisi.
++
++```text
++Lanjutkan setup/UAT LMS-04 branch feat/LMS-04-student-learning di
++mashudizaini/maaher-lms. Baca AGENTS.md, docs/LMS-04-HANDOFF.md dan
++LMS-04-MAC-SETUP.md. Periksa Git status/checkout aktif; ambil source tanpa
++menimpa perubahan lokal dan laporan saya. Pertahankan .env/keyring/Auth0/binding,
++semua DB dan volume lama. Backup DB development yang dipastikan sintetis head0008,
++upgrade maju ke0010 dengan credential migrasi/DBA terpisah, lalu rebuild API/web.
++Jangan memberi API privilege owner/CREATEROLE/BYPASSRLS atau mencetak secret.
++Jangan reset/downgrade; suite/benchmark hanya di DB kosong baru sendiri.
++Gunakan siswa sintetis yang di-enroll dan dua sesi terpisah; saya login admin
++sendiri. Uji completion→next/previous→reload→uncomplete, edit materi/publish→
++status perlu konfirmasi ulang, serta revoke/reaktivasi/role sesuai akses.
++Reproduksi F1/F2 dengan metode benchmark yang aman pada DB disposable bila mampu;
++catat hasil aktual, provider, source/schema, FAIL/SKIP/NOT TESTED tanpa token/PII.
++Simpan reviews/LMS-04-mac-validation-20261111.md. Jangan ubah MFA, merge/deploy.
++```
+diff --git a/maaher-lms-starter/docs/LMS-04-PR.md b/maaher-lms-starter/docs/LMS-04-PR.md
+new file mode 100644
+index 0000000..f1941df
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-04-PR.md
+@@ -0,0 +1,29 @@
++# Add revision-aware student completion and bound learning resource costs
++
++Students can mark lessons complete/incomplete, resume the first unfinished lesson,
++move to the previous/next lesson and retain progress after reload. Editing lesson
++content/resources requires a fresh completion; title/reorder alone preserves it.
++Only the active enrollment owner on a published course can read/write progress.
++Completion is self-reported learning state, not grading or certification.
++
++The LMS-03 review found expensive per-row RLS and parser CPU contention. Migration
++0009 uses statement-scoped access InitPlans and separates SELECT from FOR ALL
++write policies. Four helpers have a dedicated NOLOGIN/NOBYPASS read-only owner
++with minimal column grants. The parser runs in a bounded child with CPU/wall
++limits and nonblocking busy429, without DB/Auth0 env. Existing URL policy remains.
++
++Local same-data SQL benchmark: student1500 lessons 26079→18.08ms; new outline
++ASGI request including progress133.03ms. Actual uvicorn CPU load probe: health
++p95 1.71ms baseline→11.31ms with8 saves; original account budget52/60 used.
++Invalid-complexity and busy saves reject422/429. These are local synthetic results,
++not production SLOs. Methods/JSON: reviews/LMS-04-author-response.md/performance.json.
++
++Migration0010 adds revision/progress and bounded learning requests, preserving
++identity/course/enrollment. Populated progress rollback requires explicit loss
++ack after an exclusive guard lock; tested only in disposable databases. API/MFA/
++OIDC credentials and configuration are not changed; no learner execution.
++
++Validation: 291 API (0 skip,2 existing deprecation warnings),12 scripts,16 Action,
++15 Chromium browser cases, build/typecheck/pip/compile, npm0 and PyPI41pins0.
++Branch stacks on unmerged4870287; independent review and Mac UAT pending. Auth
++parent full review and old N2/N3/N4 remain open. No merge/deploy approval.
+diff --git a/maaher-lms-starter/docs/adr/008-learning-progress-and-bounded-work.md b/maaher-lms-starter/docs/adr/008-learning-progress-and-bounded-work.md
+new file mode 100644
+index 0000000..7185925
+--- /dev/null
++++ b/maaher-lms-starter/docs/adr/008-learning-progress-and-bounded-work.md
+@@ -0,0 +1,104 @@
++# ADR-008 — completion per revisi dan kerja belajar yang dibatasi
++
++Status: development LMS-04 atas permintaan pemilik, 11 November 2026 WIB.
++Base 4870287, runtime parent 110c9be. F1/F2 MEDIUM LMS-03 adalah prasyarat
++performa untuk layar belajar; hasil author menunggu review independen.
++
++## Read authorization per statement
++
++0009 memisahkan policy module/lesson FOR ALL menjadi INSERT/UPDATE/DELETE.
++SELECT memakai scalar InitPlan yang tidak bergantung pada baris untuk scope
++course/cohort/enrollment. Context berasal dari runtime_identity yang memverifikasi
++session/MFA, membership dan tenant aktif. Tidak memakai app.user_id sebagai
++otoritas atau cache hasil role lintas statement/request. Setiap prepared statement
++baru memeriksa ulang akses. Beberapa policy dapat membuat beberapa InitPlan;
++batasnya jumlah tetap per statement, bukan satu panggilan total per request.
++
++Empat helper access_* dimiliki role baru maaher_access_reader:
++NOLOGIN/NOSUPERUSER/NOBYPASSRLS/NOINHERIT, tidak beranggota atau diberikan ke role
++lain. Dibutuhkan DBA migration privilege untuk provision role; API tidak boleh
++memiliki CREATEROLE/ownership atau diasumsikan menjadi reader. Reader memperoleh
++SELECT kolom minimum pada memberships, tenants, courses, courses_teachers,
++cohorts, enrollments beserta policy SELECT khusus. Tidak memperoleh password,
++session, faktor, isi lesson, progress atau write. PUBLIC EXECUTE helper dicabut,
++fixed search_path, tanpa parameter actor/tenant dari caller. UUID scope terikat
++session capability dan tenant selector tervalidasi, bukan hanya UUID tebakan.
++
++Course admin SELECT memakai role admin langsung agar INSERT RETURNING course
++baru sah dalam statement yang sama. Teacher tetap course tugas nonarsip;
++student hanya enrollment/cohort aktif dan course published. Read/write policy
++terpisah mempertahankan larangan mutation student. Roster peer dan tenant lain
++tetap tertutup. 14 fungsi lama masih memakai definer BYPASSRLS, sehingga catatan
++LOW itu tidak dinyatakan closed; empat helper baru tidak memperbesar grants itu.
++
++## Completion diri dan revisi materi
++
++0010 menambah revision pada lesson (default 1) dan lesson_progress yang FK-nya
++mengikat tenant/course/enrollment/student/lesson. Primary key enrollment+lesson,
++role runtime tidak dapat mengganti owner/tenant/parent progress. Siswa aktif
++hanya SELECT/INSERT/UPDATE/DELETE catatan dirinya pada enrollment/course yang
++masih dapat diakses. Admin/guru tidak memperoleh analytics progress pada scope ini.
++
++Trigger menaikkan revision bila content/resources benar-benar berubah, termasuk
++SQL update, tetapi tidak untuk title/reorder saja. Completion lama tetap tersimpan
++dan tidak dihitung bila revision berbeda; UI meminta membaca/menandai ulang.
++Tidak menghitung kembali materi yang pernah identik, karena revision monotonik.
++Reaktivasi enrollment eksplisit atau perpindahan cohort mempertahankan catatan
++pada revisi yang masih valid. Revoke/archive/draft menutup akses sesuai LMS-03;
++tenant disable tetap pause sesuai parent, belum menjadi revocation baru.
++
++Complete/uncomplete menerima revision saja; tenant/student/enrollment berasal
++session/database. Complete idempotent dan timestamp/audit tidak ditulis ulang
++untuk duplikat pada revisi sama. Uncomplete menghapus catatan milik sendiri.
++Completion adalah self-report belajar, bukan bukti penilaian, sertifikat atau
++anti-cheat. Optimistic revision dan RLS diperiksa pada statement mutasi; akses
++baru ditolak setelah revoke. Operasi yang mulai sebelum perubahan otorisasi
++memakai snapshot PostgreSQL statement tersebut, tanpa memberikan student hak
++UPDATE/row-lock course atau enrollment. Catatan revisi lama tidak mengesahkan
++revisi baru saat dua perubahan berpapasan.
++
++API outline mengirim metadata, count completed/total dan first incomplete.
++Lesson mengirim previous/next sesuai urutan module/lesson. Navigasi bebas di
++course yang sah, tidak memaksa completion sebagai ujian. /learn mendukung
++lanjutkan, selesai & lanjutkan, belum selesai, reload dan notifikasi revisi.
++
++## Budget baca dan CPU parser
++
++Learning GET/POST memiliki admission 120/minute tenant/student, satu row per
++membership, transaksi counter terpisah sebelum parse/lookup, saturated counter,
++retensi 1 hari. Anonymous/nonstudent tidak membuat row. 429 Retry-After:60.
++Query learning memakai statement_timeout 2s; bukan pengganti ingress produksi.
++
++Parser policy CommonMark sama, dijalankan child process terpisah dari GIL API.
++Trusted library mengurai teks; tidak menjalankan program learner. Satu pekerjaan
++aktif per API process, nonblocking busy 429/Retry-After:1 tanpa queue tak terbatas.
++Child env tidak membawa DB/Auth0/keyring credential. Per-document CPU profiling
++timer 120ms, parent wall timeout 1.5s dengan nonblocking pipes, child termination
++saat hang/crash dan fail-closed 503; complexity 422. RLIMIT_AS 256MiB pada host
++POSIX yang mendukungnya; perilaku address-space Mac perlu verifikasi. Algoritme
++parser tetap dapat kuadratik, kini kerjanya ditolak bila melewati budget.
++Cache hanya 128 SHA-256 digest materi yang valid, dengan key tenant/user dari
++actor server tervalidasi; tidak menyimpan isi dokumen atau berbagi key antar-akun.
++Jumlah child mengikuti jumlah API process; sizing/cgroup multi-worker tetap perlu.
++
++Benchmark aktual, metode dan batas tersedia pada reviews/LMS-04-author-response.md
++serta performance.json. Tidak memakai Event untuk menyatakan CPU terisolasi.
++
++## Migrasi dan rollback
++
++Upgrade 0008→0009→0010 menjaga akun/session/binding/course/material/enrollment,
++memberi revision 1 dan progress kosong, tidak menandai selesai otomatis.
++Retain_auth_data hanya ditambah DELETE learning budget, ACL tetap; tidak mengubah
++login, PKCE, OIDC/MFA/Action atau trusted assurance.
++
++Downgrade 0010→0009 menghapus progress, budget dan metadata revision. Jika progress
++berisi, guard setelah ACCESS EXCLUSIVE lock menuntut -x allow_progress_data_loss=yes.
++Lock membuat check tidak disalip completion baru; backup/quiesce aplikasi dan
++keputusan operator tetap wajib. Offline guard 0010 dapat dihasilkan. 0009→0008
++mengembalikan read/write policy lama dan mencabut grants helper; role NOLOGIN
++cluster dapat tetap ada karena database test lain masih menggunakannya. Tidak
++menyentuh course/auth/enrollment data. Rollback bukan prosedur UAT.
++
++N2 offline0006, N3 Unicode/NAT64, N4 trace cleanup, full auth independent review,
++SMTP/inbox, real Auth0, CI remote, Docker image dan gate release tetap terpisah.
++Tidak ada grading/submission/runner/pembayaran/upload pada LMS-04.
+diff --git a/maaher-lms-starter/docs/tickets/LMS-04.md b/maaher-lms-starter/docs/tickets/LMS-04.md
+new file mode 100644
+index 0000000..887d6b2
+--- /dev/null
++++ b/maaher-lms-starter/docs/tickets/LMS-04.md
+@@ -0,0 +1,34 @@
++# LMS-04 — navigasi belajar dan completion dengan prasyarat performa
++
++11 November 2026 WIB. Pemilik meminta lanjut LMS-04 setelah menyampaikan review
++LMS-03: F1 (RLS per-row lambat) dan F2 (parser CPU mengganggu proses) MEDIUM.
++Base development 4870287, runtime parent 110c9be. Tidak menganggap LMS-03 approved;
++verdict formal tidak disebut pada ringkasan terakhir. Full auth review terpisah.
++
++Lingkup: (1) perbaikan F1 dengan scope akses tervalidasi sekali per SQL statement,
++set-based RLS tanpa cache otorisasi lintas request; (2) F2 parser library terpercaya
++di proses terpisah, satu pekerjaan aktif per API process, CPU/wall/memory bounds,
++busy 429, tanpa menjalankan kode learner; (3) siswa membaca, menandai selesai/
++belum selesai, melihat hitungan completion, melanjutkan yang belum selesai,
++berpindah pelajaran dan reload persistence di /learn.
++
++Completion adalah catatan belajar diri, bukan nilai/sertifikasi. Terikat enrollment
++milik siswa dan revisi lesson. Perubahan isi/resources menaikkan revision dan
++membuat catatan lama tidak dihitung sampai siswa menandai ulang; title/reorder
++saja tidak membatalkan. Move cohort/reaktivasi eksplisit mempertahankan completion
++revisi yang masih sama. Draft/unpublish/revoke/archive/role/status menolak read/
++write sesuai LMS-03; tidak ada akses melalui UUID atau state dari browser.
++
++File: migration scope read + migration lesson progress, helper RLS role read-only
++NOLOGIN/NOBYPASSRLS dengan grants minimum, parser process service/worker, learning
++API/BFF/UI, fixture/tests/benchmarks, CI dan handoff. Scope tidak menambah auth
++provider, grading/submission, upload atau runner. N2/N3/N4 parent tetap dicatat.
++
++Acceptance: semua regresi parent; cross-tenant/peer read-write/FK/forged context;
++completion idempotent dan konflik revisi; perubahan materi, revoke/regrant,
++archive/draft, restart API/reload; SQL plans/bounded helper evaluations; benchmark
++outline 100/1500 lesson dan katalog 451 published courses untuk student/admin;
++CPU adversarial 30KB dengan 2/8 saves dan health p95 dibanding baseline, termasuk
++budget asli 60/min; child crash/timeout/busy fail-closed; two-browser student/admin
++UAT otomatis. DB tes baru saja; migrasi maju menjaga data lama, rollback berisi
++butuh ack eksplisit. Independent review dan Mac UAT baru tetap diperlukan.
+diff --git a/maaher-lms-starter/reviews/LMS-03-review-relay-20261111.md b/maaher-lms-starter/reviews/LMS-03-review-relay-20261111.md
+new file mode 100644
+index 0000000..7fbafa4
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-03-review-relay-20261111.md
+@@ -0,0 +1,38 @@
++# LMS-03 — ringkasan review yang disampaikan pemilik
++
++Dicatat author Codex, 11 November 2026 WIB. Ini bukan berkas asli Claude dan
++bukan review independen baru. Source yang ditinjau reviewer **110c9be**;
++4870287 tidak ada pada checkout Mac reviewer sehingga dokumentasinya tidak
++terverifikasi di sana. Cloud mengonfirmasi diff 110c9be..4870287 hanya enam
++berkas Markdown. Verdict formal tidak disampaikan dalam pesan; tidak ditetapkan
++oleh author. Pemilik meminta lanjut **LMS-04** dengan temuan ini sebagai input.
++
++Dua MEDIUM yang dilaporkan:
++
++- **F1**: per-row RLS lambat. Outline student 100 lesson 1,9s, 1500 lesson 17,7s;
++  catalog 451 published course 3,1s; admin 1500 lesson 7,4s. Sebagian beban sudah
++  ada LMS-02. Tidak ditemukan kebocoran, tetapi request siswa membebani API/DB.
++- **F2**: parser CPU masih memengaruhi proses. Uji Event author hanya membuktikan
++  worker/thread placement. Input adversarial 30KB menaikkan health dari 2,7ms ke
++  108ms (2 saves), 513ms (8), 205ms (satu akun, budget asli 60/min). N1 dinaikkan F2.
++
++LOW/INFO yang disebut: definer BYPASSRLS dipakai 14 fungsi dengan grants bertambah;
++beberapa perilaku ASGI (detail tidak diberikan); tenant disabled menjeda siswa,
++bukan mencabut enrollment. **request._body CLOSED**. N2 offline guard 0006 tetap
++crash; N3 URL tambahan/NAT64 dan N4 audit cleanup 0007 tetap OPEN.
++
++Reviewer melaporkan 272 API lulus pada DB kosong miliknya; 14+3 probe termasuk
++210 targeted/random races tanpa invariant violation/deadlock. Upgrade menjaga
++data. Downgrade default/flag salah/base menolak; explicit enrollment loss ack
++pada disposable DB mengembalikan ACL/policy/trigger identik 0007. Offline 0008
++berfungsi. BFF diuji Next production termasuk edge-secret.
++
++Browser tidak dijalankan (Chromium tidak terpasang/tidak diunduh). UAT Mac,
++Auth0 nyata, CI remote, Docker image dan Python 3.12/Linux tidak diuji reviewer.
++Provider sintetis. Auth parent tetap belum review penuh dan bukan bagian verdict.
++Repo Mac tetap 110c9be dengan laporan untracked; container review dihentikan,
++tidak dihapus. Source/.env/Auth0/DB UAT tidak diubah menurut laporan.
++
++Respons author dan pengukuran baru: LMS-04-author-response.md dan
++LMS-04-performance.json. Status perbaikan author menunggu re-review; tidak
++mengubah status temuan independen menjadi CLOSED secara sepihak.
+diff --git a/maaher-lms-starter/reviews/LMS-04-author-response.md b/maaher-lms-starter/reviews/LMS-04-author-response.md
+new file mode 100644
+index 0000000..4a01d8f
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-04-author-response.md
+@@ -0,0 +1,80 @@
++# Respons author F1/F2 pada kelanjutan LMS-04
++
++11 November 2026 WIB, base 4870287 (runtime parent 110c9be). Pemilik meminta
++LMS-04; prasyarat F1/F2 ditangani dalam branch feat/LMS-04-student-learning.
++Status: **implemented/tested by author, independent re-review pending**.
++
++## F1 — set-based statement-scoped RLS
++
++Policy module/lesson FOR ALL ikut menjadi policy SELECT dan mengevaluasi
++course_can_manage/course_student_access/runtime_identity untuk setiap baris.
++0009 memisahkan INSERT/UPDATE/DELETE dari SELECT. Read policy memakai helper
++uncorrelated scalar subquery/InitPlan, menghasilkan scope dari session capability,
++tenant, membership aktif dan role; batasnya per SQL statement, bukan cache antar
++request. Beberapa InitPlan dapat memanggil helper berbeda dalam satu statement,
++tetapi evaluasi tidak lagi sebanding jumlah lesson. Prepared statement koneksi
++sama juga diuji setelah membership dicabut: langsung tidak ada course terlihat.
++
++Empat helper baru dimiliki **maaher_access_reader NOLOGIN/NOBYPASSRLS/NOINHERIT**,
++bukan menambah SELECT penuh ke maaher_definer. Role itu mendapat SELECT kolom
++minimum pada enam tabel dan policy SELECT khusus; tidak password/session/faktor,
++content, progress, atau write. Tidak boleh diasumsikan runtime/auth. Fungsi tanpa
++parameter actor/tenant, fixed search_path, PUBLIC EXECUTE dicabut. Owner/grants/
++negative tenant/peer/forged-context diuji bersama seluruh suite parent. Empat
++helper menambah jumlah definer menjadi 18; 14 lama masih maaher_definer BYPASSRLS,
++sehingga LOW auth-role tidak disebut ditutup penuh.
++
++Pengukuran final pada data sama, di DB sintetis baru, ms:
++
++| Kasus SQL | Policy 0008 direkonstruksi | Policy 0009 |
++|---|---:|---:|
++| Student outline 100 | 2333,96 | 20,15 |
++| Student outline 1500 | 26078,94 | 18,08 |
++| Admin outline 1500 | 10618,93 | 14,74 |
++| Student catalog pada tenant 451 published | 4467,99 | 16,17 |
++
++Endpoint outline baru termasuk progress (ASGI TestClient) **133,03ms** untuk
++1500 lesson. Ini bukan latency TCP/browser/TLS produksi. Baseline memulihkan
++read policy 0008 + FOR ALL write predicate hanya pada DB test sendiri, bukan
++menjalankan binary lama atau mengubah DB pemilik. Catalog menguji 451 course
++dengan dua enrollment sah; scope tidak membuka 449 course lain. Plan memakai
++InitPlan dan tidak lagi mencantumkan per-row helper lama. API learning memakai
++statement_timeout 2s dan admission 120 requests/minute per active tenant/student;
++counter terbatas satu row/membership, commit sebelum parse/lookup, retensi sehari.
++
++## F2 — trusted parser process dengan backpressure
++
++CommonMark policy dan URL rules tetap, tetapi tokenisasi dipindahkan ke child
++Python process. Satu pekerjaan aktif per API process, tanpa antrean tak terbatas;
++request lain mendapat **429 Retry-After: 1**, editor tidak dihapus. Cache hanya
++128 digest valid, key di-scope tenant/user dari actor server, bukan isi dokumen
++atau cache bersama antar-akun. Child tidak mewarisi DB/Auth0/keyring env.
++Ini library parser tepercaya atas teks, **bukan mengeksekusi kode siswa**.
++
++Child memakai CPU profiling timer 120ms per dokumen; parent membatasi wall 1,5s
++dengan pipe nonblocking dan membunuh child saat hang/crash, gagal tertutup 503.
++Input kompleks ditolak 422 dengan petunjuk menyederhanakan Markdown. Child
++memory limit 256MiB bila RLIMIT_AS didukung; Mac perlu verifikasi lokal karena
++limit address-space tidak seragam. CPU/wall dan busy tetap diterapkan. Parser
++algoritmenya tetap dapat kuadratik; batas kerja/isolasinyalah yang berubah.
++
++Probe HTTP TCP uvicorn sungguhan, 30KB adversarial, tanpa monkeypatch budget
++atau Event. Semua 48 save probes dan setup menghasilkan **52 attempts** dari
++budget asli 60/min pada satu akun. Hasil health p95:
++
++| Beban | p95 health | Sampel health |
++|---|---:|---:|
++| Baseline | 1,71ms | 20 |
++| 2 concurrent saves | 2,93ms | 607 |
++| 8 concurrent saves | 11,31ms | 399 |
++| 1 account sequential saves | 2,46ms | 1430 |
++
++Save menghasilkan 422 complexity atau 429 busy sesuai batas, bukan keberhasilan
++palsu. Uji child crash/restart, timeout, malformed Unicode, policy URL dan CPU
++budget juga lulus. Satu child per API worker bukan kuota CPU cluster; deployment
++multi-worker tetap memerlukan sizing/cgroup dan pengukuran staging.
++
++JSON pengukuran: LMS-04-performance.json. Full API **291 passed**, 0 skip,
++2 existing deprecation warnings. Browser dan hasil tambahan di handoff.
++Hasil cloud bukan klaim production SLO atau bukti Auth0 nyata. N2/N3/N4 dan
++catatan tenant pause tetap terbuka. Review auth parent tetap terpisah.
+diff --git a/maaher-lms-starter/reviews/LMS-04-performance.json b/maaher-lms-starter/reviews/LMS-04-performance.json
+new file mode 100644
+index 0000000..1a06474
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-04-performance.json
+@@ -0,0 +1,42 @@
++{
++  "date": "2026-11-11",
++  "timezone": "Asia/Jakarta",
++  "source_base": "4870287",
++  "runtime_parent": "110c9be",
++  "method": "Fresh synthetic PostgreSQL test DB; serialized 0008 read-policy SQL baseline vs 0009 current; current outline HTTP uses ASGI TestClient; CPU pressure uses real uvicorn TCP HTTP with original account mutation budget.",
++  "limits": "Local evidence, not production SLO; intentionally rejects busy/over-budget parsing; no Auth0 live traffic.",
++  "full_api_result": "291 passed, 0 skip, 2 warnings, 245.23s",
++  "cache_scope": "Validated server tenant:user; 128 valid digests total",
++  "rls": {
++    "current_admin_1500_ms": 14.74,
++    "current_catalog_451_ms": 16.17,
++    "current_http_1500_ms": 133.03,
++    "current_student_100_ms": 20.15,
++    "current_student_1500_ms": 18.08,
++    "legacy_admin_1500_ms": 10618.93,
++    "legacy_catalog_451_ms": 4467.99,
++    "legacy_student_100_ms": 2333.96,
++    "legacy_student_1500_ms": 26078.94
++  },
++  "cpu_http": {
++    "actual_account_budget_attempts": 52,
++    "baseline_p95_ms": 1.71,
++    "load_1_p95_ms": 2.46,
++    "load_1_samples": 1430,
++    "load_1_statuses": {
++      "422": 8
++    },
++    "load_2_p95_ms": 2.93,
++    "load_2_samples": 607,
++    "load_2_statuses": {
++      "422": 4,
++      "429": 4
++    },
++    "load_8_p95_ms": 11.31,
++    "load_8_samples": 399,
++    "load_8_statuses": {
++      "422": 6,
++      "429": 26
++    }
++  }
++}
+diff --git a/maaher-lms-starter/reviews/LMS-04-review-request.md b/maaher-lms-starter/reviews/LMS-04-review-request.md
+new file mode 100644
+index 0000000..6a6788d
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-04-review-request.md
+@@ -0,0 +1,58 @@
++# Review independen LMS-04 + re-review F1/F2
++
++Author Codex menyiapkan request ini, bukan laporan Claude. Branch
++feat/LMS-04-student-learning, base **4870287** (runtime parent110c9be).
++Review **4870287..HEAD**; 110c9be..4870287 hanya dokumentasi, diverifikasi cloud.
++Laporan asli LMS-03 tetap berada di Mac. Jangan menimpa laporan atau catatan UAT.
++
++Baca CLAUDE/AGENTS, workflow, PROJECT-SPEC, ARCHITECTURE, skill security review,
++ticket LMS-04, ADR-008, LMS-04-HANDOFF/CHECKLIST, relay LMS-03, author-response dan
++performance.json. Source/test/CI snapshot pada manifest/patch; diff Git utama.
++
++## Fokus
++
++- F1: benar-benar InitPlan/uncorrelated bounded calls, bukan cache GUC yang bisa
++  dipalsukan atau cache antar request. Prepared statement kehilangan akses setelah
++  revoke. SELECT tidak lagi mengevaluasi FOR ALL write predicate per row. Admin
++  INSERT RETURNING tetap sah, teacher/archive/student/draft/peer isolation tetap.
++- Dedicated reader NOLOGIN/NOBYPASS/NOINHERIT tanpa membership/privileged flags;
++  minimum column grants/policy hanya untuk role itu. Tidak ada password/session/
++  content/progress write grant atau runtime SET ROLE. GLOBAL old definer LOW
++  tidak dianggap closed hanya karena empat helper baru terpisah.
++- F2: raw CPU input30KB, real HTTPuvicorn health baseline/2/8/one original60budget.
++  Child GIL terpisah, queue tidak tak terbatas, busy429/retry1, CPU120ms/wall1.5s,
++  crash/hang fail-closed, credential env tidak diwariskan, no learner code exec.
++  Ukur performa sendiri; jangan memakai Event test sebagai bukti CPU isolation.
++  Catat platform RLIMIT_AS Mac/multi-worker limits dan biaya algoritme yang tersisa.
++- Progress: owner/enrollment/student/tenant/FK/revision, forged IDs/GUC/input,
++  stale revision409, idempotent concurrency/audit, material vs title/reorder,
++  revoke/archive/draft/regrant dan snapshot race semantics. Completion self-report,
++  bukan nilai. Teacher/admin tidak otomatis mendapat analytics siswa.
++- BFF Origin/route/method/query/payload/retry/Set-Cookie; UI completed count,
++  previous/next/resume, reload, new revision needs_review, stale-write/revoke.
++- Upgrade8→9→10 menjaga auth/course/enrollment; rollback10 lock+guard explicitack,
++  SQLoffline; restore9→8 policies/grants. Empty/disposable DB saja, tidak UAT.
++- Learning120/min bounded member row/retention; existing course60/min utuh.
++
++## Prompt Claude CLI
++
++```text
++Lakukan review READ-ONLY LMS-04 branch feat/LMS-04-student-learning di
++mashudizaini/maaher-lms. Baca reviews/LMS-04-review-request.md dan semua rujukannya.
++Periksa source SHA/status Git tanpa overwrite perubahan/laporan lokal.
++Review4870287..HEAD dan re-review MEDIUM F1/F2 dari LMS-03 secara terpisah.
++Gunakan DB kosong baru maaher_test_* milik review, role runtime non-owner tanpa
++BYPASSRLS dan role lain terpisah. Jangan memakai DB UAT/DB lama atau menjalankan
++benchmark pada data pengguna; benchmark mengubah policy sementara. Semua rollback
++ber-ack hanya pada DB disposable baru itu. Pertahankan .env/Auth0/keyring/binding.
++Jalankan suite/probe sendiri, terutama workload actual CPU dan max1500 lessons/
++451catalog; ukur metode dan hasil, bukan hanya membaca bukti author. Browser
++jika tersedia; jangan sebut terverifikasi bila tidak dijalankan.
++Catat per-finding file:line/severity/repro/dampak serta batas pengujian. Bedakan
++synthetic provider/ASGI/TCP dari Auth0 nyata dan UAT manusia. Catat N2/N3/N4 lama,
++old definer LOW dan tenant pause yang belum ditangani; jangan tutup tanpa bukti.
++Untuk full auth terpisah, fetch ref main read-only lalu origin/main...HEAD;
++auth parent8941a79..4733526 masih perlu review penuh, bukan bagian otomatis verdict.
++Simpan reviews/LMS-04-claude.md, verdict dan status F1/F2 berdasarkan bukti.
++Jangan ubah source/guard/Auth0/config/data pengguna, merge atau deploy.
++```
+diff --git a/maaher-lms-starter/scripts/test-lms01-browser.py b/maaher-lms-starter/scripts/test-lms01-browser.py
+index 93777a5..9f8870c 100644
+--- a/maaher-lms-starter/scripts/test-lms01-browser.py
++++ b/maaher-lms-starter/scripts/test-lms01-browser.py
+@@ -56,7 +56,10 @@ def main():
+     parser.add_argument('--dev-totp', action='store_true', help='Exercise local synthetic TOTP assurance with --oidc')
+     parser.add_argument('--courses', action='store_true', help='Run course authoring after synthetic OIDC login')
+     parser.add_argument('--enrollment', action='store_true', help='Run enrollment and student access browser tests with --oidc')
++    parser.add_argument('--learning', action='store_true', help='Run completion and student navigation browser tests with --oidc')
+     args = parser.parse_args()
++    if args.learning and not args.oidc:
++        parser.error('--learning requires --oidc')
+     if args.enrollment and not args.oidc:
+         parser.error('--enrollment requires --oidc')
+     if args.dev_totp and not args.oidc:
+@@ -93,6 +96,8 @@ def main():
+             test_file = 'courses.spec.ts'
+         if args.enrollment:
+             test_file = 'enrollment.spec.ts'
++        if args.learning:
++            test_file = 'learning.spec.ts'
+         env.update(AUTH0_DOMAIN='browser-tests.us.auth0.com', AUTH0_CLIENT_ID='synthetic-browser-client',
+                    AUTH0_CLIENT_SECRET='synthetic-browser-client-secret-not-a-real-credential',
+                    PYTHONPATH=os.pathsep.join((str(ROOT/'apps/api'),str(ROOT/'apps/api/tests'))))
+diff --git a/maaher-lms-starter/scripts/verify-auth0-local.py b/maaher-lms-starter/scripts/verify-auth0-local.py
+index 2088971..47ffd79 100644
+--- a/maaher-lms-starter/scripts/verify-auth0-local.py
++++ b/maaher-lms-starter/scripts/verify-auth0-local.py
+@@ -112,7 +112,7 @@ def database(config, report):
+                 report.add('database','FAIL','checker hanya untuk DB development sintetis maaher_test_*; tidak menginspeksi data pengguna')
+                 return
+             revision = owner.execute('SELECT version_num FROM alembic_version').fetchone()[0]
+-            if revision not in {'0005_dev_totp', '0006_courses', '0007_course_review', '0008_enrollment'}:
++            if revision not in {'0005_dev_totp', '0006_courses', '0007_course_review', '0008_enrollment', '0009_read_scope', '0010_learning_progress'}:
+                 report.add('database migration','FAIL','migration 0005 belum aktif; periksa source dan DB development yang dipilih')
+                 return
+             report.add('database migration','PASS','schema Auth0 tersedia pada head yang dikenali di DB sintetis')

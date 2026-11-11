@@ -1,5 +1,12 @@
 # LMS-03 — checklist development
 
+**Update review 11 November:** pemilik menyampaikan review110c9be dengan dua
+MEDIUM F1 (RLS per row) dan F2 (CPU parser), bukan approval. Verdict formal tidak
+disebut. Lihat [relay author](../reviews/LMS-03-review-relay-20261111.md).
+Pemilik mengizinkan LMS-04; perbaikannya berada pada branch terpisah dan tetap
+menunggu re-review. Pernyataan pending review di snapshot lama di bawah adalah
+sebelum laporan ini. Auth parent full review tetap terbuka.
+
 Source runtime **110c9be**, base fe54142; branch feat/LMS-03-enrollment.
 Head schema 0008_enrollment.
 Validasi final: **272 API, 12 scripts, 16 Action, 13 browser**, 0 skip,

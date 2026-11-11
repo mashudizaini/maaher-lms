@@ -1,0 +1,42 @@
+{
+  "date": "2026-11-11",
+  "timezone": "Asia/Jakarta",
+  "source_base": "4870287",
+  "runtime_parent": "110c9be",
+  "method": "Fresh synthetic PostgreSQL test DB; serialized 0008 read-policy SQL baseline vs 0009 current; current outline HTTP uses ASGI TestClient; CPU pressure uses real uvicorn TCP HTTP with original account mutation budget.",
+  "limits": "Local evidence, not production SLO; intentionally rejects busy/over-budget parsing; no Auth0 live traffic.",
+  "full_api_result": "291 passed, 0 skip, 2 warnings, 245.23s",
+  "cache_scope": "Validated server tenant:user; 128 valid digests total",
+  "rls": {
+    "current_admin_1500_ms": 14.74,
+    "current_catalog_451_ms": 16.17,
+    "current_http_1500_ms": 133.03,
+    "current_student_100_ms": 20.15,
+    "current_student_1500_ms": 18.08,
+    "legacy_admin_1500_ms": 10618.93,
+    "legacy_catalog_451_ms": 4467.99,
+    "legacy_student_100_ms": 2333.96,
+    "legacy_student_1500_ms": 26078.94
+  },
+  "cpu_http": {
+    "actual_account_budget_attempts": 52,
+    "baseline_p95_ms": 1.71,
+    "load_1_p95_ms": 2.46,
+    "load_1_samples": 1430,
+    "load_1_statuses": {
+      "422": 8
+    },
+    "load_2_p95_ms": 2.93,
+    "load_2_samples": 607,
+    "load_2_statuses": {
+      "422": 4,
+      "429": 4
+    },
+    "load_8_p95_ms": 11.31,
+    "load_8_samples": 399,
+    "load_8_statuses": {
+      "422": 6,
+      "429": 26
+    }
+  }
+}

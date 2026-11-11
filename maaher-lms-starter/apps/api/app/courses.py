@@ -9,6 +9,7 @@ from psycopg.errors import CheckViolation, ForeignKeyViolation
 from .auth import connection, principal, verify_origin
 from .security import Principal
 from .course_content import https_resource, validate_markdown
+from .markdown_service import MarkdownComplexity
 
 router = APIRouter(prefix="/courses")
 
@@ -56,11 +57,14 @@ class Lesson(Title, Version):
 
 
 
-def validate_lesson_content(body):
+def validate_lesson_content(body,actor=None):
     # Called inside synchronous endpoints, which FastAPI runs in a worker.
     # CommonMark adversarial input must not block the ASGI event loop.
     try:
-        validate_markdown(body.content)
+        if actor is None:validate_markdown(body.content)
+        else:validate_markdown(body.content,f"{actor.tenant_id}:{actor.user_id}")
+    except MarkdownComplexity as error:
+        raise HTTPException(422,str(error)) from None
     except ValueError:
         raise HTTPException(422, [{"type":"value_error", "loc":["body","content"],
             "msg":"Materi hanya boleh memakai tautan HTTPS publik tanpa karakter tersembunyi"}]) from None
@@ -180,7 +184,7 @@ def publish(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connect
             cursor.itersize = 20
             cursor.execute("SELECT content,resources FROM course_lessons WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid))
             for lesson in cursor:
-                validate_markdown(lesson["content"])
+                validate_markdown(lesson["content"],f"{actor.tenant_id}:{actor.user_id}")
                 for resource in lesson["resources"]:
                     Resource.model_validate(resource)
     except ValueError:
@@ -281,7 +285,7 @@ def delete_module(cid: UUID, mid: UUID, body: Version, actor=Depends(manager), d
 
 @router.post("/{cid}/modules/{mid}/lessons", dependencies=[Depends(verify_origin)], status_code=201)
 def create_lesson(cid: UUID, mid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
-    validate_lesson_content(body)
+    validate_lesson_content(body,actor)
     locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid)
     count = db.execute("SELECT count(*) AS n FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s", (actor.tenant_id, cid, mid)).fetchone()["n"]
     if count >= 50: raise HTTPException(409, "Batas 50 pelajaran per modul telah tercapai")
@@ -301,7 +305,7 @@ def lesson_detail(cid: UUID, mid: UUID, lid: UUID, actor=Depends(manager), db=De
 
 @router.post("/{cid}/modules/{mid}/lessons/{lid}", dependencies=[Depends(verify_origin)])
 def edit_lesson(cid: UUID, mid: UUID, lid: UUID, body: Lesson, actor=Depends(manager), db=Depends(connection, scope="function")):
-    validate_lesson_content(body)
+    validate_lesson_content(body,actor)
     locked(db, actor, cid, body.version); draft(db, actor, cid)
     row = db.execute("UPDATE course_lessons SET title=%s,content=%s,resources=%s WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id",
         (body.title, body.content, Jsonb([r.model_dump() for r in body.resources]), actor.tenant_id, cid, mid, lid)).fetchone()

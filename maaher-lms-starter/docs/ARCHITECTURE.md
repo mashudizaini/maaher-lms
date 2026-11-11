@@ -38,8 +38,11 @@ Contract permission, RLS, version/publish, safe Markdown server dan
 rollback dijelaskan pada [ADR-006](adr/006-course-authoring.md). Kelanjutan development LMS-03 menambah 0008 untuk cohort/enrollment dan SELECT
 materi siswa yang enrollment-nya aktif pada course published. Kontrak lifecycle,
 lock order, grants dan rollback ada pada [ADR-007](adr/007-enrollment-access.md).
-LMS-03 development belum UAT Mac atau mendapat review independen. Belum ada
-completion/progress, runner atau upload service pada kelanjutan ini.
+LMS-03 kini mempunyai laporan validasi Mac sintetis dan review source110c9be
+berisi F1/F2 MEDIUM. Kelanjutan development LMS-04 memperbaiki scope RLS dan
+isolasi parser, menambah completion per revisi/next-step pada0010; lihat
+[ADR-008](adr/008-learning-progress-and-bounded-work.md). Review independen
+delta baru dan UAT Mac masih pending; belum ada runner/upload service.
 Pemilik menyetujui Auth0/OIDC untuk admin/operator pada 10 November 2026.
 Implementasi development tahap 1 dan batas produksinya dijelaskan pada
 [ADR-004](adr/004-auth0-development-login.md); panduan tenant/aplikasi ada pada

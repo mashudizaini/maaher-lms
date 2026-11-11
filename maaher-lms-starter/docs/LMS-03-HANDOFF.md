@@ -1,5 +1,12 @@
 # LMS-03 — cohort dan enrollment siap review development
 
+**Update review 11 November:** pemilik menyampaikan review110c9be dengan dua
+MEDIUM F1 (RLS per row) dan F2 (CPU parser), bukan approval. Verdict formal tidak
+disebut. Lihat [relay author](../reviews/LMS-03-review-relay-20261111.md).
+Pemilik mengizinkan LMS-04; perbaikannya berada pada branch terpisah dan tetap
+menunggu re-review. Pernyataan pending review di snapshot lama di bawah adalah
+sebelum laporan ini. Auth parent full review tetap terbuka.
+
 **Pembaruan validasi Mac, 11 November:** pemilik melaporkan source **110c9be**
 aktif, backup/upgrade 0008 selesai, API/web dibangun ulang, alur dua sesi
 cohort→enroll→read→move→revoke→reactivate lulus, dan archive/restore cohort maupun
