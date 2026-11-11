@@ -25,6 +25,13 @@ writes all200; health CPU-load p95/8 writers8.18ms. Build/typecheck/audits pass
 Synthetic Linux results are not Mac manual UAT, real Auth0, CI, image or multi-worker
 approval. Independent Claude review F5/F6/F7 and LMS-05 remains pending.
 
+Owner subsequently reports38 API/parser and2 browser cases passed on Mac, plus
+Auth0 preflight13 PASS. One Linux-specific assertion was explicitly excluded;
+native Mac memory cap remains unavailable. Browser provider is synthetic; manual
+real-Auth0 UAT is not yet performed. Original report and actual source/schema/
+commands/exclusion must be inspected independently; this is not a full-suite Mac
+or production approval. See LMS-05-MAC-VALIDATION-20261111.md.
+
 This PR stacks on feat/LMS-04-student-learning (base54543a8). Main still includes
 unmerged auth and earlier milestones; full auth review8941a79..4733526 is separate.
 F3/N2/N3/N4/tenant-pause remain open. No grading, runner, merge or deploy approval.

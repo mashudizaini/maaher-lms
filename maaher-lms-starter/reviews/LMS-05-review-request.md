@@ -4,6 +4,21 @@ AUTHOR implemented this delta. No author approval replaces your independent
 review. Read AGENTS.md, CLAUDE.md, docs/PROJECT-SPEC.md, ARCHITECTURE.md,
 AGENT-WORKFLOW.md and .claude/skills/lms-security-review/SKILL.md.
 
+Owner now reports partial Mac validation:38 API/parser and2 browser PASS,
+Auth0 preflight13 PASS, native Mac memory cap unavailable and one Linux-specific
+assertion explicitly excluded. Manual real-Auth0 UAT has not run. Read the original
+Mac report reviews/LMS-05-mac-validation-20261111.md if present and compare it with
+docs/LMS-05-MAC-VALIDATION-20261111.md (AUTHOR relay only). Verify actual Mac SHA,
+schema, commands, skip/deselection/assertion method and any local source/test diff.
+Do not infer full-suite success, zero SKIP or production policy correctness from
+that summary. Check that OS-capability exclusion did not weaken fail-closed,
+CPU/wall/HTTP behavior. Use Linux/container to verify active memory limits.
+
+Implementation snapshot: **54543a8..4a450d5**. The patch/manifest remain immutable
+artifacts for4a450d5: verify hashes against that commit's blobs, then inspect the
+documentation-only commits after it and all actual local modifications. If source
+objects differ or are missing, record the boundary instead of silently approving.
+
 Review **54543a8..HEAD** on feat/LMS-05-assignments-submissions; runtime parent
 5b675e6. If main/ref unavailable, record that and use exact objects, do not assume
 main...HEAD is a delta-only review. Six documentation files in5b675e6..54543a8

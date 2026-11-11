@@ -5,6 +5,21 @@
 **0012_assignments**. Development implementation; independent review/Mac UAT
 pending. No merge/deploy. Full auth parent8941a79..4733526 remains unreviewed.
 
+## Update pemilik — 11 November 2026 WIB
+
+Pemilik melaporkan38 tes API/parser dan2 browser lulus di Mac, preflight Auth0
+13 PASS. Native macOS tidak memiliki memory cap; satu assertion khusus Linux
+dikecualikan secara eksplisit. Browser memakai provider sintetis. UAT manual
+Auth0 nyata belum dilakukan. [Catatan bukti dan batasnya](LMS-05-MAC-VALIDATION-20261111.md)
+membedakan hasil yang dilaporkan dari325 API/17 browser cloud. Laporan asli hanya
+ada di Mac; source SHA/schema/command/pengecualian perlu diperiksa oleh reviewer.
+Tidak ada kesimpulan zero-SKIP atau full-suite Mac dari ringkasan ini.
+
+Berikutnya review independen melalui reviews/LMS-05-review-request.md dan UAT
+manual pemilik. Tidak perlu mengulang setup/migrasi hanya untuk review. Patch dan
+manifest tetap snapshot4a450d5; cek hash terhadap blob commit itu, lalu tinjau
+pembaruan dokumentasi berikutnya. Source aplikasi tidak berubah dalam update ini.
+
 ## Result
 
 Staff `/assignments`: create lesson-bound exercises with validated Markdown,

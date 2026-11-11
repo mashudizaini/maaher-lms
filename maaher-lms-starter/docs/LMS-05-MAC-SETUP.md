@@ -1,5 +1,14 @@
 # LMS-05 — Mac setup and owner UAT
 
+**Update 11 November:** pemilik sudah melaporkan38 tes API/parser dan2 browser
+lulus serta preflight13 PASS. Cap memori native Mac tidak tersedia; satu assertion
+Linux dikecualikan. [Batas bukti](LMS-05-MAC-VALIDATION-20261111.md). Langkah berikut
+adalah review independen dan UAT manual Auth0 nyata, yang belum dilakukan.
+Pertahankan laporan asli reviews/LMS-05-mac-validation-20261111.md. Periksa source/
+schema secara read-only; jangan mengulang upgrade, membuat ulang binding atau
+setup Auth0 semata-mata untuk memulai review. Instruksi setup di bawah berlaku
+untuk checkout baru atau kebutuhan setup yang benar-benar belum selesai.
+
 Branch **feat/LMS-05-assignments-submissions**, base54543a8, schema **0012_assignments**.
 Stacked on LMS-04. Original folder may be `/Users/mashudi/Downloads/AiMZ-Corp Project/maaher-lms-starter`
 or the later checkout `maaher-lms-auth0/maaher-lms-starter`; confirm active Git/app
