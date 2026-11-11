@@ -1,5 +1,13 @@
 # LMS-04 — learning completion dan perbaikan F1/F2 siap review
 
+**Pembaruan benchmark Mac, 11 November:** pemilik melaporkan query siswa 1.500
+pelajaran **31.471,73→75,50 ms** dan health p95 dengan delapan save **13,41 ms**,
+hanya pada DB baru; browser memakai provider sintetis. [Catatan provenance](LMS-04-MAC-BENCHMARK-20261111.md)
+menjelaskan batas ringkasan. SHA/schema aktual, hasil UAT completion dan jumlah
+suite Mac belum dirinci; periksa laporan asli lokal. Tidak menyimpulkan full
+291 API/15 browser Mac atau Auth0 nyata. Review independen F1/F2+LMS-04 pending.
+Source cloud tetap **5b675e6**; pembaruan sesudahnya pada tahap ini hanya dokumen.
+
 11 November 2026 WIB. Branch **feat/LMS-04-student-learning**, base **4870287**
 (runtime parent 110c9be). Pemilik meminta LMS-04 setelah menyampaikan dua MEDIUM
 pada review LMS-03. Verdict formal tidak disampaikan. Lihat relay author
@@ -115,7 +123,8 @@ DB UAT yang berisi atau melakukan downgrade untuk setup. Suite/benchmark hanya
 pada DB kosong baru yang memang disposable; test F1 mengubah policy sementara.
 
 Re-review F1/F2 bersama delta learning melalui reviews/LMS-04-review-request.md.
-Mac UAT baru, real Auth0 staff/student, CI remote, image Docker dan full auth
+Benchmark Mac kini dilaporkan; UAT fungsional Mac, real Auth0 staff/student,
+CI remote, image Docker dan full auth
 review 8941a79..4733526 belum diverifikasi di sini. N2/N3/N4, LOW definer lama,
 ASGI notes yang tidak dirinci dan tenant pause tidak dinyatakan CLOSED.
 Tidak ada merge/deploy atau learner runner. Laporan Claude LMS-01 historis utuh.

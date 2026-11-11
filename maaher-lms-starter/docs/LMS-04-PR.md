@@ -25,5 +25,10 @@ OIDC credentials and configuration are not changed; no learner execution.
 
 Validation: 291 API (0 skip,2 existing deprecation warnings),12 scripts,16 Action,
 15 Chromium browser cases, build/typecheck/pip/compile, npm0 and PyPI41pins0.
-Branch stacks on unmerged4870287; independent review and Mac UAT pending. Auth
-parent full review and old N2/N3/N4 remain open. No merge/deploy approval.
+The owner reports Mac benchmark results in fresh databases: student1500 query
+31471.73→75.50ms and health p95/8 saves13.41ms, with a synthetic browser provider.
+The summary does not confirm the actual source/schema, functional UAT or suite
+counts; the original Mac report is needed. See LMS-04-MAC-BENCHMARK-20261111.md.
+Branch stacks on unmerged4870287; independent F1/F2/LMS-04 review and functional
+Mac UAT remain pending. Auth parent full review and old N2/N3/N4 remain open.
+No merge/deploy approval.

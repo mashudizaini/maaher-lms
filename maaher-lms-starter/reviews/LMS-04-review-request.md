@@ -2,12 +2,26 @@
 
 Author Codex menyiapkan request ini, bukan laporan Claude. Branch
 feat/LMS-04-student-learning, base **4870287** (runtime parent110c9be).
-Review **4870287..HEAD**; 110c9be..4870287 hanya dokumentasi, diverifikasi cloud.
+Target source runtime **5b675e6**, review **4870287..5b675e6**;
+110c9be..4870287 hanya dokumentasi, diverifikasi cloud.
 Laporan asli LMS-03 tetap berada di Mac. Jangan menimpa laporan atau catatan UAT.
 
 Baca CLAUDE/AGENTS, workflow, PROJECT-SPEC, ARCHITECTURE, skill security review,
 ticket LMS-04, ADR-008, LMS-04-HANDOFF/CHECKLIST, relay LMS-03, author-response dan
 performance.json. Source/test/CI snapshot pada manifest/patch; diff Git utama.
+
+Pemilik kini melaporkan benchmark Mac (DB baru): query student1500
+31.471,73→75,50ms dan health p95/8 saves13,41ms, browser provider sintetis.
+Baca docs/LMS-04-MAC-BENCHMARK-20261111.md serta laporan asli lokal
+reviews/LMS-04-mac-validation-20261111.md bila tersedia. SHA/schema aktual,
+metode rinci, status save, suite count dan UAT completion tidak disebut dalam
+ringkasan. Verifikasi dari bukti, jangan menganggap benchmark sebagai verdict.
+
+Source cloud tidak berubah dari5b675e6. Commit berikutnya pada tahap pencatatan
+ini hanya dokumentasi; manifest/patch/performance.json tetap snapshot historis
+source tersebut. Beberapa dokumen lebih baru secara sengaja, sedangkan file
+runtime/test/script/CI tetap sama. Jangan menyimpulkan beda hash dokumentasi
+sebagai perubahan runtime atau menimpa laporan Mac yang untracked.
 
 ## Fokus
 
@@ -40,7 +54,11 @@ performance.json. Source/test/CI snapshot pada manifest/patch; diff Git utama.
 Lakukan review READ-ONLY LMS-04 branch feat/LMS-04-student-learning di
 mashudizaini/maaher-lms. Baca reviews/LMS-04-review-request.md dan semua rujukannya.
 Periksa source SHA/status Git tanpa overwrite perubahan/laporan lokal.
-Review4870287..HEAD dan re-review MEDIUM F1/F2 dari LMS-03 secara terpisah.
+Target runtime5b675e6; review4870287..5b675e6 dan re-review MEDIUM F1/F2 terpisah.
+Baca laporan asli reviews/LMS-04-mac-validation-20261111.md bila tersedia;
+verifikasi SHA/schema dan metode/budget/status saves aktual. Commit cloud setelah
+5b675e6 pada tahap ini hanya dokumentasi. Jika source lokal berbeda, nyatakan
+scope yang benar tanpa reset/overwrite dan jangan mengklaim target sudah diuji.
 Gunakan DB kosong baru maaher_test_* milik review, role runtime non-owner tanpa
 BYPASSRLS dan role lain terpisah. Jangan memakai DB UAT/DB lama atau menjalankan
 benchmark pada data pengguna; benchmark mengubah policy sementara. Semua rollback

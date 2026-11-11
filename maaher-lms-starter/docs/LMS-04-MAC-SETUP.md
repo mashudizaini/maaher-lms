@@ -1,5 +1,12 @@
 # LMS-04 — menjalankan completion dan perbaikan performa di Mac
 
+**Pembaruan 11 November:** pemilik sudah melaporkan benchmark di DB baru pada
+Mac; [angka dan batas bukti](LMS-04-MAC-BENCHMARK-20261111.md). Langkah berikutnya
+adalah [re-review independen Claude](../reviews/LMS-04-review-request.md).
+Pertahankan laporan asli reviews/LMS-04-mac-validation-20261111.md. Periksa
+source/schema aktif secara read-only; jangan mengulang migrasi atau setup
+Auth0 semata-mata untuk review. Panduan di bawah tetap untuk checkout baru.
+
 Branch feat/LMS-04-student-learning, base4870287; root aplikasi GitHub
 maaher-lms-starter/. Checkout Mac terakhir dapat bernama maaher-lms-auth0;
 periksa Git root/status dan runtime aktif, jangan menebak atau menimpa folder.

@@ -1,6 +1,7 @@
 # LMS-04 — checklist development
 
-Base4870287; head schema0010_learning_progress. Bukti rinci LMS-04-HANDOFF.md.
+Source cloud **5b675e6**, base4870287; head schema0010_learning_progress.
+Bukti rinci LMS-04-HANDOFF.md. Benchmark Mac kini dilaporkan; [batas bukti](LMS-04-MAC-BENCHMARK-20261111.md).
 
 | Item | Status |
 |---|---|
@@ -15,7 +16,10 @@ Base4870287; head schema0010_learning_progress. Bukti rinci LMS-04-HANDOFF.md.
 | Seeded upgrade/guarded downgrade/offline0010 | Migration fixture PASS |
 | Full regression | **291 API, 12 scripts, 16 Action, 15 browser**, 0 skip |
 | Build/typecheck/compile/pip check, npm/PyPI audit | PASS, 0 findings/errors on audits |
-| Mac UAT / real Auth0 / Docker image / remote CI | PENDING/UNVERIFIED |
+| Benchmark Mac | Dilaporkan: student1500 31.471,73→75,50ms, health p95/8 saves13,41ms, DB baru |
+| SHA/schema dan suite count Mac aktual | Belum disebut pada ringkasan; periksa laporan asli lokal |
+| UAT fungsional/manual Mac | Hasil completion/navigation/revision/revoke belum dirinci |
+| Real Auth0 / Docker image / remote CI | UNVERIFIED |
 | Independent review F1/F2 + LMS-04 | PENDING |
 | Full auth parent review | PENDING |
 | N2/N3/N4, old definer LOW, tenant pause | OPEN/unchanged scope |
