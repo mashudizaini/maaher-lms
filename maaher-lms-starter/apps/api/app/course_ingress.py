@@ -18,8 +18,8 @@ class CourseIngress:
     async def __call__(self, scope, receive, send):
         path = scope.get('path', '')
         mutation = scope['type'] == 'http' and scope['method'] == 'POST' and any(
-            path == root or path.startswith(root + '/') for root in ('/courses', '/cohorts', '/enrollments'))
-        learning = scope['type']=='http' and scope['method'] in {'GET','POST'} and (path=='/learning/courses' or path.startswith('/learning/courses/'))
+            path == root or path.startswith(root + '/') for root in ('/courses', '/cohorts', '/enrollments','/assignments'))
+        learning = scope['type']=='http' and scope['method'] in {'GET','POST'} and (path=='/learning/courses' or path.startswith('/learning/courses/') or path=='/work' or path.startswith('/work/'))
         if not mutation and not learning:
             return await self.app(scope, receive, send)
         try:

@@ -112,7 +112,7 @@ def database(config, report):
                 report.add('database','FAIL','checker hanya untuk DB development sintetis maaher_test_*; tidak menginspeksi data pengguna')
                 return
             revision = owner.execute('SELECT version_num FROM alembic_version').fetchone()[0]
-            if revision not in {'0005_dev_totp', '0006_courses', '0007_course_review', '0008_enrollment', '0009_read_scope', '0010_learning_progress'}:
+            if revision not in {'0005_dev_totp', '0006_courses', '0007_course_review', '0008_enrollment', '0009_read_scope', '0010_learning_progress', '0011_content_validation', '0012_assignments'}:
                 report.add('database migration','FAIL','migration 0005 belum aktif; periksa source dan DB development yang dipilih')
                 return
             report.add('database migration','PASS','schema Auth0 tersedia pada head yang dikenali di DB sintetis')

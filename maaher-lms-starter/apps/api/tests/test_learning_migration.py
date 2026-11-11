@@ -33,7 +33,7 @@ def test_progress_upgrade_guard_downgrade_and_revision_preservation(database,mon
         db.execute('INSERT INTO lesson_progress(tenant_id,course_id,enrollment_id,student_id,lesson_id,lesson_revision) VALUES(%s,%s,%s,%s,%s,1)',(tid,cid,eid,uid,lid))
     with pytest.raises(DBAPIError,match='allow_progress_data_loss'):command.downgrade(cfg,'0008_enrollment')
     with psycopg.connect(url) as db:
-        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0010_learning_progress'
+        assert db.execute('SELECT version_num FROM alembic_version').fetchone()[0]=='0012_assignments'
         assert db.execute('SELECT count(*) FROM lesson_progress').fetchone()[0]==1
     output=io.StringIO();offline=Config(str(Path(__file__).parents[1]/'alembic.ini'),output_buffer=output)
     command.downgrade(offline,'0010_learning_progress:0009_read_scope',sql=True)

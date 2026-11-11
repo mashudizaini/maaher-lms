@@ -57,3 +57,7 @@ th, td { padding: .4rem; text-align: left; border-bottom: 1px solid #888; overfl
 .learning-actions { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: 1.25rem; }
 .learning-success { border-left: 3px solid #176540; padding-left: .8rem; color: #176540; }
 .learning-notice { background: #fff2d9; padding: .8rem; border-radius: .4rem; }
+
+.code-editor,.submission-code { width:100%; font-family:ui-monospace,SFMono-Regular,Consolas,monospace; line-height:1.6; tab-size:4; }
+.submission-code { white-space:pre-wrap; overflow-wrap:anywhere; background:#f1f5f9; padding:1rem; border-radius:.5rem; }
+.editor-form fieldset { display:grid; gap:.7rem; border:0; padding:0; min-width:0; }

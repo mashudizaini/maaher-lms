@@ -10,6 +10,7 @@ from .courses import router as courses_router
 from .course_ingress import CourseIngress
 from .enrollment import router as enrollment_router
 from .learning import router as learning_router
+from .assignments import router as assignments_router,work as work_router,review as assignment_review_router
 from .traffic import ANONYMOUS_PATHS, admit
 from .auth_support import limited
 
@@ -21,6 +22,9 @@ app.include_router(oidc_router)
 app.include_router(courses_router)
 app.include_router(enrollment_router)
 app.include_router(learning_router)
+app.include_router(assignments_router)
+app.include_router(work_router)
+app.include_router(assignment_review_router)
 
 
 @app.middleware("http")

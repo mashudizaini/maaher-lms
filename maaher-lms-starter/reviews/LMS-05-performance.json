@@ -1,0 +1,62 @@
+{
+  "recorded_user_date": "2026-11-11",
+  "timezone": "Asia/Jakarta",
+  "platform": "Cloud Linux Python3.12.14 / PostgreSQL16.15 / one uvicorn API worker / synthetic signed IdP for browser",
+  "scope": "author measurements, independent review pending",
+  "publish": {
+    "lessons": 1500,
+    "characters_per_lesson": 29000,
+    "publish_ms": 757.63,
+    "writer_statuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "health_p95_ms": 1.81,
+    "setup": "each unique document validated with raw trusted parser before proof signing; excluded from publish timer"
+  },
+  "rls_regression": {
+    "current_admin_1500_ms": 74.45,
+    "current_catalog_451_ms": 15.31,
+    "current_http_1500_ms": 116.91,
+    "current_student_100_ms": 16.95,
+    "current_student_1500_ms": 23.31,
+    "legacy_admin_1500_ms": 12162.42,
+    "legacy_catalog_451_ms": 4510.41,
+    "legacy_student_100_ms": 1913.15,
+    "legacy_student_1500_ms": 21985.89
+  },
+  "cpu_http": {
+    "actual_account_budget_attempts": 52,
+    "baseline_p95_ms": 1.43,
+    "load_1_p95_ms": 1.93,
+    "load_1_samples": 2150,
+    "load_1_statuses": {
+      "422": 8
+    },
+    "load_2_p95_ms": 2.77,
+    "load_2_samples": 988,
+    "load_2_statuses": {
+      "422": 8
+    },
+    "load_8_p95_ms": 8.18,
+    "load_8_samples": 498,
+    "load_8_statuses": {
+      "422": 8,
+      "429": 24
+    }
+  },
+  "methods": {
+    "publish": "1500 unique validated ASCII documents of29000 chars; trusted raw parser validates each fixture before signing, excluded setup time. TCP publish concurrent with distinct-course writer8 saves every0.5s; no429/409. Health sampled after publish while writer remains active. New empty DB only.",
+    "rls": "same-data SQL reconstructs0008 SELECT and FORALL policies temporarily only in disposable DB; current HTTP figure is ASGI TestClient including progress, not TCP.",
+    "cpu_http": "actual CommonMark CPU load over uvicorn/TCP; invalid URL plus heavy mixed image/emphasis document about30k prevents successful cached saves even if hardware finishes under250ms. Original52/60 writer budget retained.",
+    "cpu_timer_unit": "test-only isolated worker executes an actual CPU loop for SIGPROF250ms assertion independent of parser/hardware speed; no Event. Actual parser load uses separate TCP probe.",
+    "limits": "3 Linux workers reported RLIMIT_AS256MiB active; native Darwin not run. Unsupported-cap behavior simulated through real IPC.",
+    "unverified": "Mac manual UAT, real Auth0, Docker image, remote CI and multi-worker not tested here."
+  }
+}

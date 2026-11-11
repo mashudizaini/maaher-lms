@@ -9,7 +9,10 @@ from psycopg.errors import CheckViolation, ForeignKeyViolation
 from .auth import connection, principal, verify_origin
 from .security import Principal
 from .course_content import https_resource, validate_markdown
-from .markdown_service import MarkdownComplexity
+from .markdown_service import MarkdownComplexity,validate_maintenance
+from .content_attestation import seal,valid
+from .auth_support import cipher
+import time
 
 router = APIRouter(prefix="/courses")
 
@@ -177,18 +180,14 @@ def publish(cid: UUID, body: Version, actor=Depends(manager), db=Depends(connect
     empty = db.execute("SELECT 1 FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND length(btrim(content))=0 LIMIT 1", (actor.tenant_id, cid)).fetchone()
     if not modules or incomplete or empty:
         raise HTTPException(409, "Isi setiap modul dengan pelajaran dan materi sebelum menerbitkan")
-    # Existing 0006 content is preserved during upgrade. Revalidate on publish
-    # using a cursor so legacy links cannot bypass the new write policy.
-    try:
-        with db.cursor(name="course_publish_links") as cursor:
-            cursor.itersize = 20
-            cursor.execute("SELECT content,resources FROM course_lessons WHERE tenant_id=%s AND course_id=%s", (actor.tenant_id, cid))
-            for lesson in cursor:
-                validate_markdown(lesson["content"],f"{actor.tenant_id}:{actor.user_id}")
-                for resource in lesson["resources"]:
-                    Resource.model_validate(resource)
-    except ValueError:
-        raise HTTPException(409, "Perbaiki tautan materi agar memakai HTTPS publik tanpa karakter tersembunyi sebelum menerbitkan") from None
+    # Saved, signed proofs make this a bounded linear scan, never parser work.
+    ring=cipher()
+    with db.cursor(name="course_publish_links") as cursor:
+        cursor.itersize=20
+        cursor.execute("SELECT id,revision,content,resources,content_attestation FROM course_lessons WHERE tenant_id=%s AND course_id=%s",(actor.tenant_id,cid))
+        for lesson in cursor:
+            if not valid(lesson['content_attestation'],'lesson',(actor.tenant_id,lesson['id'],lesson['revision']),lesson['content'],lesson['resources'],ring):
+                raise HTTPException(409,'Materi belum diverifikasi pada revisi ini. Gunakan Periksa materi lama sebelum menerbitkan')
     result = changed(db, actor, cid, "published"); audit(db, actor, "course.published", cid)
     return result
 
@@ -276,7 +275,8 @@ def order_modules(cid: UUID, body: Order, actor=Depends(manager), db=Depends(con
 @router.post("/{cid}/modules/{mid}/delete", dependencies=[Depends(verify_origin)])
 def delete_module(cid: UUID, mid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
     locked(db, actor, cid, body.version); module_exists(db, actor, cid, mid); draft(db, actor, cid)
-    db.execute("DELETE FROM course_modules WHERE tenant_id=%s AND course_id=%s AND id=%s", (actor.tenant_id, cid, mid))
+    try:db.execute("DELETE FROM course_modules WHERE tenant_id=%s AND course_id=%s AND id=%s", (actor.tenant_id, cid, mid))
+    except ForeignKeyViolation:raise HTTPException(409,"Modul memiliki tugas. Arsipkan kursus untuk mempertahankan histori") from None
     ids = [r["id"] for r in db.execute("SELECT id FROM course_modules WHERE tenant_id=%s AND course_id=%s ORDER BY position,id", (actor.tenant_id, cid)).fetchall()]
     reorder(db, actor, cid, "course_modules", ids)
     result = changed(db, actor, cid); audit(db, actor, "module.deleted", mid, "module")
@@ -292,6 +292,7 @@ def create_lesson(cid: UUID, mid: UUID, body: Lesson, actor=Depends(manager), db
     draft(db, actor, cid); lid = uuid4()
     db.execute("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,resources,position) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                (lid, actor.tenant_id, cid, mid, body.title, body.content, Jsonb([r.model_dump() for r in body.resources]), count + 1))
+    certify_lesson(db,actor,cid,lid)
     result = changed(db, actor, cid); audit(db, actor, "lesson.created", lid, "lesson")
     return {**result, "id": lid}
 
@@ -310,6 +311,7 @@ def edit_lesson(cid: UUID, mid: UUID, lid: UUID, body: Lesson, actor=Depends(man
     row = db.execute("UPDATE course_lessons SET title=%s,content=%s,resources=%s WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id",
         (body.title, body.content, Jsonb([r.model_dump() for r in body.resources]), actor.tenant_id, cid, mid, lid)).fetchone()
     if not row: raise HTTPException(404, "Pelajaran tidak ditemukan")
+    certify_lesson(db,actor,cid,lid)
     result = changed(db, actor, cid); audit(db, actor, "lesson.updated", lid, "lesson")
     return result
 
@@ -325,9 +327,42 @@ def order_lessons(cid: UUID, mid: UUID, body: Order, actor=Depends(manager), db=
 @router.post("/{cid}/modules/{mid}/lessons/{lid}/delete", dependencies=[Depends(verify_origin)])
 def delete_lesson(cid: UUID, mid: UUID, lid: UUID, body: Version, actor=Depends(manager), db=Depends(connection, scope="function")):
     locked(db, actor, cid, body.version); draft(db, actor, cid)
-    row = db.execute("DELETE FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id", (actor.tenant_id, cid, mid, lid)).fetchone()
+    try:row = db.execute("DELETE FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s AND id=%s RETURNING id", (actor.tenant_id, cid, mid, lid)).fetchone()
+    except ForeignKeyViolation:raise HTTPException(409,"Pelajaran memiliki tugas. Arsipkan kursus untuk mempertahankan histori") from None
     if not row: raise HTTPException(404, "Pelajaran tidak ditemukan")
     ids = [r["id"] for r in db.execute("SELECT id FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND module_id=%s ORDER BY position,id", (actor.tenant_id, cid, mid)).fetchall()]
     reorder(db, actor, cid, "course_lessons", ids, mid)
     result = changed(db, actor, cid); audit(db, actor, "lesson.deleted", lid, "lesson")
     return result
+
+
+def certify_lesson(db,actor,cid,lid,row=None):
+    row=row or db.execute('SELECT revision,content,resources FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND id=%s',(actor.tenant_id,cid,lid)).fetchone()
+    token=seal('lesson',(actor.tenant_id,lid,row['revision']),row['content'],row['resources'])
+    saved=db.execute('UPDATE course_lessons SET content_attestation=%s WHERE tenant_id=%s AND course_id=%s AND id=%s AND revision=%s AND content=%s AND resources=%s RETURNING id',(token,actor.tenant_id,cid,lid,row['revision'],row['content'],Jsonb(row['resources']))).fetchone()
+    if not saved:raise HTTPException(409,'Bukti validasi belum tersimpan. Jadikan kursus draf terlebih dahulu')
+
+
+class ContentBatch(Version): after: UUID|None=None
+
+
+@router.post('/{cid}/validate-content',dependencies=[Depends(verify_origin)])
+def validate_legacy_content(cid:UUID,body:ContentBatch,actor=Depends(manager),db=Depends(connection,scope='function')):
+    current=locked(db,actor,cid,body.version)
+    if current['state']!='draft':raise HTTPException(409,'Jadikan kursus draf sebelum memeriksa materi lama')
+    rows=db.execute('SELECT id,revision,content,resources,content_attestation FROM course_lessons WHERE tenant_id=%s AND course_id=%s AND (id>%s::uuid OR %s::uuid IS NULL) ORDER BY id LIMIT 51',
+                    (actor.tenant_id,cid,body.after,body.after)).fetchall()
+    start=time.monotonic();processed=0;last=body.after;ring=cipher()
+    for row in rows[:50]:
+        if processed and time.monotonic()-start>2:break
+        if not valid(row['content_attestation'],'lesson',(actor.tenant_id,row['id'],row['revision']),row['content'],row['resources'],ring):
+            try:
+                validate_maintenance(row['content'],f'{actor.tenant_id}:{actor.user_id}')
+                for item in row['resources']:Resource.model_validate(item)
+            except HTTPException as error:
+                if error.status_code==429 and processed:break
+                raise
+            except ValueError:raise HTTPException(409,'Perbaiki materi/tautan pada pelajaran '+str(row['id'])+' sebelum melanjutkan') from None
+            certify_lesson(db,actor,cid,row['id'],row)
+        processed+=1;last=row['id']
+    return {'checked':processed,'next_cursor':str(last) if processed<len(rows) else None,'version':body.version}

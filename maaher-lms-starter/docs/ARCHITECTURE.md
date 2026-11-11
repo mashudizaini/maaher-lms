@@ -79,6 +79,18 @@ test databases. Auth0/OIDC is now selected; production enrollment, root trust,
 recovery and operator workflow still require implementation/verification and
 independent review. Existing password-only enrollments are not automatically trusted.
 
+## LMS-05 development continuation
+
+LMS-04 independent verdict relayed by owner: APPROVED_WITH_NOTES for synthetic
+small–medium dev/UAT; F1 and F2-health CLOSED, residual F5 MEDIUM and F6/F7 LOW.
+[ADR-009](adr/009-assignments-and-publish-validation.md) defines signed content
+validation, bounded maintenance and assignment/submission lifecycle on0011/0012.
+Versioned tasks, own drafts and immutable submission snapshots are implemented
+for development; independent LMS-05 review and owner Mac UAT remain pending.
+The [Mac guide](LMS-05-MAC-SETUP.md) preserves existing keys/Auth0/bindings/data.
+No new definer/role/secret or learner execution. Older open findings and full
+auth parent review remain separate; historical ADR-008 validation is not release approval.
+
 ## Coding lab / auto-grader: high-risk system
 - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.
 - Never run learner code via Python `exec`, Node eval, shell, local Python subprocess, or Docker socket in FastAPI/Next containers.

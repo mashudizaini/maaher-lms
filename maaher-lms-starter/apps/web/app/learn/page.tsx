@@ -74,7 +74,7 @@ export default function Learn() {
 
   return <main className="courses-page">
     <header className="studio-header"><div><p className="eyebrow">MAAHER LMS / BELAJAR</p><h1>Kursus saya</h1><p>Belajar bertahap, simpan kemajuan, dan lanjutkan langkah berikutnya.</p></div>
-      <nav><a href="/">Beranda</a><a href="/auth">Akun &amp; keluar</a></nav></header>
+      <nav><a href="/work">Tugas saya</a><a href="/">Beranda</a><a href="/auth">Akun &amp; keluar</a></nav></header>
     <div className="studio-toolbar">
       <label htmlFor="learning-tenant">Organisasi</label>
       <select id="learning-tenant" value={tenant} disabled={busy} onChange={event => {
@@ -104,6 +104,7 @@ export default function Learn() {
         </section>
         {lesson && <article className="studio-panel lesson-preview" aria-label="Materi pelajaran"><p className="eyebrow">{lesson.completed ? 'SELESAI' : 'SEDANG DIPELAJARI'}</p><h2>{lesson.title}</h2>
           {lesson.needs_review && <p className="learning-notice">Materi telah diperbarui. Baca kembali lalu tandai selesai untuk menyimpan kemajuan pada revisi ini.</p>}
+          <p><a href={`/work?tenant=${tenant}&course=${outline.id}&lesson=${lesson.id}`}>Tugas pelajaran</a></p>
           <LessonContent content={lesson.content} resources={lesson.resources} />
           <div className="learning-actions">
             <button disabled={busy} onClick={() => void run(() => complete())}>{lesson.completed ? 'Tandai belum selesai' : 'Tandai selesai'}</button>

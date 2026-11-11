@@ -5,7 +5,7 @@ import { isIP } from 'node:net';
 export const dynamic = 'force-dynamic';
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const read = new RegExp(`^(?:${uuid}(?:/modules/${uuid}/lessons/${uuid})?)?$`);
-const write = new RegExp(`^(?:${uuid}(?:/(?:publish|unpublish|archive|restore|teachers|reorder-modules|modules(?:/${uuid}(?:/(?:delete|reorder-lessons|lessons(?:/${uuid}(?:/delete)?)?))?)?))?)?$`);
+const write = new RegExp(`^(?:${uuid}(?:/(?:publish|unpublish|archive|restore|validate-content|teachers|reorder-modules|modules(?:/${uuid}(?:/(?:delete|reorder-lessons|lessons(?:/${uuid}(?:/delete)?)?))?)?))?)?$`);
 
 async function proxy(request: NextRequest, context: { params: Promise<{ path?: string[] }> }) {
   const path = (await context.params).path?.join('/') ?? '';

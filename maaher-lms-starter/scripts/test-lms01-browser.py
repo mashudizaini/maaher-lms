@@ -57,7 +57,9 @@ def main():
     parser.add_argument('--courses', action='store_true', help='Run course authoring after synthetic OIDC login')
     parser.add_argument('--enrollment', action='store_true', help='Run enrollment and student access browser tests with --oidc')
     parser.add_argument('--learning', action='store_true', help='Run completion and student navigation browser tests with --oidc')
+    parser.add_argument('--assignments', action='store_true', help='Run versioned assignments and immutable submissions with --oidc')
     args = parser.parse_args()
+    if args.assignments and not args.oidc:parser.error('--assignments requires --oidc')
     if args.learning and not args.oidc:
         parser.error('--learning requires --oidc')
     if args.enrollment and not args.oidc:
@@ -98,6 +100,8 @@ def main():
             test_file = 'enrollment.spec.ts'
         if args.learning:
             test_file = 'learning.spec.ts'
+        if args.assignments:
+            test_file = 'assignments.spec.ts'
         env.update(AUTH0_DOMAIN='browser-tests.us.auth0.com', AUTH0_CLIENT_ID='synthetic-browser-client',
                    AUTH0_CLIENT_SECRET='synthetic-browser-client-secret-not-a-real-credential',
                    PYTHONPATH=os.pathsep.join((str(ROOT/'apps/api'),str(ROOT/'apps/api/tests'))))

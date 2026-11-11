@@ -1,0 +1,298 @@
+{
+  "base_commit": "54543a8f63066a44303ab577a70738e614ec226a",
+  "branch": "feat/LMS-05-assignments-submissions",
+  "generated_at_utc": "2026-11-11T03:02:16.463231+00:00",
+  "user_facing_date": "2026-11-11",
+  "user_timezone": "Asia/Jakarta",
+  "scope": "LMS-05 assignments/submissions and author fixes for LMS-04 F5/F6/F7; independent review pending",
+  "exclusions": [
+    "maaher-lms-starter/reviews/LMS-05-author.patch",
+    "maaher-lms-starter/reviews/LMS-05-manifest.json"
+  ],
+  "patch_sha256": "4c9ee26f6ca120b84cf44d03575143cb653016d456f662086339e49228f044ed",
+  "baseline_apply_check": "PASS using separate temporary index, no workspace patch applied",
+  "files": [
+    {
+      "path": ".github/workflows/lms-auth0.yml",
+      "bytes": 9872,
+      "sha256": "0a93d86ac1e1e50b3393e5f4e63edd6a80ee00779afdad4775a4263ef36a6881",
+      "base_blob": "ce05ebef2c5fc2f41222b581690cb08ce981f51d"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/assignments.py",
+      "bytes": 17146,
+      "sha256": "8e8b1d76dfef5974605e377459b11a8dbd6944a300c5cb8bfbe56daf3ea4bd0e",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/content_attestation.py",
+      "bytes": 1171,
+      "sha256": "0718b043896e92b8f0e74929cc0bf969f6fcd9cf5baaa1495b09aef0f74cf65d",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/course_ingress.py",
+      "bytes": 2909,
+      "sha256": "4844834e7b4122042a7e2b9f916e89385e3cfdea6175645bf26193428ab0a777",
+      "base_blob": "c8969bea15add9e32cf1ef3a9d7049b33bee3a93"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/courses.py",
+      "bytes": 21133,
+      "sha256": "4336f55acb1a58118bba07def01f9d505ff971c7a829b842fa09caae71145304",
+      "base_blob": "71c210ecb7facc0e43fd3f8927773e64358797e2"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/main.py",
+      "bytes": 2264,
+      "sha256": "1c972c799f0b9c9987eaebc7d6f0df8f5e56e1ec32c5b4cbac9cd0770d385430",
+      "base_blob": "9d37047c0ab8bff60f736ac9f4567a5f1faafced"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/markdown_service.py",
+      "bytes": 5712,
+      "sha256": "508aed2ced13ba05123cbeccdef602b320483720ca6a1fcb749096e526c52bc2",
+      "base_blob": "4d160f80052cbe0e53747a2940806e57dc3cc855"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/markdown_worker.py",
+      "bytes": 1634,
+      "sha256": "8dc7af4adb9e759cfd78e458a3fb773b54db43559bf1d3227c86a48768e5b55f",
+      "base_blob": "c52b934e44776a418a9787e4dda7d1f7a2ddccf3"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/migrations/assignments.sql",
+      "bytes": 14694,
+      "sha256": "7f71978b8201535182b0f1a500d69858f7a54b761c6a3606f86a0ce308b73193",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/migrations/versions/0011_content_validation.py",
+      "bytes": 1267,
+      "sha256": "d4cbd183214468a72ddebee5b768e8976408bfdfc4290ece1586407a7a4c4399",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/migrations/versions/0012_assignments.py",
+      "bytes": 1323,
+      "sha256": "5cdc00373b44b8e6de2c1d70a3d75883ae02eb5a8e347921f337a33649afad89",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/conftest.py",
+      "bytes": 12173,
+      "sha256": "aa1d5bd7b4fc6bba2dd37a586df6cdd33b0c224871d23b50f237dc36addcfa85",
+      "base_blob": "33de5010bf6be3ec77f4d86fea37be0c9ac43fa8"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/markdown_cpu_probe.py",
+      "bytes": 437,
+      "sha256": "d2234d240a4a9dc162d62fd91822791600978086c8b13e9ad6b43e2bafd0c7cd",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_assignments.py",
+      "bytes": 17287,
+      "sha256": "b5c7725271f893630859b96c5b3134caf75ee43b937da1c21bb817d27120262e",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_assignments_migration.py",
+      "bytes": 5696,
+      "sha256": "388a6580d8e2448ed0e7442cd93a9c92a1f8b5fcdf361b6f87830ed9f591f0f7",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_content_attestation.py",
+      "bytes": 9741,
+      "sha256": "918d3a9ab9de59d33ab0b0d7b58c3cba0c051a678c5ef583fbfce85b4574621e",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_enrollment_migration.py",
+      "bytes": 3229,
+      "sha256": "1040e9b02b1c60ddf855cc71fd580844be87bc3c331498cdb4542ac3921482f9",
+      "base_blob": "b9bedfb883987d21382aaf1fa971a659c23446b1"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_learning_migration.py",
+      "bytes": 3690,
+      "sha256": "5ab3632254646ff08be949238a7199213d4ca1d38bfc411445411c66c058f779",
+      "base_blob": "3bad672b90bc321fb530a4a48d27397a9050f2c2"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_markdown_process.py",
+      "bytes": 6722,
+      "sha256": "7a9d0dccc45b89b24c9c2ccf1725f51dbab24a2fd32583e77ad404ca49407c9b",
+      "base_blob": "92ba726730e4d62ab1ae504da3a9d05a2180d177"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/api/assignment-submissions/[[...path]]/route.ts",
+      "bytes": 309,
+      "sha256": "6d277c3e15b2d6f9b6319ed00c960aa58bee096347939b9b996ac3c5c06daf6b",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/api/assignments/[[...path]]/route.ts",
+      "bytes": 323,
+      "sha256": "212e59c5c2342e65e50092f914c8613879894c64ff7aaa5fb574d509920ae3df",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/api/courses/[[...path]]/route.ts",
+      "bytes": 4530,
+      "sha256": "17424f4568ace60e40863c95ba8b0079e78ff6736c913cdd6b069e7cd89e465e",
+      "base_blob": "b883ec8e149cb5f6949a12362c1f07ec8577897a"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/api/work/[[...path]]/route.ts",
+      "bytes": 316,
+      "sha256": "9d02fff3d878589f45f145444d7d91ee776dffcf31fd41ea50694a34a6f03c9b",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/assignments/page.tsx",
+      "bytes": 13618,
+      "sha256": "90cb4daf6aab49f770beaa0271404c782f234d2eff3f27d15b3af019a473598c",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/auth/page.tsx",
+      "bytes": 16060,
+      "sha256": "c5d9250ea72982b565d68c0fe0257df9c5a22f8e3883210fb5d4f072504c18d6",
+      "base_blob": "32595400cc309a4978967557e1873d4b7b7f1b25"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/components/assignment-proxy.ts",
+      "bytes": 4900,
+      "sha256": "e9350212f3fa6eb6235529c8ed181416a1c91ad41e2925db373ef2372df80050",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/components/assignment-types.ts",
+      "bytes": 766,
+      "sha256": "9288e936c02181b87785c86997a9a7e50d4c0367f48e789f66d4cf05accf5384",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/courses/page.tsx",
+      "bytes": 21491,
+      "sha256": "9658d4397fd5e27d64d76bd234600e0b0dcce2091c0592627973b486e3e860d9",
+      "base_blob": "9b8d1d2733089ac9dbf586270c344594bb202cd9"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/globals.css",
+      "bytes": 4978,
+      "sha256": "c73aa381467469a5b51d8c549c09e0371d0fcad6ef2c85baa2b9cc9e457ec8dd",
+      "base_blob": "bdbb15a732105beead5422f6c9deb58aaed5c2a6"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/learn/page.tsx",
+      "bytes": 8275,
+      "sha256": "3bde12904edc93355e5f7b007acb5f4b189927b26fc1c7265183475c8a15c74f",
+      "base_blob": "c7c3ff0b7a714dd472cd4f875de3a309d6603ca6"
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/app/work/page.tsx",
+      "bytes": 11201,
+      "sha256": "1ce865670aa16033e74493bf027789d1f9b421bf2f37d3451f2a3fd14c087cc7",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/tests/assignments.spec.ts",
+      "bytes": 10463,
+      "sha256": "726a69afd2f902e87ed66a551680b0f09c8e253b3a576c43b8dedc43aa3e9f74",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/ARCHITECTURE.md",
+      "bytes": 8701,
+      "sha256": "7bc74d4339be378cc8590d76cb62faffcb1961c8940c9f95dba6772879b1143f",
+      "base_blob": "0863a2148743ca4414fe51f3a32efd5f816c3191"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-04-HANDOFF.md",
+      "bytes": 9099,
+      "sha256": "777e7c02bc8f0d946068c2a7e84253d6205bf6508355ee71ac2129c6f4142c44",
+      "base_blob": "3b82110d5da2e84a12d865b55288e1e0fcd43faa"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-CHECKLIST.md",
+      "bytes": 2182,
+      "sha256": "719f6893ecdee8841f96c1b82573e8db9cf3ebeafd804e8ac73e0f3f55325f66",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-HANDOFF.md",
+      "bytes": 9945,
+      "sha256": "ee1dafe23f83891c345d11bdb2dba3c7455f350ab6070ab02368ed6617302582",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-MAC-SETUP.md",
+      "bytes": 7088,
+      "sha256": "d71fb324e06cf30f2c945bd207b1b212d81585ccec94c44825a8187a6abbee59",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-PR.md",
+      "bytes": 1978,
+      "sha256": "ad3cb66765b04ff6585eb07df5cc66852712e44039a62043b18151dbadca17ff",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/adr/009-assignments-and-publish-validation.md",
+      "bytes": 8427,
+      "sha256": "43c73f5e4656a98fe9593a76ad0c001b462acba464b68ef6a5edb9f8ed696b01",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/tickets/LMS-05.md",
+      "bytes": 2696,
+      "sha256": "099dbec5a23aa86b0912a9466707d7d46b47e6146e7f2478eb8f129bd90a9cb7",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-04-review-relay-20261111.md",
+      "bytes": 1642,
+      "sha256": "67bb5cfc992e927c3527c9125350c563e76b6b308e3478b8e6696e5e3d8e3f9b",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-05-author-response.md",
+      "bytes": 2046,
+      "sha256": "1e2f0ed8739bbf29eaf9427920e06128a5c7de1d2efe1ca81a5ee4b3c5868a52",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-05-performance.json",
+      "bytes": 2582,
+      "sha256": "62186359a0d3836721c7624afd005295bcea02e7844075124f866335b1b8c916",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-05-review-request.md",
+      "bytes": 3470,
+      "sha256": "5152adfbdb5214428b2926a94a26f7a8382fcd30e30138f08e520ed574b30dce",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/scripts/parser-preflight.py",
+      "bytes": 609,
+      "sha256": "6ecafcfe663c70a61f42ad918bd9f977147f6bac10120bc1b32c4f9f0319da86",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/scripts/test-lms01-browser.py",
+      "bytes": 6027,
+      "sha256": "442904dad90960fccb04f6e0ea8b1c508b62b29aafc9ad7d1613a3c9d8181e6d",
+      "base_blob": "9f8870cc8600176cfae1a2a8a49925f51a64d190"
+    },
+    {
+      "path": "maaher-lms-starter/scripts/verify-auth0-local.py",
+      "bytes": 12263,
+      "sha256": "855ba02b084c4313f1bde9501a5c46574284c49ccd2fe288dbfcc325ba094d4c",
+      "base_blob": "47ffd790e177856da2db7d47338c7ec0b142b540"
+    }
+  ]
+}

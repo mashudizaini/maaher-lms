@@ -142,8 +142,8 @@ export default function Authentication() {
           const selected = await call('tenant-selection', {}); setRole(selected.role); setMessage('Organisasi dipilih');
           const self = await call('me'); setMyUser(self.user_id);
         })}>Gunakan organisasi</button>
-        {['admin','teacher'].includes(role) && <p><a href={`/courses?tenant=${encodeURIComponent(tenant)}`}>Kelola kursus</a> · <a href="/enrollments">Cohort &amp; enrollment</a></p>}
-        {role === 'student' && <p><a href="/learn">Kursus saya</a></p>}
+        {['admin','teacher'].includes(role) && <p><a href={`/courses?tenant=${encodeURIComponent(tenant)}`}>Kelola kursus</a> · <a href="/assignments">Tugas &amp; submission</a> · <a href="/enrollments">Cohort &amp; enrollment</a></p>}
+        {role === 'student' && <p><a href="/learn">Kursus saya</a> · <a href="/work">Tugas saya</a></p>}
       </section>
       {externalLogin ? <section aria-labelledby="external-security-heading">
         <h2 id="external-security-heading">Keamanan akun organisasi</h2>

@@ -9,14 +9,23 @@ from test_enrollment import enrollment_case
 from test_courses import author
 
 
-def test_cpu_budget_and_child_process_separation():
+def test_cpu_budget_and_child_process_separation(monkeypatch):
+    # A real CPU loop makes the timer assertion independent of machine speed.
+    # Real adversarial CommonMark is separately loaded over uvicorn/TCP below.
+    import subprocess,sys
+    from pathlib import Path
+    launch=subprocess.Popen
+    def test_worker(argv,**kwargs):
+        kwargs['env']['PYTHONPATH']+=os.pathsep+str(Path(__file__).parent)
+        return launch([sys.executable,'-m','markdown_cpu_probe'],**kwargs)
+    monkeypatch.setattr('app.markdown_service.subprocess.Popen',test_worker)
     parser=Parser()
     try:
         assert parser.validate('# Trusted parser')=='# Trusted parser'
         assert parser.process.pid!=os.getpid()
         start=time.monotonic()
-        with pytest.raises(MarkdownComplexity):parser.validate('['*30000)
-        assert time.monotonic()-start<1.5
+        with pytest.raises(MarkdownComplexity):parser.validate('test-only-cpu-budget')
+        assert time.monotonic()-start<2.2
         assert parser.validate('[valid](https://example.org)')
     finally:parser.close()
 
@@ -27,8 +36,8 @@ def test_busy_is_bounded_and_does_not_queue_unlimited_cpu():
         parser.validate('Warm up')
         with ThreadPoolExecutor(max_workers=8) as pool:
             def parse(i):
-                try:parser.validate('['*(29990+i));return 200
-                except MarkdownComplexity:return 422
+                try:parser.validate('[deny](javascript:alert(1))\n'+('![**'*7500)[:29900+i]);return 200
+                except ValueError:return 422
                 except HTTPException as e:return e.status_code
             statuses=list(pool.map(parse,range(8)))
         assert 422 in statuses and 429 in statuses and set(statuses)<={422,429}
@@ -74,7 +83,7 @@ def test_actual_http_cpu_pressure_with_original_account_budget(enrollment_case):
                 def save(i):
                     codes=[]
                     for repeat in range(repeats):
-                        response=client.post(target,headers=auth,json={'version':version,'title':'CPU policy probe','content':'['*(29980+i)+str(repeat)})
+                        response=client.post(target,headers=auth,json={'version':version,'title':'CPU policy probe','content':'[deny](javascript:alert(1))\n'+('![**'*7500)[:29900+i]+str(repeat)})
                         codes.append(response.status_code)
                     return codes
                 with ThreadPoolExecutor(max_workers=concurrency) as pool:

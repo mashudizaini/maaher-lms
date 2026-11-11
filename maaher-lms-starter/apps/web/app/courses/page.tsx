@@ -142,6 +142,11 @@ export default function Courses() {
               <label>Judul kursus<input value={title} onChange={event => setTitle(event.target.value)} required maxLength={160} disabled={busy || !editable || lessonDirty} /></label>
               <label htmlFor="course-description">Deskripsi kursus</label><textarea id="course-description" value={description} onChange={event => setDescription(event.target.value)} maxLength={2000} disabled={busy || !editable || lessonDirty} />
               <button disabled={busy || !editable || !metadataDirty || lessonDirty}>Simpan informasi kursus</button></form>
+            <button disabled={busy || !editable || dirty} onClick={() => void run(async () => {
+              let after: string | null = null; let total = 0;
+              do { const batch: { checked: number; next_cursor: string | null } = await request(`/api/courses/${course.id}/validate-content`, { version: course.version, after }); total += batch.checked; after = batch.next_cursor; setMessage(`Memeriksa materi: ${total} pelajaran`); } while (after);
+              setMessage('Materi telah diverifikasi. Kursus siap diterbitkan.');
+            })}>Periksa materi lama</button>
             <div className="button-row"><button disabled={busy || !editable || dirty} onClick={() => void run(async () => { await mutate(course.state === 'published' ? '/unpublish' : '/publish'); setMessage(course.state === 'published' ? 'Publikasi ditarik' : 'Kursus berhasil diterbitkan'); })}>{course.state === 'published' ? 'Tarik publikasi' : 'Terbitkan kursus'}</button>
               {role === 'admin' && <button disabled={busy || dirty} onClick={() => void run(async () => { await mutate(course.state === 'archived' ? '/restore' : '/archive'); setCourse(null); setLesson(null); await list(); setMessage(course.state === 'archived' ? 'Kursus dipulihkan sebagai draft' : 'Kursus diarsipkan'); })}>{course.state === 'archived' ? 'Pulihkan kursus' : 'Arsipkan kursus'}</button>}
             </div><p className="muted">Perubahan materi mengembalikan kursus ke draft. Isi setiap modul dan pelajaran sebelum menerbitkan.</p>
