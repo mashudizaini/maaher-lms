@@ -50,7 +50,8 @@ class Content(Input):
     def aware(cls,value):
         if value is not None:
             if value.tzinfo is None or value.utcoffset() is None:raise ValueError('Deadline harus memuat zona waktu')
-            return value.astimezone(timezone.utc)
+            try:return value.astimezone(timezone.utc)
+            except (OverflowError,ValueError):raise ValueError('Deadline berada di luar jangkauan UTC') from None
         return value
     @model_validator(mode='after')
     def total(self):

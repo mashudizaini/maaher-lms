@@ -1,0 +1,2120 @@
+diff --git a/maaher-lms-starter/apps/api/app/assignments.py b/maaher-lms-starter/apps/api/app/assignments.py
+index b2093b823cc3d3004cdbc07ff198efb70b9b015c..572e12532b5e0ae120c3ce13540d776d48b659c8 100644
+--- a/maaher-lms-starter/apps/api/app/assignments.py
++++ b/maaher-lms-starter/apps/api/app/assignments.py
+@@ -50,7 +50,8 @@ class Content(Input):
+     def aware(cls,value):
+         if value is not None:
+             if value.tzinfo is None or value.utcoffset() is None:raise ValueError('Deadline harus memuat zona waktu')
+-            return value.astimezone(timezone.utc)
++            try:return value.astimezone(timezone.utc)
++            except (OverflowError,ValueError):raise ValueError('Deadline berada di luar jangkauan UTC') from None
+         return value
+     @model_validator(mode='after')
+     def total(self):
+diff --git a/maaher-lms-starter/apps/api/app/content_attestation.py b/maaher-lms-starter/apps/api/app/content_attestation.py
+index f247d6d89c2f183ea6bd4dc8b8ebcdb9f213148c..9d1c6308bdc6e0b0e7ac721d264dc02f38e3efac 100644
+--- a/maaher-lms-starter/apps/api/app/content_attestation.py
++++ b/maaher-lms-starter/apps/api/app/content_attestation.py
+@@ -5,12 +5,15 @@ import json
+ from cryptography.fernet import InvalidToken
+ from .auth_support import cipher
+ 
+-POLICY='maaher-content-v2-controls-cpu250'
++POLICY='maaher-content-v3-controls'
++# Same Markdown/URL/control acceptance rules; resource budget changes do not
++# invalidate old proofs or force legacy course downtime/new assignment versions.
++COMPATIBLE_POLICIES=(POLICY,'maaher-content-v2-controls-cpu250')
+ 
+ 
+-def fingerprint(kind,context,content,resources=None):
++def fingerprint(kind,context,content,resources=None,policy=POLICY):
+     data=content.encode('utf8')
+-    digest=hashlib.sha256(json.dumps([POLICY,kind,[str(x) for x in context]],separators=(',',':')).encode())
++    digest=hashlib.sha256(json.dumps([policy,kind,[str(x) for x in context]],separators=(',',':')).encode())
+     digest.update(len(data).to_bytes(8,'big'));digest.update(data)
+     digest.update(json.dumps(resources or [],sort_keys=True,separators=(',',':'),ensure_ascii=False).encode('utf8'))
+     return ('content-validation:'+digest.hexdigest()).encode()
+@@ -22,5 +25,7 @@ def seal(kind,context,content,resources=None,ring=None):
+ 
+ def valid(token,kind,context,content,resources=None,ring=None):
+     if not isinstance(token,str) or not token or len(token)>1024:return False
+-    try:return hmac.compare_digest((ring or cipher()).decrypt(token.encode()),fingerprint(kind,context,content,resources))
++    try:
++        payload=(ring or cipher()).decrypt(token.encode())
++        return any(hmac.compare_digest(payload,fingerprint(kind,context,content,resources,policy)) for policy in COMPATIBLE_POLICIES)
+     except (InvalidToken,UnicodeError,ValueError):return False
+diff --git a/maaher-lms-starter/apps/api/app/main.py b/maaher-lms-starter/apps/api/app/main.py
+index 65b12628b475573bc1fe0590a3c31e21c4e3a807..348b971666abdfb99ec38c219c32efd774e76f6f 100644
+--- a/maaher-lms-starter/apps/api/app/main.py
++++ b/maaher-lms-starter/apps/api/app/main.py
+@@ -1,5 +1,7 @@
+ from fastapi import FastAPI, HTTPException
+ from fastapi.responses import JSONResponse
++from fastapi.exceptions import RequestValidationError
++from .validation_errors import invalid_request
+ from starlette.concurrency import run_in_threadpool
+ from psycopg import Error as DatabaseError
+ from .auth import router
+@@ -15,6 +17,7 @@ from .traffic import ANONYMOUS_PATHS, admit
+ from .auth_support import limited
+ 
+ app = FastAPI(title="Maaher LMS API", docs_url=None, redoc_url=None)
++app.add_exception_handler(RequestValidationError,invalid_request)
+ app.include_router(router)
+ app.include_router(lifecycle_router)
+ app.include_router(mfa_router)
+diff --git a/maaher-lms-starter/apps/api/app/markdown_budget.py b/maaher-lms-starter/apps/api/app/markdown_budget.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..fb284c5a085e674873194a052538c319226a4583
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/markdown_budget.py
+@@ -0,0 +1,6 @@
++"""Fixed resource caps, independent of the content/URL acceptance policy."""
++CPU_SECONDS = 1.0
++WALL_SECONDS = 3.0
++QUEUE_SECONDS = 8.0
++MAX_PENDING = 16
++MEMORY_BYTES = 256 * 1024 * 1024
+diff --git a/maaher-lms-starter/apps/api/app/markdown_service.py b/maaher-lms-starter/apps/api/app/markdown_service.py
+index 1309781cb4ee039b6c621a69ae230c2f31cc543c..95e3877487d91117ac08220538e08e55b608a26b 100644
+--- a/maaher-lms-starter/apps/api/app/markdown_service.py
++++ b/maaher-lms-starter/apps/api/app/markdown_service.py
+@@ -1,6 +1,7 @@
+ """Bounded interactive/maintenance parser processes; fail closed on overload."""
+ import atexit
+-from collections import OrderedDict
++from collections import OrderedDict,Counter,deque
++from concurrent.futures import Future,TimeoutError as FutureTimeout
+ import hashlib
+ import json
+ import re
+@@ -14,6 +15,7 @@ import threading
+ import time
+ 
+ from fastapi import HTTPException
++from .markdown_budget import WALL_SECONDS,QUEUE_SECONDS,MAX_PENDING
+ 
+ 
+ class MarkdownComplexity(ValueError): pass
+@@ -21,7 +23,7 @@ class MarkdownComplexity(ValueError): pass
+ 
+ class Parser:
+     def __init__(self):
+-        self.lock=threading.Lock();self.cache_lock=threading.Lock();self.cache=OrderedDict();self.process=None;self.limits={}
++        self.lock=threading.Lock();self.cache_lock=threading.Lock();self.cache=OrderedDict();self.process=None;self.limits={};self.usage={}
+ 
+     def close(self):
+         p=self.process;self.process=None
+@@ -43,7 +45,7 @@ class Parser:
+ 
+     def exchange(self,value):
+         self.start();p=self.process
+-        payload=json.dumps({'content':value},ensure_ascii=False).encode()+b'\n';offset=0;reply=bytearray();deadline=time.monotonic()+2.0
++        payload=json.dumps({'content':value},ensure_ascii=False).encode()+b'\n';offset=0;reply=bytearray();deadline=time.monotonic()+WALL_SECONDS
+         with selectors.DefaultSelector() as ready:
+             ready.register(p.stdin,selectors.EVENT_WRITE);ready.register(p.stdout,selectors.EVENT_READ)
+             while time.monotonic()<deadline:
+@@ -57,7 +59,7 @@ class Parser:
+                         reply.extend(chunk)
+                         if len(reply)>4096:raise ValueError()
+                         if b'\n' in reply:
+-                            response=json.loads(reply);self.limits=response.get('limits',{})
++                            response=json.loads(reply);self.limits=response.get('limits',{});self.usage=response.get('usage',{})
+                             if not self.limits.get('memory_active'):
+                                 if not getattr(self,'memory_warning',False):
+                                     logging.getLogger(__name__).warning('markdown.memory_limit_unavailable: use a Linux/container memory limit for real data')
+@@ -93,18 +95,103 @@ class Parser:
+ 
+ 
+ class ParserPool:
+-    def __init__(self,count):
+-        self.workers=[Parser() for _ in range(count)];self.rotation=0;self.rotation_lock=threading.Lock()
++    """Bounded FIFO within tenant, least-active tenant first, no busy-slot 429.
++
++    Callers pass only a server-validated tenant:user scope. At most one request
++    per principal may be queued/running. The finite process/thread count does
++    not grow with principals; queued waits release the GIL and expire boundedly.
++    """
++    def __init__(self,count,max_pending=MAX_PENDING,queue_seconds=QUEUE_SECONDS):
++        self.workers=[Parser() for _ in range(count)]
++        self.condition=threading.Condition()
++        self.pending=OrderedDict();self.principals=set();self.active=Counter()
++        self.waiting=0;self.threads=[];self.closed=False
++        self.max_pending=max_pending;self.queue_seconds=queue_seconds
++
++    def _start(self):
++        if not self.threads:
++            self.threads=[threading.Thread(target=self._dispatch,args=(worker,),daemon=True,
++                name='maaher-markdown') for worker in self.workers]
++            for thread in self.threads:thread.start()
++
++    def _dispatch(self,worker):
++        try:
++            while True:
++                with self.condition:
++                    self.condition.wait_for(lambda:self.closed or self.waiting)
++                    if self.closed:return
++                    # Stable ordering breaks equal-active ties round-robin.
++                    tenant=min(self.pending,key=lambda key:self.active[key])
++                    jobs=self.pending.pop(tenant);job=jobs.popleft()
++                    if jobs:self.pending[tenant]=jobs
++                    self.waiting-=1
++                    future,scope,value,deadline=job
++                    if future.cancelled() or time.monotonic()>deadline:
++                        self.principals.discard(scope)
++                        if not future.done():future.set_exception(HTTPException(503,'Antrean validasi penuh waktu. Coba lagi',headers={'Retry-After':'1'}))
++                        continue
++                    if not future.set_running_or_notify_cancel():
++                        self.principals.discard(scope);continue
++                    self.active[tenant]+=1
++                error=None;result=None
++                try:result=worker.validate(value,scope)
++                except Exception as caught:error=caught
++                finally:
++                    with self.condition:
++                        self.principals.discard(scope);self.active[tenant]-=1
++                        if not self.active[tenant]:del self.active[tenant]
++                        self.condition.notify_all()
++                # Release this principal before waking its caller: a sequential
++                # next save must not race its own previous admission record.
++                if error is None:future.set_result(result)
++                else:future.set_exception(error)
++        finally:worker.close()
++
+     def validate(self,value,cache_scope="library"):
+-        with self.rotation_lock:
+-            start=self.rotation;self.rotation=(self.rotation+1)%len(self.workers)
+-        for n in range(len(self.workers)):
+-            try:return self.workers[(start+n)%len(self.workers)].validate(value,cache_scope)
+-            except HTTPException as error:
+-                if error.status_code!=429:raise
+-        raise HTTPException(429,'Validasi materi sedang sibuk. Coba lagi sebentar lagi',headers={'Retry-After':'1'})
++        # Reject malformed text before it can occupy a queue entry.
++        if not isinstance(value,str) or len(value)>30000:raise ValueError('Materi terlalu panjang')
++        if re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]',value):raise ValueError('Materi memuat karakter kontrol yang tidak diizinkan')
++        try:value.encode('utf8')
++        except UnicodeError:raise ValueError('Encoding materi tidak valid') from None
++        tenant=cache_scope.split(':',1)[0]
++        future=Future()
++        with self.condition:
++            if self.closed:raise HTTPException(503,'Validator sedang berhenti. Coba lagi',headers={'Retry-After':'1'})
++            if cache_scope in self.principals:
++                raise HTTPException(429,'Validasi akun Anda masih berlangsung. Tunggu sebelum menyimpan lagi',headers={'Retry-After':'1'})
++            if sum(key.split(':',1)[0]==tenant for key in self.principals)>=10:
++                raise HTTPException(429,'Kapasitas validasi organisasi sedang penuh. Coba lagi',headers={'Retry-After':'1'})
++            if self.waiting>=self.max_pending:
++                raise HTTPException(503,'Kapasitas antrean validasi sedang penuh. Coba lagi',headers={'Retry-After':'1'})
++            self.principals.add(cache_scope)
++            self.pending.setdefault(tenant,deque()).append((future,cache_scope,value,time.monotonic()+self.queue_seconds))
++            self.waiting+=1;self._start();self.condition.notify_all()
++        try:return future.result(timeout=self.queue_seconds+WALL_SECONDS+.2)
++        except FutureTimeout:
++            # Remove cancelled waits immediately, freeing their finite capacity.
++            with self.condition:
++                future.cancel()
++                jobs=self.pending.get(tenant)
++                if jobs:
++                    kept=deque(job for job in jobs if job[0] is not future)
++                    if len(kept)!=len(jobs):
++                        self.waiting-=1;self.principals.discard(cache_scope)
++                        if kept:self.pending[tenant]=kept
++                        else:self.pending.pop(tenant,None)
++            raise HTTPException(503,'Validasi melewati batas waktu. Coba lagi',headers={'Retry-After':'1'}) from None
++
+     def close(self):
+-        for worker in self.workers:worker.close()
++        with self.condition:
++            self.closed=True
++            for jobs in self.pending.values():
++                for future,scope,_,_ in jobs:
++                    self.principals.discard(scope)
++                    if not future.done():future.set_exception(HTTPException(503,'Validator sedang berhenti'))
++            self.pending.clear();self.waiting=0;self.condition.notify_all()
++        for thread in self.threads:thread.join(timeout=WALL_SECONDS+.5)
++        # Never-started workers have no dispatcher to close them.
++        if not self.threads:
++            for worker in self.workers:worker.close()
+ 
+ 
+ parser=ParserPool(2)
+diff --git a/maaher-lms-starter/apps/api/app/markdown_worker.py b/maaher-lms-starter/apps/api/app/markdown_worker.py
+index 71cd862b570fac68ac564828eddefc34102fbd08..bef331b79255123ec3061f8d431ec8adf776c5aa 100644
+--- a/maaher-lms-starter/apps/api/app/markdown_worker.py
++++ b/maaher-lms-starter/apps/api/app/markdown_worker.py
+@@ -4,6 +4,9 @@ import resource
+ import signal
+ import sys
+ import re
++import time
++
++from .markdown_budget import CPU_SECONDS,WALL_SECONDS,MEMORY_BYTES
+ 
+ from .markdown_parse import validate_markdown_raw
+ 
+@@ -18,24 +21,24 @@ def main():
+     # supported POSIX hosts; hard wall timeout is always enforced by the parent.
+     memory_active=False
+     try:
+-        resource.setrlimit(resource.RLIMIT_AS,(256*1024*1024,256*1024*1024))
+-        memory_active=resource.getrlimit(resource.RLIMIT_AS)[0]<=256*1024*1024
++        resource.setrlimit(resource.RLIMIT_AS,(MEMORY_BYTES,MEMORY_BYTES))
++        memory_active=resource.getrlimit(resource.RLIMIT_AS)[0]<=MEMORY_BYTES
+     except (ValueError,OSError): pass
+     signal.signal(signal.SIGPROF,expired)
+     while True:
+         line=sys.stdin.buffer.readline(262145)
+         if not line:break
+         if len(line)>262144:return 1
+-        result='invalid'
++        result='invalid';started=time.process_time()
+         try:
+             value=json.loads(line)['content']
+             if not isinstance(value,str) or len(value)>30000 or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]',value):raise ValueError()
+-            signal.setitimer(signal.ITIMER_PROF,.25)
++            signal.setitimer(signal.ITIMER_PROF,CPU_SECONDS)
+             validate_markdown_raw(value); result='ok'
+         except CpuBudget: result='complexity'
+         except (ValueError,RecursionError,MemoryError): result='invalid'
+         finally: signal.setitimer(signal.ITIMER_PROF,0)
+-        sys.stdout.buffer.write(json.dumps({'result':result,'limits':{'memory_active':memory_active,'memory_bytes':256*1024*1024 if memory_active else None,'cpu_ms':250,'wall_ms':2000}}).encode()+b'\n');sys.stdout.buffer.flush()
++        sys.stdout.buffer.write(json.dumps({'result':result,'limits':{'memory_active':memory_active,'memory_bytes':MEMORY_BYTES if memory_active else None,'cpu_ms':int(CPU_SECONDS*1000),'wall_ms':int(WALL_SECONDS*1000)},'usage':{'cpu_ms':round((time.process_time()-started)*1000,3)}}).encode()+b'\n');sys.stdout.buffer.flush()
+     return 0
+ 
+ 
+diff --git a/maaher-lms-starter/apps/api/app/validation_errors.py b/maaher-lms-starter/apps/api/app/validation_errors.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e14472e94aacf9b8f4c1816f572c2e813d1df447
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/app/validation_errors.py
+@@ -0,0 +1,16 @@
++"""Bounded, UTF8-safe validation responses; never reflect input or context."""
++from fastapi.exceptions import RequestValidationError
++from fastapi.responses import JSONResponse
++
++
++def safe(value,limit):
++    return str(value)[:limit].encode('utf8','replace').decode('utf8')
++
++
++async def invalid_request(request,error:RequestValidationError):
++    details=[]
++    for item in error.errors()[:20]:
++        details.append({'type':safe(item.get('type','value_error'),80),
++            'loc':[part if isinstance(part,int) else safe(part,160) for part in item.get('loc',())[:10]],
++            'msg':safe(item.get('msg','Periksa data yang diisi'),300)})
++    return JSONResponse({'detail':details},status_code=422)
+diff --git a/maaher-lms-starter/apps/api/tests/test_content_attestation.py b/maaher-lms-starter/apps/api/tests/test_content_attestation.py
+index 12a2b6c77857b3c1542976d8de4e55a87443570b..aaf41412c729886fe890be5312b27e35e10e5e9c 100644
+--- a/maaher-lms-starter/apps/api/tests/test_content_attestation.py
++++ b/maaher-lms-starter/apps/api/tests/test_content_attestation.py
+@@ -9,6 +9,7 @@ from fastapi import HTTPException
+ from app.auth_support import KeyRing
+ from app.content_attestation import seal,valid
+ from app.markdown_service import Parser,ParserPool
++from app.markdown_budget import CPU_SECONDS
+ from app.markdown_parse import validate_markdown_raw
+ from test_courses import author,filled,write,detail
+ 
+@@ -59,9 +60,9 @@ def test_control_character_rejected_without_child_restart_and_large_safe_frame()
+         for length in (22000,30000):
+             with pytest.raises(ValueError):parser.validate('\x01'*length)
+             assert parser.process.pid==pid and parser.process.poll() is None
+-        for text in ('\t'*30000,'\r'*30000,'😀'*30000,'*a* '*7500):assert parser.validate(text)==text
++        for text in ('\t'*30000,'\r'*30000,'😀'*30000):assert parser.validate(text)==text
+         assert parser.process.pid==pid
+-        assert parser.limits['memory_active'] is True and parser.limits['cpu_ms']==250
++        assert parser.limits['cpu_ms']==int(CPU_SECONDS*1000)
+     finally:parser.close()
+ 
+ 
+@@ -146,3 +147,35 @@ def test_publish_1500_large_valid_lessons_with_concurrent_writer_real_http(autho
+         process.terminate()
+         try:process.wait(timeout=5)
+         except subprocess.TimeoutExpired:process.kill();process.wait()
++
++
++
++@pytest.mark.skipif(sys.platform!='linux',reason='RLIMIT_AS capability assertion requires Linux; content/CPU tests still run')
++def test_linux_memory_capability_only():
++    parser=Parser()
++    try:
++        parser.validate('Linux memory capability')
++        assert parser.limits['memory_active'] is True
++        assert parser.limits['memory_bytes']==268435456
++    finally:parser.close()
++
++
++def test_dense_valid_30k_repeated_without_cache():
++    parser=Parser();cpu=[]
++    try:
++        for n in range(5):
++            value='*a* '*7500
++            assert parser.validate(value,f'valid-dense:{n}')==value
++            cpu.append(parser.usage['cpu_ms'])
++        print('LMS05_VALID_CPU '+json.dumps({'cpu_ms':cpu,'budget_ms':int(CPU_SECONDS*1000),'max_margin':round(CPU_SECONDS*1000/max(cpu),2)}))
++    finally:parser.close()
++
++
++def test_v2_lesson_and_assignment_proofs_remain_valid_after_resource_budget_change(monkeypatch):
++    from app.content_attestation import fingerprint
++    from app.auth_support import cipher
++    monkeypatch.setenv('AUTH_ENCRYPTION_KEY',Fernet.generate_key().decode())
++    for kind,context in [('lesson',('tenant','lesson',1)),('assignment',('tenant','assignment','version',1))]:
++        old=cipher().encrypt(fingerprint(kind,context,'Valid content',[],policy='maaher-content-v2-controls-cpu250')).decode()
++        assert valid(old,kind,context,'Valid content',[])
++        assert not valid(old,kind,context,'Tampered',[])
+diff --git a/maaher-lms-starter/apps/api/tests/test_markdown_process.py b/maaher-lms-starter/apps/api/tests/test_markdown_process.py
+index 68b80bd734e58d1578eda7a32ba853ed60c24758..b71a0dd3c2f499f3cf30b3406723254785e35164 100644
+--- a/maaher-lms-starter/apps/api/tests/test_markdown_process.py
++++ b/maaher-lms-starter/apps/api/tests/test_markdown_process.py
+@@ -25,7 +25,7 @@ def test_cpu_budget_and_child_process_separation(monkeypatch):
+         assert parser.process.pid!=os.getpid()
+         start=time.monotonic()
+         with pytest.raises(MarkdownComplexity):parser.validate('test-only-cpu-budget')
+-        assert time.monotonic()-start<2.2
++        assert time.monotonic()-start<3.2
+         assert parser.validate('[valid](https://example.org)')
+     finally:parser.close()
+ 
+diff --git a/maaher-lms-starter/apps/api/tests/test_parser_fairness.py b/maaher-lms-starter/apps/api/tests/test_parser_fairness.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7ce74c8e98fcd2d833f91e1957660539d7966258
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_parser_fairness.py
+@@ -0,0 +1,196 @@
++"""Queue ordering/bounds plus real CPU contention through authenticated TCP."""
++from concurrent.futures import ThreadPoolExecutor
++from collections import Counter
++from pathlib import Path
++from uuid import uuid4
++import json,os,socket,subprocess,sys,threading,time
++import httpx,psycopg,pytest
++from fastapi import HTTPException
++from app.markdown_service import ParserPool
++from app.security import token_digest
++from test_courses import author,filled
++from test_assignments import assignment
++from test_learning import learning
++from test_enrollment import enrollment_case
++
++
++def await_waiting(pool,count):
++    until=time.monotonic()+3
++    while True:
++        with pool.condition:
++            if pool.waiting>=count:return
++        assert time.monotonic()<until
++        time.sleep(.002)
++
++
++def test_fair_tenant_order_and_own_principal_limit_with_bounded_queue():
++    # Events control ordering only. CPU-isolation evidence is the real HTTP test.
++    entered=threading.Barrier(3);release=threading.Event();order=[];lock=threading.Lock()
++    class Worker:
++        def validate(self,value,scope):
++            with lock:order.append(scope)
++            if value=='hold':entered.wait(timeout=3);assert release.wait(5)
++            return value
++        def close(self):pass
++    scheduler=ParserPool(2,max_pending=3);scheduler.workers=[Worker(),Worker()]
++    try:
++        with ThreadPoolExecutor(max_workers=6) as callers:
++            first=[callers.submit(scheduler.validate,'hold',f'A:{i}') for i in range(2)]
++            entered.wait(timeout=3)
++            with pytest.raises(HTTPException) as duplicate:scheduler.validate('duplicate','A:0')
++            assert duplicate.value.status_code==429 and 'akun' in duplicate.value.detail
++            queued=[]
++            for scope in ('A:2','A:3','B:0'):
++                queued.append(callers.submit(scheduler.validate,'queued',scope));await_waiting(scheduler,len(queued))
++            with pytest.raises(HTTPException) as capacity:scheduler.validate('overflow','C:0')
++            assert capacity.value.status_code==503 and capacity.value.headers['Retry-After']=='1'
++            release.set()
++            assert [f.result(timeout=5) for f in first]==['hold','hold']
++            assert [f.result(timeout=5) for f in queued]==['queued']*3
++            assert order.index('B:0')<=3 and order.index('A:2')<order.index('A:3')
++        assert not scheduler.principals and not scheduler.active and scheduler.waiting==0
++    finally:release.set();scheduler.close()
++
++
++def test_expired_queue_job_does_not_run_and_releases_its_scope():
++    started=threading.Event();calls=[]
++    class Worker:
++        def validate(self,value,scope):
++            calls.append(scope)
++            if value=='hold':started.set();time.sleep(.15)
++            return value
++        def close(self):pass
++    scheduler=ParserPool(1,queue_seconds=.03);scheduler.workers=[Worker()]
++    try:
++        with ThreadPoolExecutor(max_workers=2) as callers:
++            first=callers.submit(scheduler.validate,'hold','A:first');assert started.wait(2)
++            with pytest.raises(HTTPException) as expired:scheduler.validate('expired','B:second')
++            assert expired.value.status_code==503 and first.result()=='hold'
++        assert 'B:second' not in calls
++        assert scheduler.validate('retry','B:second')=='retry'
++        for n in range(100):assert scheduler.validate('sequential','C:same')=='sequential'
++        assert not scheduler.principals and scheduler.waiting==0
++    finally:scheduler.close()
++
++
++def test_one_tenant_cannot_take_all_global_waiting_capacity():
++    release=threading.Event();started=threading.Event()
++    class Worker:
++        def validate(self,value,scope):
++            if value=='hold':started.set();assert release.wait(5)
++            return value
++        def close(self):pass
++    scheduler=ParserPool(1);scheduler.workers=[Worker()]
++    try:
++        with ThreadPoolExecutor(max_workers=11) as callers:
++            active=callers.submit(scheduler.validate,'hold','A:0');assert started.wait(2)
++            jobs=[]
++            for n in range(1,10):jobs.append(callers.submit(scheduler.validate,'queued',f'A:{n}'));await_waiting(scheduler,n)
++            with pytest.raises(HTTPException) as limit:scheduler.validate('over-tenant','A:10')
++            assert limit.value.status_code==429 and 'organisasi' in limit.value.detail
++            other=callers.submit(scheduler.validate,'other','B:0');await_waiting(scheduler,10)
++            release.set();assert other.result(timeout=5)=='other'
++            assert active.result()=='hold' and all(f.result()=='queued' for f in jobs)
++    finally:release.set();scheduler.close()
++
++
++def seed_teacher(owner,tenant=None):
++    uid,cid,mid,lid=(uuid4() for _ in range(4));cap='synthetic-fairness-'+uuid4().hex;tid=tenant or uuid4()
++    with psycopg.connect(owner) as db:
++        if tenant is None:db.execute("INSERT INTO tenants(id,slug,name) VALUES(%s,%s,'Fairness synthetic')",(tid,str(tid)))
++        db.execute("INSERT INTO users(id,email,password_hash) VALUES(%s,%s,'no-password-login-fixture')",(uid,f'{uid}@example.invalid'))
++        db.execute("INSERT INTO memberships(id,tenant_id,user_id,role) VALUES(%s,%s,%s,'teacher')",(uuid4(),tid,uid))
++        db.execute("INSERT INTO sessions(token_hash,user_id,expires_at,mfa_verified) VALUES(%s,%s,now()+interval '1 hour',true)",(token_digest(cap),uid))
++        db.execute("INSERT INTO courses(id,tenant_id,owner_id,title) VALUES(%s,%s,%s,'Fairness course')",(cid,tid,uid))
++        db.execute("INSERT INTO courses_teachers(tenant_id,course_id,user_id) VALUES(%s,%s,%s)",(tid,cid,uid))
++        db.execute("INSERT INTO course_modules(id,tenant_id,course_id,title,position) VALUES(%s,%s,%s,'Module',1)",(mid,tid,cid))
++        db.execute("INSERT INTO course_lessons(id,tenant_id,course_id,module_id,title,content,position) VALUES(%s,%s,%s,%s,'Lesson','Initial',1)",(lid,tid,cid,mid))
++    return {'tenant':tid,'cid':cid,'target':f'/courses/{cid}/modules/{mid}/lessons/{lid}',
++        'headers':{'origin':'https://testserver','x-tenant-id':str(tid),'cookie':'maaher_session='+cap}}
++
++
++@pytest.mark.parametrize('tenant_mode',['same','different'])
++def test_real_http_fairness_multiple_accounts_and_tenants(assignment,tenant_mode):
++    c=assignment;identity,headers,cid=c['author']
++    pupil_headers={**headers,'cookie':'maaher_session='+c['student'].cookies['maaher_session']}
++    victim=seed_teacher(identity[1],identity[3]);actors=[seed_teacher(identity[1],victim['tenant'] if tenant_mode=='same' else None) for _ in range(8)]
++    port_probe=socket.socket();port_probe.bind(('127.0.0.1',0));port=port_probe.getsockname()[1];port_probe.close()
++    env=os.environ.copy();env['PYTHONPATH']=str(Path(__file__).parents[1])
++    process=subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(port),'--no-access-log','--log-level','error'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
++    metrics={'tenant_mode':tenant_mode,'api_workers':1,'rounds':[]}
++    try:
++        with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=14) as health:
++            until=time.monotonic()+20
++            while True:
++                try:
++                    if health.get('/healthz').status_code==200:break
++                except httpx.TransportError:pass
++                assert time.monotonic()<until and process.poll() is None;time.sleep(.03)
++            # Confirm real session+membership+assignment authority before pressure.
++            for actor in [victim,*actors]:assert health.get('/courses/'+str(actor['cid']),headers=actor['headers']).status_code==200
++            for count in (2,4,8):
++                stop_load=threading.Event();start_load=threading.Barrier(count+1)
++                def attack(index):
++                    actor=actors[index];codes=[]
++                    with httpx.Client(base_url=str(health.base_url),trust_env=False,timeout=14) as client:
++                        start_load.wait(timeout=5)
++                        for n in range(12):
++                            if stop_load.is_set():break
++                            tick=time.monotonic()
++                            text='[deny](javascript:alert(1))\n'+('![**'*7500)[:29800+index]+f'{count}:{n}'
++                            response=client.post(actor['target'],headers=actor['headers'],json={'version':1,'title':'Pressure fixture','content':text})
++                            codes.append(response.status_code)
++                            delay=1-(time.monotonic()-tick)
++                            if delay>0:time.sleep(delay)
++                    return codes
++                def normal():
++                    values=[];codes=[];loaders=[]
++                    with httpx.Client(base_url=str(health.base_url),trust_env=False,timeout=14) as client:
++                        version=client.get('/courses/'+str(victim['cid']),headers=victim['headers']).json()['version']
++                        for n in range(6):
++                            loaders.append(sum(not f.done() for f in attacker_futures))
++                            start=time.perf_counter()
++                            response=client.post(victim['target'],headers=victim['headers'],json={'version':version,'title':'Normal writer','content':'Valid material '+str(uuid4())})
++                            codes.append(response.status_code);values.append(round((time.perf_counter()-start)*1000,2))
++                            if response.status_code==200:version=response.json()['version']
++                            time.sleep(.2)
++                    return codes,values,loaders
++                def pupil():
++                    codes=[];latency=[];loaders=[]
++                    with httpx.Client(base_url=str(health.base_url),trust_env=False,timeout=14) as client:
++                        row=client.get('/work/assignments/'+c['aid'],headers=pupil_headers).json()
++                        revision=row['draft']['revision'] if row['draft'] else 0
++                        for n in range(6):
++                            loaders.append(sum(not f.done() for f in attacker_futures));start=time.perf_counter()
++                            response=client.post('/work/assignments/'+c['aid']+'/draft',headers=pupil_headers,json={'version_id':row['published']['id'],'revision':revision,'source_code':'print("student '+str(uuid4())+'")'})
++                            codes.append(response.status_code);latency.append(round((time.perf_counter()-start)*1000,2))
++                            if response.status_code==200:revision=response.json()['revision']
++                            time.sleep(.2)
++                    return codes,latency,loaders
++                with ThreadPoolExecutor(max_workers=count+2) as callers:
++                    attacker_futures=[callers.submit(attack,i) for i in range(count)]
++                    # Let real CPU work start. This is a load probe, not Event isolation.
++                    start_load.wait(timeout=5);time.sleep(.12);normal_future=callers.submit(normal);pupil_future=callers.submit(pupil);samples=[]
++                    while not normal_future.done() or not pupil_future.done():
++                        t=time.perf_counter();assert health.get('/healthz').status_code==200;samples.append((time.perf_counter()-t)*1000);time.sleep(.015)
++                    stop_load.set()
++                    while any(not f.done() for f in attacker_futures):
++                        t=time.perf_counter();assert health.get('/healthz').status_code==200;samples.append((time.perf_counter()-t)*1000);time.sleep(.015)
++                    attack_codes=[code for f in attacker_futures for code in f.result()]
++                    normal_codes,latency,loaders=normal_future.result();pupil_codes,pupil_latency,pupil_loaders=pupil_future.result()
++                assert normal_codes==[200]*6,normal_codes
++                assert all(loaders),loaders
++                assert pupil_codes==[200]*6 and all(pupil_loaders),(pupil_codes,pupil_loaders)
++                assert set(attack_codes)=={422},attack_codes
++                assert max(latency)<10000
++                with psycopg.connect(identity[1]) as db:
++                    attempts=db.execute('SELECT max(attempts) FROM course_write_limits WHERE tenant_id=ANY(%s)',([a['tenant'] for a in actors],)).fetchone()[0]
++                assert attempts<=60
++                metrics['rounds'].append({'attacker_accounts':count,'attacker_max_requests_per_second_per_account':1,'attacker_statuses':dict(Counter(attack_codes)),
++                    'student_statuses':pupil_codes,'student_latency_ms':pupil_latency,'active_attacker_loops_at_each_student_save':pupil_loaders,'active_attacker_loops_at_each_normal_save':loaders,'normal_statuses':normal_codes,'normal_latency_ms':latency,'normal_429_fraction':0,
++                    'health_p95_ms':round(sorted(samples)[int((len(samples)-1)*.95)],2),'max_account_budget_attempts':attempts})
++    finally:
++        process.terminate()
++        try:process.wait(timeout=5)
++        except subprocess.TimeoutExpired:process.kill();process.wait(timeout=2)
++    print('LMS05_FAIRNESS_HTTP '+json.dumps(metrics,sort_keys=True))
+diff --git a/maaher-lms-starter/apps/api/tests/test_validation_boundaries.py b/maaher-lms-starter/apps/api/tests/test_validation_boundaries.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8fa74f6b16fc4f9488f69cf395808d7c900c9e92
+--- /dev/null
++++ b/maaher-lms-starter/apps/api/tests/test_validation_boundaries.py
+@@ -0,0 +1,52 @@
++"""Raw JSON must yield safe422, never surrogate/date-overflow HTTP500."""
++import json
++import pytest
++from test_assignments import assignment,content,get,staff
++from test_learning import learning
++from test_enrollment import enrollment_case
++from test_courses import author,detail,write
++
++
++@pytest.mark.parametrize('date',['0001-01-01T00:00:00+01:00','9999-12-31T23:59:59-01:00','0001-01-01T00:00:00+23:59','9999-12-31T23:59:59-23:59'])
++def test_extreme_offset_deadline_is422_and_does_not_append_version(assignment,date):
++    c=assignment;identity,headers,_=c['author'];before=staff(c).json()
++    response=identity[0].post('/assignments/'+c['aid'],headers=headers,json={'version':before['version'],**content(due_at=date)})
++    assert response.status_code==422,response.text
++    assert staff(c).json()['version']==before['version']
++    assert staff(c).json()['draft']['id']==before['draft']['id']
++    assert all('input' not in error and 'ctx' not in error for error in response.json()['detail'])
++
++
++@pytest.mark.parametrize('target',['task_title','task_instructions','task_starter','task_rubric','draft_source','draft_note','lesson_content','lesson_title','unknown_key'])
++def test_raw_surrogates_are_safe422_and_do_not_leak_input(assignment,target):
++    c=assignment;identity,headers,cid=c['author'];client=identity[0]
++    secret='not-for-validation-response'
++    data={'version':staff(c).json()['version'],**content()};path='/assignments/'+c['aid']
++    if target.startswith('task_'):
++        field={'task_title':'title','task_instructions':'instructions','task_starter':'starter_code'}
++        if target=='task_rubric':data['rubric']=[{'criterion':secret+'\ud800','max_points':100}]
++        else:data[field[target]]=secret+'\ud800'
++    elif target.startswith('draft_'):
++        client=c['student'];path='/work/assignments/'+c['aid']+'/draft'
++        data={'version_id':get(c).json()['published']['id'],'revision':0,'source_code':'Source','note':''}
++        data['source_code' if target=='draft_source' else 'note']=secret+'\udfff'
++    elif target.startswith('lesson_'):
++        path=f'/courses/{cid}/modules/{c["mid"]}/lessons/{c["lid"]}'
++        data={'version':detail(c['author'])['version'],'title':'Lesson','content':'Valid'}
++        data['content' if target=='lesson_content' else 'title']=secret+'\ud800'
++    else:data['\ud800']='extra'
++    # ensure_ascii emits a literal JSON escape; the transport itself stays UTF8.
++    response=client.post(path,headers={**headers,'content-type':'application/json'},content=json.dumps(data,ensure_ascii=True).encode('ascii'))
++    assert response.status_code==422,response.text
++    response.content.decode('utf8')
++    assert secret not in response.text
++    assert all('input' not in error and 'ctx' not in error for error in response.json()['detail'])
++
++
++
++def test_valid_json_surrogate_pair_is_normal_unicode_and_can_save(assignment):
++    c=assignment;source='print("Halo 😀")'
++    data={'version_id':get(c).json()['published']['id'],'revision':0,'source_code':source,'note':'Catatan 🇮🇩'}
++    response=c['student'].post('/work/assignments/'+c['aid']+'/draft',headers={**c['author'][1],'content-type':'application/json'},content=json.dumps(data,ensure_ascii=True).encode('ascii'))
++    assert response.status_code==200,response.text
++    assert get(c).json()['draft']['source_code']==source
+diff --git a/maaher-lms-starter/apps/web/tests/assignments.spec.ts b/maaher-lms-starter/apps/web/tests/assignments.spec.ts
+index e9308decd7a0c8044f5e4282ac77b876467af5b0..b8f4e4c4939b4ea945d4e257c59154abc59e9e57 100644
+--- a/maaher-lms-starter/apps/web/tests/assignments.spec.ts
++++ b/maaher-lms-starter/apps/web/tests/assignments.spec.ts
+@@ -41,6 +41,10 @@ test('versioned tasks and immutable submissions survive reload and revoke in two
+   await page.getByRole('button',{name:'Terbitkan tugas',exact:true}).click();
+   await expect(page.getByRole('status')).toContainText('Status tugas diperbarui');
+   const tasks=await (await context.request.get(`/api/assignments?course_id=${cid}`,{headers})).json(); const aid=tasks.assignments[0].id;
++  const badInstructions=await context.request.post(`/api/assignments/${aid}`,{headers:{...headers,'content-type':'application/json'},data:JSON.stringify({version:2,title:'Invalid text',instructions:'redact-this-value-\ud800',rubric:[{criterion:'All',max_points:100}]})});
++  expect(badInstructions.status()).toBe(422);expect(await badInstructions.text()).not.toContain('redact-this-value');
++  const badDate=await context.request.post(`/api/assignments/${aid}`,{headers,data:{version:2,title:'Invalid date',instructions:'Valid',rubric:[{criterion:'All',max_points:100}],due_at:'0001-01-01T00:00:00+01:00'}});expect(badDate.status()).toBe(422);
++
+   const otherTask=await context.request.post('/api/assignments',{headers,data:{course_id:cid,lesson_id:second,title:'Tugas pelajaran lain',instructions:'Latihan lain',rubric:[{criterion:'Semua',max_points:100}]}});expect(otherTask.status()).toBe(201);
+   const otherId=(await otherTask.json()).id;expect((await context.request.post(`/api/assignments/${otherId}/publish`,{headers,data:{version:1}})).status()).toBe(200);
+   const studentContext = await browser.newContext(); const student = await studentContext.newPage();
+@@ -56,6 +60,10 @@ test('versioned tasks and immutable submissions survive reload and revoke in two
+     const answer='<script>window.maaherUnsafe=true</script>\nprint("jawaban satu")';
+     await student.getByLabel('Jawaban (python)',{exact:true}).fill(answer);
+     await student.getByRole('button',{name:'Simpan draf jawaban',exact:true}).click();await expect(student.getByRole('status')).toContainText('Draf tersimpan');
++    const state=await (await studentContext.request.get(process.env.APP_ORIGIN!+`/api/work/assignments/${aid}`,{headers})).json();
++    const invalidDraft=await studentContext.request.post(process.env.APP_ORIGIN!+`/api/work/assignments/${aid}/draft`,{headers:{...headers,'content-type':'application/json'},data:JSON.stringify({version_id:state.published.id,revision:state.draft.revision,source_code:'redact-this-value-\ud800'})});
++    expect(invalidDraft.status()).toBe(422);expect(await invalidDraft.text()).not.toContain('redact-this-value');
++
+     student.on('dialog',dialog=>dialog.accept());
+     await student.getByRole('button',{name:'Kirim jawaban',exact:true}).click();await expect(student.getByRole('status')).toContainText('Jawaban terkirim');
+     await expect(student.getByRole('article',{name:'Salinan submission'}).locator('pre')).toHaveText(answer);
+diff --git a/maaher-lms-starter/docs/ARCHITECTURE.md b/maaher-lms-starter/docs/ARCHITECTURE.md
+index 3f5f5bfb378d8921b2e55aca81db0c2bbf0867c6..1526498c07604870d7d284d513a75542629f803c 100644
+--- a/maaher-lms-starter/docs/ARCHITECTURE.md
++++ b/maaher-lms-starter/docs/ARCHITECTURE.md
+@@ -91,6 +91,13 @@ The [Mac guide](LMS-05-MAC-SETUP.md) preserves existing keys/Auth0/bindings/data
+ No new definer/role/secret or learner execution. Older open findings and full
+ auth parent review remain separate; historical ADR-008 validation is not release approval.
+ 
++LMS-05 independent review on4a450d5 closes F5/F6/F7 within limited dev/UAT scope;
++[ADR-010](adr/010-parser-fairness-and-validation-boundaries.md) implements author
++follow-up for F9 CPU portability, F10 shared-parser fairness and F11 safe input
++errors. Fixed resource caps, finite tenant-aware queue and safe422 handling;
++no schema change, existing signedv2 content preserved. Re-review/slow-host UAT
++remain pending; F12 and auth parent are separate.
++
+ ## Coding lab / auto-grader: high-risk system
+ - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.
+ - Never run learner code via Python `exec`, Node eval, shell, local Python subprocess, or Docker socket in FastAPI/Next containers.
+diff --git a/maaher-lms-starter/docs/LMS-05-CHECKLIST.md b/maaher-lms-starter/docs/LMS-05-CHECKLIST.md
+index 24a51a65e233b3f7e3183cef59aacdd19cac2795..abceb19ddd2163ea9e0b18f8ef040224e3770aca 100644
+--- a/maaher-lms-starter/docs/LMS-05-CHECKLIST.md
++++ b/maaher-lms-starter/docs/LMS-05-CHECKLIST.md
+@@ -1,6 +1,10 @@
+ # LMS-05 — development acceptance checklist
+ 
+ 11 November2026 WIB; schema0012, base54543a8. Evidence in HANDOFF/performance.json.
++Latest follow-up: [FIXES-HANDOFF](LMS-05-FIXES-HANDOFF.md), base84dd193.
++Independent4a450d5 review closed F5/F6/F7 Linux in limited synthetic scope;
++F9/F10/F11 author fixes await re-review. F12 remains open.
++
+ Tests below are author evidence. Owner reports partial Mac automation; see
+ [LMS-05-MAC-VALIDATION-20261111.md](LMS-05-MAC-VALIDATION-20261111.md).
+ Independent review and manual real-Auth0 UAT remain pending. Cloud snapshot4a450d5.
+@@ -16,18 +20,22 @@ Independent review and manual real-Auth0 UAT remain pending. Cloud snapshot4a450
+ | No UPDATE/DELETE grant; owner immutability trigger; no learner execution |SQL/source/browser PASS |
+ | Task archive/unpublish history, explicit restore/publish, parent FK preservation |API PASS |
+ | Existing rate budgets/body bounds, explicit BFF methods/query/Origin |API/browser PASS |
+-| F5 proof binding/rotation/stale/tamper, explicit legacy batch |API/unit PASS, review pending |
+-| F5 1500×29KB publish plus other-course writer every0.5s |TCP bench PASS, review pending |
+-| F6 controls/frame/child PID, F7 dense valid input/cap reporting |Cloud unit/IPC PASS; native Mac cap unavailable per owner report |
++| F5 publish/legacy |Independent parent CLOSED/functionally CLOSED; new signed-v2 compatibility regression PASS, re-review pending |
++| F5 1500×29KB publish plus concurrent writer |Independent parent CLOSED; author regression904.23ms,8 writes200 |
++| F6 controls/frame/child PID; F7 Linux cap |Independent parent CLOSED; new dense CPU test separated from OS capability |
+ | Missing memory capability local WARN vs production503 |Cloud simulated IPC PASS; Mac cap absence reported, original evidence/exclusion needs review |
+ | All new functions INVOKER; old18 definers/grants unchanged |DB suite/source PASS |
+ | Upgrade10→12 preserves parent; guarded seeded/offline rollback |Disposable DB PASS |
+-| Full API /scripts /Action /browser |**325 /12 /16 /17 passed**,0skip; API2 existing deprecation warnings |
++| Full API /scripts /Action /browser |**347 /12 /16 /17 passed**,0skip; API2 existing warnings; expanded queue suite5 PASS |
+ | Build/typecheck/compile/pip/starter/diff/audits |PASS; npm0, PyPI41 pins0 findings/errors |
+-| Mac partial automated validation |Owner reports38 API/parser +2 browser PASS;1 Linux-specific assertion excluded; not independently reproduced |
++| Mac historical subset |38+2 reported; later reviewer proved excluded test hid a valid-content F9 failure; rerun revised tests |
+ | Mac Auth0 preflight |Owner reports13 PASS; real login/MFA end-to-end still untested |
+ | Real Auth0/manual UAT, Docker image, remote CI, multi-worker |NOT TESTED here; manual real-Auth0 UAT not yet performed per owner |
+-| Independent LMS-05/F5/F6/F7 review |PENDING |
++| Independent LMS-05 parent review |APPROVED_WITH_NOTES dev/UAT synthetic small–medium only; F5/F6/F7 scoped CLOSED |
++| F9 valid30k /separate Linux assertion /CPU diagnostic |Author Linux PASS; slow reviewer host re-run PENDING |
++| F10 real HTTP2/4/8 accounts, tenant isolation, student drafts |36 author+36 student writes200; fixed capacity/expiry unit PASS; re-review PENDING |
++| F11 date overflow/surrogate422, redaction/valid Unicode |API/browser PASS; independent re-review PENDING |
++| F12 Draft downtime/key retirement/staff GET budget |OPEN operational notes |
+ | Full auth parent8941a79..4733526 |PENDING, outside this delta |
+ | F3, N2/N3/N4, tenant pause |OPEN/unchanged |
+ | Merge/deploy/runner/grading |Not performed; grading LMS-06 |
+diff --git a/maaher-lms-starter/docs/LMS-05-FIXES-HANDOFF.md b/maaher-lms-starter/docs/LMS-05-FIXES-HANDOFF.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..02bb36b2b72736278670b1c3307ada9b4ccc11fb
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-05-FIXES-HANDOFF.md
+@@ -0,0 +1,124 @@
++# LMS-05 review fixes — author handoff
++
++11 November 2026 WIB. Branch **feat/LMS-05-assignments-submissions**, base
++**84dd193709f7cb126e655f7f143e16b3577058a1**; reviewed runtime4a450d5, schema remains
++**0012_assignments**. F9/F10 MEDIUM and F11 LOW implemented for re-review. Parent
++review APPROVED_WITH_NOTES remains limited to synthetic small–medium dev/UAT;
++no production/auth-parent approval. Original report is on Mac, not rewritten here.
++
++## Behavior
++
++- Parser now queues finite work from validated tenant:user scopes rather than
++  rejecting any user just because both global slots are occupied. Least-active
++  tenant first, FIFO among accounts;1 in-flight/account/lane,10/tenant,16 waiting.
++  Two interactive children and one maintenance child, not a process per tenant.
++  Own concurrent/tenant limit429, global capacity/expiry503, Retry-After1. Waiting
++  can take seconds; no promise of zero overload on arbitrary scale/hardware.
++- Hard CPU1000ms/wall3000ms, queue8s/caller about11.2s; existing BFF15s. CPU cap
++  chosen with margin above reviewer's valid266ms; not auto-unbounded. Calibration
++  prints uncached CPU samples/margins, WARN below2. Memory256MiB/Linux, native
++  Mac WARN local/test and fail outside remain. Only separate Linux capability
++  assertion can skip; content/frame/CPU tests always execute.
++- Compatible signedv2 content proofs remain valid with semanticv3 policy. Same
++  Markdown/URL/control rules: existing courses and immutable task versions need
++  no backfill/version changes for this resource-profile update. Unknown policy/
++  unsigned/tampered/retired-key proofs remain rejected. Genuine key retirement
++  has the original operational cost (F12 still open).
++- Extreme offset date UTC overflow returns422 before a version is written.
++  Lone surrogate errors now serialize safely422 with bounded type/loc/msg and
++  no input/ctx, including parent lesson and student draft. Genuine Unicode still
++  works. Common auth validation-error responses change, not auth/session/MFA
++  policy; that compatibility is covered in the parent regression suite.
++
++Files: markdown_budget/service/worker, content_attestation, assignments deadline
++validator, main+validation_errors, diagnostic script, parser/queue/boundary tests
++and assignment BFF browser assertions. No migrations, credentials, DB role/grant,
++provider Action, UI flow or learner execution changes. Source code submitted by
++students remains stored text and is never given to the Markdown parser/executor.
++
++## Validation actually run
++
++Cloud Linux/Python3.12.14, PostgreSQL16.15, Node24.22.1, Next production and real
++Chromium. All tests own NEW EMPTY maaher_test_ DBs, distinct non-owner runtime/
++auth/operator/mail/maintenance roles. No real tenant/Auth0/Mac data accessed.
++
++| Command/check | Actual result |
++|---|---|
++| `python -m pytest apps/api/tests -x -q -s` | **347 passed,0skip,2 existing deprecation warnings**,413.53s |
++| Expanded `python -m pytest apps/api/tests/test_parser_fairness.py -x -q -s` | **5 passed,0skip**,81.37s after full suite; adds simultaneous student draft coverage, runtime unchanged |
++| Earlier parser/content subset /queue+input subset |16 passed/35.38s;18 passed/82.60s before expanded student coverage |
++| Scripts /Auth0 Action |12 passed/0.16s;16 passed/0skip |
++| Chromium assignments /auth /FIDO2 /dev-TOTP /courses /enrollment /learning |2/7/1/1/2/2/2 = **17 passed**,0skip |
++| Assignment browser additions |Raw task/draft surrogate + extreme date through Next BFF return422, sentinel input not reflected |
++| Next typecheck/build, compileall, pip check, starter, source diff check |PASS |
++| npm production audit /PyPI advisory snapshot |0 vulnerabilities /41 pins,0 findings/errors |
++| `parser-preflight.py --calibrate`, local and production profile |Three Linux processes each report active256MiB,CPU1000/wall3000; all measured margins>2 |
++
++Full suite ran after final runtime changes. The queue test was then expanded to
++exercise real student drafts concurrently with normal authors; all5 cases reran
++on another new DB. No runtime change followed those runs. No whole-test exclusion,
++xfail or --deselect; Linux memory test actually executed. Native Mac skip behavior
++is explicit in source, not claimed as a local Mac run.
++
++Expanded real HTTP probe: trusted test fixture creates opaque sessions, active
++memberships and assigned teacher courses; server still performs real session/RLS
++checks on each request. Three loads2/4/8 accounts≤1request/s,6 normal author saves
++and6 student drafts per load, repeated for same/different tenants. Every normal
++save records all attack loops still active; attacks run until normal loops finish,
++up to12 requests/actor/load, never raising original budgets. Student drafts use
++their own enrollment/version/revision; they do not pass through Markdown parsing.
++
++| Accounts | Same-tenant author max /student max ms | Different-tenant author max /student max ms |
++|---|---|---|
++|2|758.77 /219.88|851.33 /219.93|
++|4|2081.30 /260.07|1476.96 /210.85|
++|8|4648.78 /387.81|2393.09 /210.65|
++
++All36 author writes and36 student drafts200; no innocent429/503 in these episodes.
++Attacks422, per-account max observed budget≤19/60 in expanded run. Worst health
++p959.71ms. Queue ordering/bounds/expiry/sequential completion also tested with
++controlled stub ordering; Events there are not CPU-isolation evidence. HTTP CPU
++work is real CommonMark, not an Event/model-only assertion. One API worker only.
++
++Dense valid30k five uncached CPU samples89.410–96.648ms,1000ms budget/max margin10.35
++in full run. Diagnostic samples under other load up to227.941ms; record all values
++in fixes-performance.json, do not substitute fastest sample for host calibration.
++Actual CPU-loop child verifies SIGPROF independent of parser speed. The adversarial
++TCP suite preserves original52/60 account budget and422/own429 statuses; health
++p95/8 concurrent requests11.06ms. These old single-account collisions are different
++from unrelated-account fairness; do not interpret their own429 as F10 regression.
++
++F5 publish regression1500×29KB904.23ms,8 other-course writes all200. Fixture content
++validated before signing; one-time setup excluded, health after publish/during
++writer2.35ms. F1 SQL1500 student24.44ms vs reconstructed23192.19ms; current outline
++ASGI132.20ms and catalog45116.55ms. Full methods/raw metadata in performance JSON;
++none are production SLOs or proof of the owner's slow-host behavior.
++
++## Operations and next step
++
++No schema upgrade/downgrade/backfill needed. Rebuild/restart the existing dev API/
++web after safe source update; preserve .env/keyring/Auth0/binding and all data.
++Follow LMS-05-FIXES-MAC-SETUP.md; rerun dense content and calibration on the actual
++Mac and Linux/container. Do not deselect content tests to hide capability failures.
++Only test_linux_memory_capability_only skips on non-Linux. Capture exact source/
++schema/counts/platform and any FAIL/WARN without changing security settings.
++
++Then independent Claude re-review via reviews/LMS-05-rereview-request.md, save NEW
++reviews/LMS-05-claude-rereview.md. F9/F10/F11 author fixes are not independently
++CLOSED; full auth8941a79..4733526 remains separate. F12 and F3/N2/N3/N4/tenant pause
++remain open. Real Auth0/FIDO2/manual owner UAT, native slow Mac, remote CI, app
++Docker image and multi-worker not tested here. The production-profile parser
++capability check is not a production auth/application deployment test.
++
++All new test DBs retained: maaher_test_lms05fix_{targeted,fixes,full,studentpressure}_20261111,
++seven browser DBs browserassignments/auth/fido/totp/courses/enrollment/learning
++under that prefix/suffix, plus parent migration fixtures' freshly created random
++DBs. Only the owned cloud maaher-cloud-review-20261109 was started, dynamic test
++port127.0.0.1:32777; it is stopped after completion, not deleted. No existing Mac/
++reviewer DB/container/service was touched; no user database reset or downgrade.
++
++Historical LMS-05 patch/manifest and original Claude reports remain unchanged.
++New fixes-author.patch/manifest use base84dd193 and exclude themselves; baseline
++apply check uses an independent temporary Git index, never applies to workspace.
++API PR access remains unavailable (previous Forbidden); branch/review description
++are the reviewable delivery. No merge/deploy or learner runner.
+diff --git a/maaher-lms-starter/docs/LMS-05-FIXES-MAC-SETUP.md b/maaher-lms-starter/docs/LMS-05-FIXES-MAC-SETUP.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd3bbb23ee6c0c94437efdcdfbd7977dd35bf65a
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-05-FIXES-MAC-SETUP.md
+@@ -0,0 +1,63 @@
++# LMS-05 review fixes — Mac verification
++
++11 November 2026 WIB. Branch feat/LMS-05-assignments-submissions. Base84dd193,
++reviewed implementation4a450d5. Latest source adds F9/F10/F11 fixes; schema remains
++0012_assignments. See ADR-010 and LMS-05-FIXES-HANDOFF.md. Original review and Mac
++reports, patch/manifest snapshots and existing databases must be preserved.
++
++1. Inspect active Git root, status, source and schema. Fetch source normally;
++   use an isolated worktree if needed. Preserve untracked reviews/LMS-05-claude.md
++   and LMS-05-mac-validation-20261111.md. Do not reset/clean/stash automatically,
++   apply old patches, or assume local4a450d5 includes84dd193 documentation.
++2. Preserve .env/keyring/Auth0/Action/bindings, database URLs, volumes and old
++   databases. No new config secret/dependency/DB role/schema or migration is
++   needed for these fixes. Do not rerun downgrade/upgrade to validate parser work.
++3. Rebuild/restart development API/web using the existing working workflow.
++   Existing v2 lesson and immutable assignment proofs remain valid; do not
++   revalidate every old course or create new assignment versions for this update.
++4. In the API environment run `python scripts/parser-preflight.py --calibrate`.
++   Expected CPU1000ms/wall3000ms. Record all five CPU samples and margins per lane.
++   Mac cap can be WARN_MEMORY_UNAVAILABLE; Linux/container must report active
++   256MiB. Margin below2 remains WARN_LOW_MARGIN, not a reason to disable caps.
++   Report valid-document422 or CPU failures as FAIL; do not hide them with
++   --deselect or exclude a combined test.
++5. Only the separate test `test_linux_memory_capability_only` uses platform
++   skipif. Always run `test_dense_valid_30k_repeated_without_cache`, control/frame,
++   CPU timer and missing-cap behavior tests. On Mac the Linux capability case can
++   be SKIP while the others must still execute; report exact PASS/FAIL/SKIP counts.
++6. Full tests/browser/benchmarks use NEW EMPTY disposable maaher_test_ DBs owned
++   by this session. All role URLs must point to the same new DB. Fixtures perform
++   destructive acknowledged rollbacks and temporary legacy RLS reconstruction:
++   never run them on existing UAT/real DBs. Preserve all old containers/databases.
++7. Reproduce test_parser_fairness.py using real uvicorn/TCP sessions,2/4/8 actors
++   ≤1 request/s each, ordinary author plus student draft, same/different tenant.
++   Record all statuses/latencies/health and actual account budgets, not just a
++   ParserPool thread model. Waiting can take several seconds; capacity/timeout
++   remains finite. Test concurrency and per-account/tenant admission separately.
++8. Run validation_boundaries and old parent regressions. Extreme offset dates,
++   lone surrogates in task/draft/lesson/unknown key must return UTF8-safe422 and
++   avoid reflecting input/ctx. Genuine Unicode must still save. Browser assignment
++   suite now includes invalid date/surrogate through Next production BFF.
++9. Actual Auth0/manual UAT remains the owner's action, separate from synthetic
++   browser provider tests. Leave staff MFA/profile/binding unchanged; never capture
++   OTP/token/session or print secrets. Do not claim real Auth0, CI, app-image,
++   multi-worker or Linux memory-cap tests unless actually performed.
++
++Save a NEW `reviews/LMS-05-fixes-mac-validation-20261111.md` with commands, SHA,
++schema, platform, counts, exclusions and limitations. Then independent reviewer
++uses reviews/LMS-05-rereview-request.md. F9/F10/F11 author fixes await re-review;
++F12/full auth/older findings remain separate. No merge/deploy/runner.
++
++```text
++Ambil branch feat/LMS-05-assignments-submissions dari mashudizaini/maaher-lms.
++Baca AGENTS.md, docs/LMS-05-FIXES-HANDOFF.md dan LMS-05-FIXES-MAC-SETUP.md.
++Pertahankan perubahan lokal, semua laporan Claude/Mac, .env/keyring/Auth0/binding,
++dan semua DB/volume lama. Ini tidak memerlukan migrasi; rebuild/restart API/web.
++Jalankan parser-preflight.py --calibrate; rekam CPU1000ms/wall3000ms dan margin
++nyata. Hanya tes capability Linux yang boleh SKIP sesuai skipif; jangan --deselect
++tes kontrol/frame/dokumen valid. Semua tes otomatis/benchmark harus memakai DB
++kosong baru terpisah. Uji regresi F9/F10/F11 termasuk HTTP lintas/sama tenant,
++penulis dan draf siswa saat beban2/4/8 akun, input tanggal/surrogate422, browser
++serta parent. Simpan hasil aktual di reviews/LMS-05-fixes-mac-validation-20261111.md.
++Jangan ubah MFA/Action, reset/downgrade, hapus DB/container, merge atau deploy.
++```
+diff --git a/maaher-lms-starter/docs/LMS-05-HANDOFF.md b/maaher-lms-starter/docs/LMS-05-HANDOFF.md
+index 24dffe8e594b486501ce4a7ede32ed9d10de4ce3..736d94603d7fd5c8706bc699cf3f1f0d71b74d40 100644
+--- a/maaher-lms-starter/docs/LMS-05-HANDOFF.md
++++ b/maaher-lms-starter/docs/LMS-05-HANDOFF.md
+@@ -5,6 +5,15 @@
+ **0012_assignments**. Development implementation; independent review/Mac UAT
+ pending. No merge/deploy. Full auth parent8941a79..4733526 remains unreviewed.
+ 
++## Latest — follow-up F9/F10/F11
++
++Pemilik melaporkan review independen4a450d5: F5/F6/F7 Linux CLOSED dalam scope
++sintetis terbatas, F9/F10 MEDIUM dan F11 LOW baru. Perbaikan author kini ada di
++[LMS-05-FIXES-HANDOFF.md](LMS-05-FIXES-HANDOFF.md), dengan347 tes API/parser,
++17 browser dan uji HTTP banyak akun/siswa. Baca itu untuk budget CPU/antrean/status
++terbaru; angka250ms dan hasil325 di bawah adalah snapshot historis4a450d5.
++F9/F10/F11 masih menunggu review ulang. F12/auth parent/temuan lama tetap terpisah.
++
+ ## Update pemilik — 11 November 2026 WIB
+ 
+ Pemilik melaporkan38 tes API/parser dan2 browser lulus di Mac, preflight Auth0
+diff --git a/maaher-lms-starter/docs/LMS-05-MAC-SETUP.md b/maaher-lms-starter/docs/LMS-05-MAC-SETUP.md
+index 0518530de82fe8f7509584839207ad7d8457153e..1589833627b4fb4af4294674d25b92184674527f 100644
+--- a/maaher-lms-starter/docs/LMS-05-MAC-SETUP.md
++++ b/maaher-lms-starter/docs/LMS-05-MAC-SETUP.md
+@@ -1,6 +1,12 @@
+ # LMS-05 — Mac setup and owner UAT
+ 
+-**Update 11 November:** pemilik sudah melaporkan38 tes API/parser dan2 browser
++**Review fixes:** F9/F10/F11 follow-up is described in
++[LMS-05-FIXES-MAC-SETUP.md](LMS-05-FIXES-MAC-SETUP.md). No migration is needed;
++CPU1000ms/wall3000ms and bounded queues replace the historical250ms/free-slot
++profile. Only Linux memory capability assertion may skip; dense valid content
++must still run. Preserve all old reports and data, then use the fixes guide.
++
++**Historical update 11 November:** pemilik sudah melaporkan38 tes API/parser dan2 browser
+ lulus serta preflight13 PASS. Cap memori native Mac tidak tersedia; satu assertion
+ Linux dikecualikan. [Batas bukti](LMS-05-MAC-VALIDATION-20261111.md). Langkah berikut
+ adalah review independen dan UAT manual Auth0 nyata, yang belum dilakukan.
+diff --git a/maaher-lms-starter/docs/LMS-05-PR.md b/maaher-lms-starter/docs/LMS-05-PR.md
+index 02dff2c48150b76316912c2afb16b0b79ead544c..40dc33e8194e1342381d04f729fd8a747216d10b 100644
+--- a/maaher-lms-starter/docs/LMS-05-PR.md
++++ b/maaher-lms-starter/docs/LMS-05-PR.md
+@@ -35,3 +35,13 @@ or production approval. See LMS-05-MAC-VALIDATION-20261111.md.
+ This PR stacks on feat/LMS-04-student-learning (base54543a8). Main still includes
+ unmerged auth and earlier milestones; full auth review8941a79..4733526 is separate.
+ F3/N2/N3/N4/tenant-pause remain open. No grading, runner, merge or deploy approval.
++
++
++Follow-up to independent4a450d5 review: parent F5/F6/F7 closed in limited scope.
++Author fixes for F9/F10/F11 use CPU1000ms/wall3000ms, separate OS memory assertion,
++finite fair tenant/account queues, compatible signedv2 proofs and safe422 input
++errors.347 API/parser,12 scripts,16 Action,17 browser passed; expanded real HTTP
++probe adds36 author saves+36 student drafts all200 during2/4/8-actor pressure.
++Queues trade immediate global429 for bounded waiting (author max4.65s in probe),
++not unlimited capacity. No schema/backfill/config changes. Details FIXES-HANDOFF;
++Mac slow-host rerun and independent re-review pending. F12/old notes/auth unchanged.
+diff --git a/maaher-lms-starter/docs/adr/010-parser-fairness-and-validation-boundaries.md b/maaher-lms-starter/docs/adr/010-parser-fairness-and-validation-boundaries.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..06340d2310a1648a15ecc9c3a7517331b1f11251
+--- /dev/null
++++ b/maaher-lms-starter/docs/adr/010-parser-fairness-and-validation-boundaries.md
+@@ -0,0 +1,107 @@
++# ADR-010 — bounded fair parser scheduling and validation boundaries
++
++11 November 2026 WIB. Follow-up F9/F10 MEDIUM and F11 LOW on4a450d5; base84dd193
++(documentation only). No schema, DB role, provider or learner execution change.
++Implementation evidence is author evidence; independent re-review still pending.
++
++## CPU budget and platform-specific assertions (F9)
++
++The250ms ceiling was too close to a valid30k dense document: reviewer measured
++266ms median on i5-7360U/Docker. Raising it from120ms had not established a robust
++slow-host margin; deselecting a combined capability/content test hid that failure.
++The hard budget is now1000ms CPU,3000ms wall in markdown_budget.py, not an unbounded
++or environment-controlled timeout. This gives about3.75× the reviewer's median,
++not a universal guarantee that all valid Markdown runs on arbitrary hardware.
++CPU exhaustion still rejects422; wall/crash/memory capability failures remain503.
++
++`parser-preflight.py --calibrate` measures five uncached dense valid30k parses in
++each fixed worker, reports process CPU samples/median and margin to the slowest
++sample. It does not adjust/disable caps. A margin below2 is WARN_LOW_MARGIN, not
++PASS evidence for that host. CPU-bound test-only loop still verifies the actual
++SIGPROF timer, independent of hardware speed; HTTP pressure uses real CommonMark.
++
++The Linux-only RLIMIT_AS assertion is now a separate skipif(sys.platform!='linux')
++test. Control/frame, valid repeated dense documents, timeout and simulated missing
++cap behavior continue on Mac. No whole-test --deselect. Native Mac missing cap
++remains local/test WARN; non-local failure remains enforced. Resource profiles
++are separate from content semantics. New proofs use semantic v3-controls ID and
++explicitly accept the already-signed v2-controls-cpu250 ID because URL/Markdown/
++control rules are identical. No unknown/unsigned proof is trusted. Existing v2
++lessons/tasks do not require downtime or new versions just for this budget change.
++Retiring encryption keys still has the original operational consequences.
++
++## Scheduling and finite capacity (F10)
++
++Previously a free-slot race on two global workers gave unrelated users429 while
++one or two actors kept them occupied. The service now enqueues validated tenant:
++user scopes, with one running-or-waiting job per account per lane. A second
++concurrent request from that account gets its own429/Retry-After1. Accounts cannot
++place a long series of pending jobs ahead of peers.
++
++There are still two interactive child processes and one independent maintenance
++child per API process, with a fixed dispatcher thread per child. They start
++lazily. No process/thread/cache is created per tenant. Tenant queues use FIFO for
++accounts and choose a tenant with the least active jobs; stable equal-count ties
++rotate. Completion releases admission bookkeeping before waking the requester,
++so the next sequential save cannot race its own previous reservation.
++
++Per lane: max16 pending, one job/account, max10 in-flight per tenant. One tenant
++therefore cannot consume the whole global queue. Tenant saturation returns429;
++global capacity exhaustion returns503/Retry-After1. Pending admission expires
++within8s; child exchange is bounded3s; caller's total wait is bounded about11.2s,
++below the existing15s BFF timeout, excluding unrelated DB/network contention.
++Expired/cancelled entries free scope/capacity; shutdown rejects queued jobs,
++finishes bounded active work, and closes child pipes/processes. These limits
++remain finite overload behavior, not immunity to arbitrarily many authenticated
++attackers or insufficient CPU. Multi-worker/process-total sizing remains unverified.
++
++The maximum parser calls occupying the default synchronous API threadpool is
++18 interactive+17 maintenance=35, below its unchanged40-thread default; queues do
++not grow unboundedly. This assumes the existing threadpool configuration. The
++scheduler releases the GIL while waiting. Only trusted library parsing runs in
++children; source code submitted by learners never runs or enters this parser.
++Children still receive no DB/Auth0/keyring credentials, only bounded IPC text.
++
++Scope comes only from principal-validated actor.tenant_id/user_id, never body or
++unvalidated header. Existing DB budgets60 staff writes/120 learning requests per
++minute still apply before parsing. The scheduler's admission is process-local,
++not a new cross-worker quota. All RLS, transaction-before-send and write-version
++checks remain in force after waiting. Repeated future/queue work cannot mint
++sessions or broaden tenant/course access.
++
++## Safe user errors (F11)
++
++An offset near Python datetime's year boundary can overflow astimezone(UTC).
++The input validator converts this to ValueError, yielding422 before any version
++is appended. Naive datetimes remain rejected. Ordinary UTC/WIB behavior is unchanged.
++
++Rejecting a lone surrogate with Pydantic was insufficient: its default error
++response included the invalid input, whose UTF8 encoding then failed. A global
++RequestValidationError handler emits at most20 errors, bounded type/loc/msg text
++normalized to valid UTF8, without input or ctx. This also fixes the parent lesson
++path and avoids reflecting password/source contents. Auth logic is unchanged;
++common auth error serialization is included in regression scope. Valid Unicode
++and valid escaped surrogate pairs are still accepted. BFF forwards these safe
++422 responses without re-encoding invalid source data.
++
++## Evidence and residuals
++
++Full Linux suite347 passed; later queue suite5 passed after expanding HTTP probes
++to add simultaneous student drafts. Real opaque sessions/memberships/teacher
++assignments in new disposable PostgreSQL DBs, one uvicorn worker/TCP,2/4/8 actors
++per scenario, max1 request/s/actor and original account budgets. Both same-tenant
++and different-tenant cases measure six distinct uncached author saves and six
++student drafts while all attacker loops remain active. Events coordinate load
++start/stop or unit ordering only; actual HTTP CPU work is the real parser.
++
++All36 author saves and36 student drafts returned200; attackers' invalid Markdown
++returned422. Max author latency4648.78ms, max student387.81ms, health p95 worst9.71ms
++in expanded probe. Queuing exchanges fast429 for bounded waiting; do not present
++it as instant saves under load or a production SLO. Full JSON, sample counts,
++calibration metadata and methods are in LMS-05-fixes-performance.json.
++
++F5 publish/legacy, F6 and F7 Linux were CLOSED by the relayed independent review;
++these fixes are not independently CLOSED yet. F12 Draft downtime/key retirement/
++staff GET budget remains open, along with F3/N2/N3/N4/tenant pause and separate
++auth-parent review. No new migration/backfill/secret or learner runner. No merge,
++deploy, manual owner UAT, real Auth0, app-image, remote CI or multi-worker claim.
+diff --git a/maaher-lms-starter/docs/tickets/LMS-05.md b/maaher-lms-starter/docs/tickets/LMS-05.md
+index 9cb1785819954fbfaf6292b01f23a09abcbb6954..6c656986319e34d6c283eb302e4718f6753570e3 100644
+--- a/maaher-lms-starter/docs/tickets/LMS-05.md
++++ b/maaher-lms-starter/docs/tickets/LMS-05.md
+@@ -37,3 +37,31 @@ keyring/bukti stale/tamper; 1500×29KB publish bersamaan writer/health; controls
+ cap reporting/CPU; guarded seeded rollback preserving parent; realbrowser dua sesi.
+ Schema0011 validation +0012 assignments; hanya DB test kosong baru untukfixtures.
+ Tidak merge/deploy, grading LMS06, uploads atau learner runner pada scope ini.
++
++## Tindak lanjut review LMS-05 — 11 November 2026 WIB
++
++Pemilik meminta kelanjutan setelah verdict APPROVED_WITH_NOTES pada4a450d5.
++F5 publish/legacy, F6 dan F7 Linux CLOSED menurut ringkasan reviewer; F9/F10
++MEDIUM dan F11 LOW menjadi scope perbaikan. F12 tetap batas operasional terbuka.
++
++Perubahan: antrean parser bounded dengan giliran tenant dan akun tervalidasi,
++max satu validation aktif/menunggu per akun per lane, dua interactive workers dan
++satu maintenance worker. Tidak ada proses per tenant/account atau antrean tak
++terbatas. Validasi harus selesai dalam deadline antrean/proses, overload tidak
++menghabiskan seluruh thread API. CPU hard budget1000ms (review valid266ms),
++wall3000ms, capability memory tetap256MiB/Linux dan WARN local Mac/fail outside.
++Kalibrasi diagnostik mengukur korpus valid berulang tanpa cache; tidak menonaktifkan
++budget atau mengubahnya tanpa batas. Hanya tes kemampuan memori memakai skipif
++Linux; kontrol/frame/valid-Markdown/CPU selalu berjalan, tidak ada --deselect.
++
++Deadline UTC overflow menjadi validation422. Handler422 menghapus input/ctx dan
++menormalkan teks error agar surrogate tidak memicu kegagalan encoding respons;
++parent lesson dan draf termasuk cakupan. Bukti validasi lama tetap sah karena
++aturan URL/Markdown/kontrol tidak dilonggarkan; kenaikan budget tidak memaksa
++revalidasi/menerbitkan semua tugas ulang.
++
++Tes: regresi penuh, korpus dense valid30k berulang, CPU timer nyata, memory tests
++terpisah, bounded queue/same-actor/fair tenant/cancellation, HTTP/TCP beberapa sesi
++2/4/8 attacker plus penulis biasa lintas/sama tenant (bukan hanya model thread),
++Unicode mentah dan date-boundary menghasilkan422, parent proof/key/tenant suite,
++browser lama dan baru. Tidak mengubah schema/auth provider/runner/deploy.
+diff --git a/maaher-lms-starter/reviews/LMS-05-claude-relay-20261111.md b/maaher-lms-starter/reviews/LMS-05-claude-relay-20261111.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..17a7dd66613af27ddd9d655c87afd4c3b025c626
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-05-claude-relay-20261111.md
+@@ -0,0 +1,43 @@
++# LMS-05 — owner relay of independent Claude review
++
++11 November 2026 WIB. AUTHOR record of the owner's chat summary, not a new
++independent review. Original `reviews/LMS-05-claude.md` exists on the Mac; it is
++absent from this cloud checkout and must remain unchanged.
++
++Verdict **APPROVED_WITH_NOTES only dev/UAT synthetic small–medium courses**.
++Reviewed `54543a8..4a450d5`, schema0012; no tracked Mac changes and no documentation
++commit after4a450d5 available locally. Cloud84dd193 is six documentation files,
++not part of that review; its content is author-verified only. No auth-parent or
++production approval. Tests used a new reviewer container/database.
++
++- F5 publish CLOSED: own1500×29KB corpus, real uvicorn/TCP2.1–2.5s vs80s,
++  concurrent writers all200, health p95 during publish about11ms.
++- F5 legacy validation functionally CLOSED:1500 lessons,86 calls/214s, no implicit
++  certification. Draft availability and retired-key costs remain operational notes.
++- F6 CLOSED:22k/30k forbidden controls422 without child restart; safe30k frames pass.
++- F7 CLOSED on Linux:256MiB RLIMIT_AS in3 lanes, local and production profile;
++  native Mac remains WARN by design.
++- **F9 MEDIUM**: dense valid30k `*a* `×7500 median266ms on i5-7360U/Docker,
++  above250ms CPU. The deselected test failed on document validation, not its
++  memory assertion. Native Mac150ms but similar document intermittently422.
++  Split OS capability test with skipif; recalibrate CPU margin. CI remote not run.
++- **F10 MEDIUM**: shared global slots;2/4/8 actors at most1 save/s caused ordinary
++  simulated saves429 at22/28/48%. Reviewer used ParserPool threads, not HTTP sessions.
++- **F11 LOW**: extreme date+offset UTC overflow and lone surrogates in instructions/
++  student draft yielded500; parent lesson has the same class of encoding failure.
++- **F12 LOW/INFO**: legacy validation requires Draft and pauses students, retiring
++  proof keys needs assignment versions, staff GET lacks ingress budget. Still open.
++
++Reviewer verified SQL/session tenant/peer/teacher isolation, trigger-normalized
++spoofed submissions, immutable versions/submissions, server deadline/timezone,
++12 parallel submits at cap3 giving exactly3 successes/no deadlock, authority before
++locks, new INVOKER functions and unchanged18 definers. Seeded upgrade10→12 parent
++hashes preserved; wrong/base downgrade refused; ack rollback restored0010 schema
++apart from dropped-column tombstones. Next production BFF87/87 passed.
++
++Not tested by reviewer: CI remote, real Auth0/FIDO2, Playwright, app Docker image,
++multi-worker or owner UAT. F3/N2/N3/N4/tenant pause and full auth8941a79..4733526
++remain separate/open. Repo/.env/Auth0/old DB and owner API PID were preserved;
++only probe processes stopped, reviewer container stopped not deleted. No merge/deploy.
++F9/F10 must close before depending on Linux CI success or many writers. AUTHOR
++fixes below require fresh independent review, not self-assigned CLOSED status.
+diff --git a/maaher-lms-starter/reviews/LMS-05-fixes-author-response.md b/maaher-lms-starter/reviews/LMS-05-fixes-author-response.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..aff3f09d60c0af6ca04b0118727d824952af1145
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-05-fixes-author-response.md
+@@ -0,0 +1,31 @@
++# LMS-05 — AUTHOR response F9/F10/F11
++
++11 November 2026 WIB. Base84dd193; independent runtime review was54543a8..4a450d5.
++Original Claude report remains on Mac; author relay records its scope/verdict.
++These are implemented fixes with author evidence, **not independent CLOSED**.
++
++| Finding | Change | Evidence and limits |
++|---|---|---|
++| F9 MEDIUM | Fixed CPU1000ms/wall3000ms, separate OS memory assertion with skipif; dense30k always runs five times uncached. Diagnostic calibration reports host margin, never disables/auto-expands caps. | Full347 Linux0skip; dense samples89.410–96.648ms, max-sample margin10.35. Three-lane preflight local and production-profile caps active; loaded diagnostic samples up to227.941ms. Slow reviewer Mac/i5 profile must still reproduce; no --deselect. |
++| F10 MEDIUM | Finite tenant-aware FIFO/least-active scheduling instead of global free-slot race. One job/account,10 in-flight/tenant,16 pending/lane, fixed2+1 worker processes; expired/cancelled work releases capacity. | Real uvicorn/TCP, actual opaque sessions/RLS,2/4/8 actors≤1request/s, same/different tenants. Expanded probe:36 normal author saves+36 student drafts all200 while every attacker loop remains active; invalid attacks all422. Max author4648.78ms/student387.81ms, worst health p959.71ms. Capacity still finite; beyond caps returns429/503 safely. Multi-worker not tested. |
++| F11 LOW | UTC astimezone overflow becomes validation422. Global RequestValidationError response bounds/normalizes type/loc/msg, omits input/ctx so lone surrogate does not crash error encoding or expose source/password. |14 boundary cases include4 overflow dates,9 raw surrogate paths and valid Unicode pair acceptance. No version append on invalid date. Parent lessons covered. Real Next/browser cases verify task/draft/date422 without reflecting sentinel input. |
++
++F5/F6/F7 remain CLOSED within the original independent scope, including functional
++legacy214s/86calls and Linux memory256MiB. New proof policy is semantic v3; signed
++v2 accepted explicitly because URL/Markdown/control semantics are unchanged. No
++revalidation/backfill/new assignment versions needed just for resource budget
++change; old proof/key rotation invariants still tested. No unknown/unsigned proof
++is implicitly certified. Real key retirement remains F12 operational note.
++
++Full347 API/parser passed/0skip/2 existing warnings; after adding simultaneous
++student HTTP coverage, queue suite5 passed again (no runtime change between runs).
++17 real Chromium cases,12 scripts,16 Action, Next build/typecheck/compile/pip/starter
++and audits pass (npm0; PyPI41pins0 findings/errors). Browser uses synthetic provider;
++HTTP load fixtures insert trusted synthetic opaque sessions, not Auth0 login.
++Detailed methods/raw numbers in LMS-05-fixes-performance.json and FIXES-HANDOFF.
++
++F12 Draft downtime/retired-key version workflow/staff GET budget remains OPEN.
++F3/N2/N3/N4/tenant pause and auth parent8941a79..4733526 remain separate. Not tested:
++native Mac/slow reviewer machine, real Auth0/FIDO2, owner manual UAT, remote CI,
++app image or multi-worker. No schema/provider/privilege changes or learner runner;
++no merge/deploy. Preserve all historical reports/snapshots and old databases.
+diff --git a/maaher-lms-starter/reviews/LMS-05-fixes-performance.json b/maaher-lms-starter/reviews/LMS-05-fixes-performance.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..a10432e9a6f924ce97afafda36cb504aab0ef01d
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-05-fixes-performance.json
+@@ -0,0 +1,804 @@
++{
++  "date": "2026-11-11",
++  "timezone": "Asia/Jakarta",
++  "base": "84dd193",
++  "scope": "author fixes F9/F10/F11; independent review pending",
++  "environment": "Cloud Linux Python3.12.14 / PG16.15 / one real uvicorn worker / synthetic opaque session fixtures, not real Auth0",
++  "full_suite": {
++    "passed": 347,
++    "skipped": 0,
++    "warnings": 2,
++    "seconds": 413.53
++  },
++  "expanded_queue_suite": {
++    "passed": 5,
++    "skipped": 0,
++    "warnings": 2,
++    "seconds": 81.37,
++    "note": "After full suite, test coverage expanded to concurrent student drafts; runtime code unchanged."
++  },
++  "valid_dense_cpu": {
++    "cpu_ms": [
++      96.648,
++      96.627,
++      93.645,
++      96.091,
++      89.41
++    ],
++    "budget_ms": 1000,
++    "max_margin": 10.35
++  },
++  "fairness_http_expanded": [
++    {
++      "api_workers": 1,
++      "rounds": [
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            2,
++            2,
++            2,
++            2,
++            2,
++            2
++          ],
++          "active_attacker_loops_at_each_student_save": [
++            2,
++            2,
++            2,
++            2,
++            2,
++            2
++          ],
++          "attacker_accounts": 2,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 10
++          },
++          "health_p95_ms": 5.75,
++          "max_account_budget_attempts": 8,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            667.07,
++            721.06,
++            322.97,
++            289.18,
++            758.77,
++            428.15
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ],
++          "student_latency_ms": [
++            128.22,
++            167.94,
++            168.78,
++            136.84,
++            121.8,
++            219.88
++          ],
++          "student_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            4,
++            4,
++            4,
++            4,
++            4,
++            4
++          ],
++          "active_attacker_loops_at_each_student_save": [
++            4,
++            4,
++            4,
++            4,
++            4,
++            4
++          ],
++          "attacker_accounts": 4,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 27
++          },
++          "health_p95_ms": 8.72,
++          "max_account_budget_attempts": 12,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            1599.36,
++            2081.3,
++            1480.39,
++            1282.7,
++            1230.21,
++            1315.31
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ],
++          "student_latency_ms": [
++            171.26,
++            260.07,
++            160.54,
++            230.24,
++            248.74,
++            198.42
++          ],
++          "student_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            8,
++            8,
++            8,
++            8,
++            8,
++            8
++          ],
++          "active_attacker_loops_at_each_student_save": [
++            8,
++            8,
++            8,
++            8,
++            8,
++            8
++          ],
++          "attacker_accounts": 8,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 55
++          },
++          "health_p95_ms": 9.71,
++          "max_account_budget_attempts": 19,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            4648.78,
++            3435.03,
++            2894.18,
++            2531.45,
++            2301.48,
++            2152.17
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ],
++          "student_latency_ms": [
++            238.08,
++            215.6,
++            223.35,
++            387.81,
++            273.88,
++            179.56
++          ],
++          "student_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        }
++      ],
++      "tenant_mode": "same"
++    },
++    {
++      "api_workers": 1,
++      "rounds": [
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            2,
++            2,
++            2,
++            2,
++            2,
++            2
++          ],
++          "active_attacker_loops_at_each_student_save": [
++            2,
++            2,
++            2,
++            2,
++            2,
++            2
++          ],
++          "attacker_accounts": 2,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 10
++          },
++          "health_p95_ms": 5.84,
++          "max_account_budget_attempts": 5,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            851.33,
++            602.6,
++            721.78,
++            279.78,
++            327.64,
++            385.41
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ],
++          "student_latency_ms": [
++            184.62,
++            219.93,
++            149.26,
++            161.41,
++            136.38,
++            142.66
++          ],
++          "student_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            4,
++            4,
++            4,
++            4,
++            4,
++            4
++          ],
++          "active_attacker_loops_at_each_student_save": [
++            4,
++            4,
++            4,
++            4,
++            4,
++            4
++          ],
++          "attacker_accounts": 4,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 27
++          },
++          "health_p95_ms": 6.39,
++          "max_account_budget_attempts": 12,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            1476.96,
++            1063.78,
++            824.82,
++            886.05,
++            813.04,
++            928.29
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ],
++          "student_latency_ms": [
++            188.03,
++            145.42,
++            204.17,
++            200.14,
++            210.85,
++            188.44
++          ],
++          "student_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            8,
++            8,
++            8,
++            8,
++            8,
++            8
++          ],
++          "active_attacker_loops_at_each_student_save": [
++            8,
++            8,
++            8,
++            8,
++            8,
++            8
++          ],
++          "attacker_accounts": 8,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 55
++          },
++          "health_p95_ms": 5.5,
++          "max_account_budget_attempts": 19,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            2393.09,
++            1987.59,
++            2191.41,
++            1857.97,
++            1833.54,
++            1872.83
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ],
++          "student_latency_ms": [
++            182.1,
++            173.51,
++            167.56,
++            132.93,
++            210.65,
++            127.13
++          ],
++          "student_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        }
++      ],
++      "tenant_mode": "different"
++    }
++  ],
++  "fairness_http_full_run": [
++    {
++      "api_workers": 1,
++      "rounds": [
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            2,
++            2,
++            2,
++            2,
++            2,
++            2
++          ],
++          "attacker_accounts": 2,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 13
++          },
++          "health_p95_ms": 4.49,
++          "max_account_budget_attempts": 7,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            704.46,
++            713.27,
++            781.82,
++            803.76,
++            791.7,
++            786.97
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            4,
++            4,
++            4,
++            4,
++            4,
++            4
++          ],
++          "attacker_accounts": 4,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 27
++          },
++          "health_p95_ms": 6.58,
++          "max_account_budget_attempts": 13,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            1280.71,
++            682.68,
++            779.07,
++            818.36,
++            741.42,
++            823.61
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            8,
++            8,
++            8,
++            8,
++            8,
++            8
++          ],
++          "attacker_accounts": 8,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 58
++          },
++          "health_p95_ms": 5.55,
++          "max_account_budget_attempts": 20,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            2250.66,
++            1885.81,
++            1894.81,
++            1981.73,
++            1894.51,
++            2283.66
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        }
++      ],
++      "tenant_mode": "same"
++    },
++    {
++      "api_workers": 1,
++      "rounds": [
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            2,
++            2,
++            2,
++            2,
++            2,
++            2
++          ],
++          "attacker_accounts": 2,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 14
++          },
++          "health_p95_ms": 4.86,
++          "max_account_budget_attempts": 7,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            777.56,
++            1000.04,
++            768.98,
++            787.23,
++            743.44,
++            587.05
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            4,
++            4,
++            4,
++            4,
++            4,
++            4
++          ],
++          "attacker_accounts": 4,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 29
++          },
++          "health_p95_ms": 5.94,
++          "max_account_budget_attempts": 15,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            1136.28,
++            1186.36,
++            707.94,
++            994.29,
++            1086.6,
++            1025.63
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        },
++        {
++          "active_attacker_loops_at_each_normal_save": [
++            8,
++            8,
++            8,
++            8,
++            8,
++            8
++          ],
++          "attacker_accounts": 8,
++          "attacker_max_requests_per_second_per_account": 1,
++          "attacker_statuses": {
++            "422": 56
++          },
++          "health_p95_ms": 6.16,
++          "max_account_budget_attempts": 22,
++          "normal_429_fraction": 0,
++          "normal_latency_ms": [
++            2211.13,
++            1927.59,
++            2027.99,
++            1879.31,
++            1841.96,
++            1984.3
++          ],
++          "normal_statuses": [
++            200,
++            200,
++            200,
++            200,
++            200,
++            200
++          ]
++        }
++      ],
++      "tenant_mode": "different"
++    }
++  ],
++  "publish_regression": {
++    "lessons": 1500,
++    "characters_per_lesson": 29000,
++    "publish_ms": 904.23,
++    "writer_statuses": [
++      200,
++      200,
++      200,
++      200,
++      200,
++      200,
++      200,
++      200
++    ],
++    "health_p95_ms": 2.35,
++    "setup": "each unique document validated with raw trusted parser before proof signing; excluded from publish timer"
++  },
++  "cpu_health_regression": {
++    "actual_account_budget_attempts": 52,
++    "baseline_p95_ms": 1.36,
++    "load_1_p95_ms": 2.07,
++    "load_1_samples": 4201,
++    "load_1_statuses": {
++      "422": 8
++    },
++    "load_2_p95_ms": 2.23,
++    "load_2_samples": 1748,
++    "load_2_statuses": {
++      "422": 4,
++      "429": 4
++    },
++    "load_8_p95_ms": 11.06,
++    "load_8_samples": 546,
++    "load_8_statuses": {
++      "422": 2,
++      "429": 30
++    }
++  },
++  "rls_regression": {
++    "current_admin_1500_ms": 87.82,
++    "current_catalog_451_ms": 16.55,
++    "current_http_1500_ms": 132.2,
++    "current_student_100_ms": 14.7,
++    "current_student_1500_ms": 24.44,
++    "legacy_admin_1500_ms": 9848.6,
++    "legacy_catalog_451_ms": 4535.38,
++    "legacy_student_100_ms": 2130.8,
++    "legacy_student_1500_ms": 23192.19
++  },
++  "calibration_local": [
++    {
++      "lane": "interactive",
++      "memory_active": true,
++      "memory_bytes": 268435456,
++      "cpu_ms": 1000,
++      "wall_ms": 3000,
++      "status": "PASS"
++    },
++    {
++      "lane": "interactive",
++      "valid_30k_samples_cpu_ms": [
++        143.975,
++        93.253,
++        108.478,
++        149.983,
++        146.251
++      ],
++      "median_cpu_ms": 143.975,
++      "budget_ms": 1000,
++      "margin_to_slowest_sample": 6.67,
++      "status": "PASS_MARGIN"
++    },
++    {
++      "lane": "interactive",
++      "memory_active": true,
++      "memory_bytes": 268435456,
++      "cpu_ms": 1000,
++      "wall_ms": 3000,
++      "status": "PASS"
++    },
++    {
++      "lane": "interactive",
++      "valid_30k_samples_cpu_ms": [
++        164.311,
++        151.619,
++        99.06,
++        132.847,
++        182.07
++      ],
++      "median_cpu_ms": 151.619,
++      "budget_ms": 1000,
++      "margin_to_slowest_sample": 5.49,
++      "status": "PASS_MARGIN"
++    },
++    {
++      "lane": "maintenance",
++      "memory_active": true,
++      "memory_bytes": 268435456,
++      "cpu_ms": 1000,
++      "wall_ms": 3000,
++      "status": "PASS"
++    },
++    {
++      "lane": "maintenance",
++      "valid_30k_samples_cpu_ms": [
++        227.941,
++        186.013,
++        166.09,
++        122.899,
++        120.609
++      ],
++      "median_cpu_ms": 166.09,
++      "budget_ms": 1000,
++      "margin_to_slowest_sample": 4.39,
++      "status": "PASS_MARGIN"
++    }
++  ],
++  "calibration_production_profile": [
++    {
++      "lane": "interactive",
++      "memory_active": true,
++      "memory_bytes": 268435456,
++      "cpu_ms": 1000,
++      "wall_ms": 3000,
++      "status": "PASS"
++    },
++    {
++      "lane": "interactive",
++      "valid_30k_samples_cpu_ms": [
++        178.617,
++        115.427,
++        110.578,
++        107.641,
++        108.774
++      ],
++      "median_cpu_ms": 110.578,
++      "budget_ms": 1000,
++      "margin_to_slowest_sample": 5.6,
++      "status": "PASS_MARGIN"
++    },
++    {
++      "lane": "interactive",
++      "memory_active": true,
++      "memory_bytes": 268435456,
++      "cpu_ms": 1000,
++      "wall_ms": 3000,
++      "status": "PASS"
++    },
++    {
++      "lane": "interactive",
++      "valid_30k_samples_cpu_ms": [
++        179.986,
++        132.055,
++        147.946,
++        138.72,
++        111.436
++      ],
++      "median_cpu_ms": 138.72,
++      "budget_ms": 1000,
++      "margin_to_slowest_sample": 5.56,
++      "status": "PASS_MARGIN"
++    },
++    {
++      "lane": "maintenance",
++      "memory_active": true,
++      "memory_bytes": 268435456,
++      "cpu_ms": 1000,
++      "wall_ms": 3000,
++      "status": "PASS"
++    },
++    {
++      "lane": "maintenance",
++      "valid_30k_samples_cpu_ms": [
++        211.292,
++        148.761,
++        157.42,
++        152.739,
++        157.521
++      ],
++      "median_cpu_ms": 157.42,
++      "budget_ms": 1000,
++      "margin_to_slowest_sample": 4.73,
++      "status": "PASS_MARGIN"
++    }
++  ],
++  "methods": {
++    "fairness": "Real HTTP/TCP, trusted fixture inserts synthetic opaque sessions with actual membership/assignment and RLS; fixed two interactive parser children. Each actor at most1 request/s, at most12 attempts/round. Invalid real30k mixed Markdown+unsafe URL prevents successful/cache saves. Stop after normal author/student save loops; active attacker-loop counts recorded at each save.6 saves per role per2/4/8 scenario, same and different tenant. Original request budgets untouched.",
++    "cpu": "Five exact30k dense-valid docs with distinct cache scopes; child reports process CPU. Separate test-only CPU-loop child proves SIGPROF; actual HTTP uses CommonMark. No Event substitute for CPU work.",
++    "queue_unit": "Events control queue ordering only, not CPU-isolation evidence; HTTP cases independently load actual processes.",
++    "publish": "Each unique1500\u00d729KB fixture parsed before signing; setup cost excluded. Different-course writer8 saves at0.5s, health after publish/during writer. Not a legacy backfill duration claim.",
++    "limits": "CPU1000ms, wall3000ms, queue8s/caller about11.2s; max16 pending/lane,10 in-flight per tenant,1 per account,2 interactive/1 maintenance processes per API worker. Finite overload still returns429/503 safely.",
++    "unverified": "Native Mac/slow reviewer hardware, real Auth0/FIDO2, owner manual UAT, remote CI, app Docker image and multi-worker not run here. No production readiness claim."
++  }
++}
+diff --git a/maaher-lms-starter/reviews/LMS-05-rereview-request.md b/maaher-lms-starter/reviews/LMS-05-rereview-request.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..11db30582babf4349859bf59bf79f379f9ebf1f0
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-05-rereview-request.md
+@@ -0,0 +1,51 @@
++# LMS-05 independent re-review — F9/F10/F11
++
++AUTHOR has implemented fixes; do not turn author tests into independent approval.
++Read CLAUDE.md, AGENTS.md, reviewer skill and original reviews/LMS-05-claude.md on
++Mac, plus its author relay. Preserve every prior report unchanged.
++
++Base **84dd193**, reviewed runtime **4a450d5**, branch
++feat/LMS-05-assignments-submissions. Review84dd193..HEAD and actual local changes.
++If84dd193 unavailable, fetch normally or use4a450d5..HEAD and record that six
++intervening files are documentation only after verifying Git objects. Never
++silently use main...HEAD to approve auth parent. Verify SHA/schema/working tree.
++Original patch/manifest snapshots are historical4a450d5. New fixes patch/manifest
++are based84dd193; neither overwrites old evidence.
++
++Read ADR-010, FIXES-HANDOFF, fixes-author-response and fixes-performance.json.
++Use NEW EMPTY disposable databases/own containers; no owner UAT DB or migrations
++on populated old DBs. Do not read/print .env/keys, alter Auth0 or stop owner servers.
++
++- **F9:** valid30k dense document always executes in its own test, repeated with
++  scoped cache misses. Only RLIMIT_AS assertion is Linux skipif, never --deselect.
++  Reproduce on the slow reviewer Mac/Linux profile where266ms exceeded250ms.
++  Budget now1000ms CPU/3000ms wall, fixed hard caps; preflight --calibrate reports
++  actual samples/margins without changing caps. Verify real CPU timer and dense
++  content, not just a mocked/Event workload. Unsupported local memory remainsWARN,
++  production fail-closed. Check new v3 proofs explicitly accept only semantic-
++  equivalent signedv2, preserving old courses/versions without automatic trust.
++- **F10:** inspect bounded tenant-aware queue, one in-flight/account/lane,
++  max10/tenant,16 pending/lane and fixed2+1 workers. Verify least-active tenant,
++  FIFO account order, sequential completion race, expiry/cancellation/shutdown,
++  no per-principal process/cache growth. Cross-worker totals are not verified.
++  Test actual HTTP/TCP sessions2/4/8 actors≤1 save/s, same and different tenants,
++  normal author plus student draft. Ensure all attacker loops are active for
++  each normal save. Record200/422/429/503, latency/wait/health and unaltered
++  budgets, not a thread-only model or only percentages. Overload beyond finite
++  capacity is allowed to fail safely; no general no-DoS claim. Review threadpool/
++  queue deadlines relative to BFF15s and behavior when CPU is constrained.
++- **F11:** raw JSON lone surrogates in task/rubric/starter/draft/lesson/unknown
++  key must give safe422, no input/ctx reflection, valid Unicode still accepted.
++  Extreme offset dates overflow UTC safely422 before writing a version.
++  Inspect common RequestValidationError handler, including auth error regression
++  and bounded output/UTF8 normalization. No auth policy change is intended.
++
++Run all old tenant/peer/teacher/SQL/deadline/immutable/race/migration/proof/browser
++regressions as feasible. CPU/HTTP probes use synthetic data/trusted parser, never
++learner execution. No schema/backfill needed for fixes; do not rerun setup on
++existing UAT. Keep original reviewer containers/data; stop only own new probes.
++Save NEW `reviews/LMS-05-claude-rereview.md`, exact commands/results and proven
++findings/path:line, F9/F10/F11 status and untested limits. F12 remains operational
++open; F3/N2/N3/N4/tenant pause and full auth8941a79..4733526 separate. No real
++Auth0/FIDO2/owner UAT/CI/image/multi-worker claim unless actually tested.
++No merge/deploy or changed source; return findings to AUTHOR if needed.
+diff --git a/maaher-lms-starter/scripts/parser-preflight.py b/maaher-lms-starter/scripts/parser-preflight.py
+index ad85970a60e882d3704fc0f57e54d0a8ec0af971..714bbc22c8b981a96262a542f1955817630f4cf0 100644
+--- a/maaher-lms-starter/scripts/parser-preflight.py
++++ b/maaher-lms-starter/scripts/parser-preflight.py
+@@ -1,10 +1,24 @@
+-"""Local parser capability report; prints no env values, document or secrets."""
+-import json,sys
++"""Parser limits and optional host calibration; prints no documents or secrets."""
++import argparse,json,statistics,sys
+ from pathlib import Path
+ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'apps/api'))
+ from app.markdown_service import parser,maintenance_parser
+-for name,pool in [('interactive',parser),('maintenance',maintenance_parser)]:
+-    for worker in pool.workers:
+-        worker.validate('Parser capability check','preflight')
+-        print(json.dumps({'lane':name,**worker.limits,'status':'PASS' if worker.limits.get('memory_active') else 'WARN_MEMORY_UNAVAILABLE'}))
+-parser.close();maintenance_parser.close()
++from app.markdown_budget import CPU_SECONDS
++
++args=argparse.ArgumentParser()
++args.add_argument('--calibrate',action='store_true',help='Measure uncached valid30k CPU margin; does not change resource caps')
++options=args.parse_args()
++try:
++    for name,pool in [('interactive',parser),('maintenance',maintenance_parser)]:
++        for worker in pool.workers:
++            worker.validate('Parser capability check','preflight')
++            print(json.dumps({'lane':name,**worker.limits,'status':'PASS' if worker.limits.get('memory_active') else 'WARN_MEMORY_UNAVAILABLE'}))
++            if options.calibrate:
++                values=[]
++                for n in range(5):
++                    worker.validate('*a* '*7500,f'preflight-dense:{n}')
++                    values.append(worker.usage['cpu_ms'])
++                margin=CPU_SECONDS*1000/max(values)
++                print(json.dumps({'lane':name,'valid_30k_samples_cpu_ms':values,'median_cpu_ms':statistics.median(values),
++                    'budget_ms':int(CPU_SECONDS*1000),'margin_to_slowest_sample':round(margin,2),'status':'PASS_MARGIN' if margin>=2 else 'WARN_LOW_MARGIN'}))
++finally:parser.close();maintenance_parser.close()

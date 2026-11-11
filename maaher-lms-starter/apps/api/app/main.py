@@ -1,5 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from .validation_errors import invalid_request
 from starlette.concurrency import run_in_threadpool
 from psycopg import Error as DatabaseError
 from .auth import router
@@ -15,6 +17,7 @@ from .traffic import ANONYMOUS_PATHS, admit
 from .auth_support import limited
 
 app = FastAPI(title="Maaher LMS API", docs_url=None, redoc_url=None)
+app.add_exception_handler(RequestValidationError,invalid_request)
 app.include_router(router)
 app.include_router(lifecycle_router)
 app.include_router(mfa_router)

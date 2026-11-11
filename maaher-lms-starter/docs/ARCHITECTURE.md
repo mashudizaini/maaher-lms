@@ -91,6 +91,13 @@ The [Mac guide](LMS-05-MAC-SETUP.md) preserves existing keys/Auth0/bindings/data
 No new definer/role/secret or learner execution. Older open findings and full
 auth parent review remain separate; historical ADR-008 validation is not release approval.
 
+LMS-05 independent review on4a450d5 closes F5/F6/F7 within limited dev/UAT scope;
+[ADR-010](adr/010-parser-fairness-and-validation-boundaries.md) implements author
+follow-up for F9 CPU portability, F10 shared-parser fairness and F11 safe input
+errors. Fixed resource caps, finite tenant-aware queue and safe422 handling;
+no schema change, existing signedv2 content preserved. Re-review/slow-host UAT
+remain pending; F12 and auth parent are separate.
+
 ## Coding lab / auto-grader: high-risk system
 - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.
 - Never run learner code via Python `exec`, Node eval, shell, local Python subprocess, or Docker socket in FastAPI/Next containers.

@@ -1,6 +1,12 @@
 # LMS-05 — Mac setup and owner UAT
 
-**Update 11 November:** pemilik sudah melaporkan38 tes API/parser dan2 browser
+**Review fixes:** F9/F10/F11 follow-up is described in
+[LMS-05-FIXES-MAC-SETUP.md](LMS-05-FIXES-MAC-SETUP.md). No migration is needed;
+CPU1000ms/wall3000ms and bounded queues replace the historical250ms/free-slot
+profile. Only Linux memory capability assertion may skip; dense valid content
+must still run. Preserve all old reports and data, then use the fixes guide.
+
+**Historical update 11 November:** pemilik sudah melaporkan38 tes API/parser dan2 browser
 lulus serta preflight13 PASS. Cap memori native Mac tidak tersedia; satu assertion
 Linux dikecualikan. [Batas bukti](LMS-05-MAC-VALIDATION-20261111.md). Langkah berikut
 adalah review independen dan UAT manual Auth0 nyata, yang belum dilakukan.

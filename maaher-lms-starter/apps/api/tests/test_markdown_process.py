@@ -25,7 +25,7 @@ def test_cpu_budget_and_child_process_separation(monkeypatch):
         assert parser.process.pid!=os.getpid()
         start=time.monotonic()
         with pytest.raises(MarkdownComplexity):parser.validate('test-only-cpu-budget')
-        assert time.monotonic()-start<2.2
+        assert time.monotonic()-start<3.2
         assert parser.validate('[valid](https://example.org)')
     finally:parser.close()
 

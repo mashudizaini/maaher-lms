@@ -4,6 +4,9 @@ import resource
 import signal
 import sys
 import re
+import time
+
+from .markdown_budget import CPU_SECONDS,WALL_SECONDS,MEMORY_BYTES
 
 from .markdown_parse import validate_markdown_raw
 
@@ -18,24 +21,24 @@ def main():
     # supported POSIX hosts; hard wall timeout is always enforced by the parent.
     memory_active=False
     try:
-        resource.setrlimit(resource.RLIMIT_AS,(256*1024*1024,256*1024*1024))
-        memory_active=resource.getrlimit(resource.RLIMIT_AS)[0]<=256*1024*1024
+        resource.setrlimit(resource.RLIMIT_AS,(MEMORY_BYTES,MEMORY_BYTES))
+        memory_active=resource.getrlimit(resource.RLIMIT_AS)[0]<=MEMORY_BYTES
     except (ValueError,OSError): pass
     signal.signal(signal.SIGPROF,expired)
     while True:
         line=sys.stdin.buffer.readline(262145)
         if not line:break
         if len(line)>262144:return 1
-        result='invalid'
+        result='invalid';started=time.process_time()
         try:
             value=json.loads(line)['content']
             if not isinstance(value,str) or len(value)>30000 or re.search(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]',value):raise ValueError()
-            signal.setitimer(signal.ITIMER_PROF,.25)
+            signal.setitimer(signal.ITIMER_PROF,CPU_SECONDS)
             validate_markdown_raw(value); result='ok'
         except CpuBudget: result='complexity'
         except (ValueError,RecursionError,MemoryError): result='invalid'
         finally: signal.setitimer(signal.ITIMER_PROF,0)
-        sys.stdout.buffer.write(json.dumps({'result':result,'limits':{'memory_active':memory_active,'memory_bytes':256*1024*1024 if memory_active else None,'cpu_ms':250,'wall_ms':2000}}).encode()+b'\n');sys.stdout.buffer.flush()
+        sys.stdout.buffer.write(json.dumps({'result':result,'limits':{'memory_active':memory_active,'memory_bytes':MEMORY_BYTES if memory_active else None,'cpu_ms':int(CPU_SECONDS*1000),'wall_ms':int(WALL_SECONDS*1000)},'usage':{'cpu_ms':round((time.process_time()-started)*1000,3)}}).encode()+b'\n');sys.stdout.buffer.flush()
     return 0
 
 

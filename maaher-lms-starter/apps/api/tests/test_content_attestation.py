@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from app.auth_support import KeyRing
 from app.content_attestation import seal,valid
 from app.markdown_service import Parser,ParserPool
+from app.markdown_budget import CPU_SECONDS
 from app.markdown_parse import validate_markdown_raw
 from test_courses import author,filled,write,detail
 
@@ -59,9 +60,9 @@ def test_control_character_rejected_without_child_restart_and_large_safe_frame()
         for length in (22000,30000):
             with pytest.raises(ValueError):parser.validate('\x01'*length)
             assert parser.process.pid==pid and parser.process.poll() is None
-        for text in ('\t'*30000,'\r'*30000,'😀'*30000,'*a* '*7500):assert parser.validate(text)==text
+        for text in ('\t'*30000,'\r'*30000,'😀'*30000):assert parser.validate(text)==text
         assert parser.process.pid==pid
-        assert parser.limits['memory_active'] is True and parser.limits['cpu_ms']==250
+        assert parser.limits['cpu_ms']==int(CPU_SECONDS*1000)
     finally:parser.close()
 
 
@@ -146,3 +147,35 @@ def test_publish_1500_large_valid_lessons_with_concurrent_writer_real_http(autho
         process.terminate()
         try:process.wait(timeout=5)
         except subprocess.TimeoutExpired:process.kill();process.wait()
+
+
+
+@pytest.mark.skipif(sys.platform!='linux',reason='RLIMIT_AS capability assertion requires Linux; content/CPU tests still run')
+def test_linux_memory_capability_only():
+    parser=Parser()
+    try:
+        parser.validate('Linux memory capability')
+        assert parser.limits['memory_active'] is True
+        assert parser.limits['memory_bytes']==268435456
+    finally:parser.close()
+
+
+def test_dense_valid_30k_repeated_without_cache():
+    parser=Parser();cpu=[]
+    try:
+        for n in range(5):
+            value='*a* '*7500
+            assert parser.validate(value,f'valid-dense:{n}')==value
+            cpu.append(parser.usage['cpu_ms'])
+        print('LMS05_VALID_CPU '+json.dumps({'cpu_ms':cpu,'budget_ms':int(CPU_SECONDS*1000),'max_margin':round(CPU_SECONDS*1000/max(cpu),2)}))
+    finally:parser.close()
+
+
+def test_v2_lesson_and_assignment_proofs_remain_valid_after_resource_budget_change(monkeypatch):
+    from app.content_attestation import fingerprint
+    from app.auth_support import cipher
+    monkeypatch.setenv('AUTH_ENCRYPTION_KEY',Fernet.generate_key().decode())
+    for kind,context in [('lesson',('tenant','lesson',1)),('assignment',('tenant','assignment','version',1))]:
+        old=cipher().encrypt(fingerprint(kind,context,'Valid content',[],policy='maaher-content-v2-controls-cpu250')).decode()
+        assert valid(old,kind,context,'Valid content',[])
+        assert not valid(old,kind,context,'Tampered',[])

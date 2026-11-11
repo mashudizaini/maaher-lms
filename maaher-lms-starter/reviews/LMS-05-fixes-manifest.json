@@ -1,0 +1,172 @@
+{
+  "base_commit": "84dd193709f7cb126e655f7f143e16b3577058a1",
+  "branch": "feat/LMS-05-assignments-submissions",
+  "generated_at_utc": "2026-11-11T08:47:44.044436+00:00",
+  "user_facing_date": "2026-11-11",
+  "user_timezone": "Asia/Jakarta",
+  "scope": "LMS-05 F9/F10/F11 author fixes; independent re-review pending",
+  "exclusions": [
+    "maaher-lms-starter/reviews/LMS-05-fixes-author.patch",
+    "maaher-lms-starter/reviews/LMS-05-fixes-manifest.json"
+  ],
+  "patch_sha256": "36ff969e888c208d338ef32c206819465aa2b3b334dea177f3b83c4f70737906",
+  "baseline_apply_check": "PASS using separate temporary index, no workspace patch applied",
+  "files": [
+    {
+      "path": "maaher-lms-starter/apps/api/app/assignments.py",
+      "bytes": 17264,
+      "sha256": "39da306af418064e62628e375f4d0ed4f28865267776123a36b6553acf4b5102",
+      "base_blob": "b2093b823cc3d3004cdbc07ff198efb70b9b015c"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/content_attestation.py",
+      "bytes": 1480,
+      "sha256": "9df20fc414ed13c9c50c32069894c321aa9654665f32e55083c0f2492f71bdbc",
+      "base_blob": "f247d6d89c2f183ea6bd4dc8b8ebcdb9f213148c"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/main.py",
+      "bytes": 2431,
+      "sha256": "c8d04c3eb6cc5095e2f35bb4da3ed571e06cb9c026b305a53b218ea453cb258e",
+      "base_blob": "65b12628b475573bc1fe0590a3c31e21c4e3a807"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/markdown_budget.py",
+      "bytes": 184,
+      "sha256": "49677914a32daeb6e61b2978be41979f276895855a67471d07e3dfccea7ddf4b",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/markdown_service.py",
+      "bytes": 10867,
+      "sha256": "1117961293dc940e7ff2cfe824b181a5d31137408dabfb90ed0e5f809673f04f",
+      "base_blob": "1309781cb4ee039b6c621a69ae230c2f31cc543c"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/markdown_worker.py",
+      "bytes": 1845,
+      "sha256": "0896473cf3020ae9b12940851a8fc8dcc8955d55739b67029baa43a0c79be436",
+      "base_blob": "71cd862b570fac68ac564828eddefc34102fbd08"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/app/validation_errors.py",
+      "bytes": 700,
+      "sha256": "b1373716c07e22f1c13d993f60a5cebc6a92eede521ef60a9d88317d881ef013",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_content_attestation.py",
+      "bytes": 11188,
+      "sha256": "8e2e21ef85b1bd664190385712e0785cc35b6c5b39cc3315ab09a680f6b7d902",
+      "base_blob": "12a2b6c77857b3c1542976d8de4e55a87443570b"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_markdown_process.py",
+      "bytes": 6722,
+      "sha256": "42e10d268ddca29a2f6a9c76dfcd4ca51e186e784032f84f027dffb1fd3e2e4d",
+      "base_blob": "68b80bd734e58d1578eda7a32ba853ed60c24758"
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_parser_fairness.py",
+      "bytes": 13083,
+      "sha256": "11fd139f139f9f891b13f57032c0b2e14eb79ab6666bfadcdd19d76737ad6f80",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/api/tests/test_validation_boundaries.py",
+      "bytes": 3329,
+      "sha256": "dfa5b728b912598f05946cfc25e43c6e568e4773bdd9eb91896b4c06d91e8a9f",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/apps/web/tests/assignments.spec.ts",
+      "bytes": 11651,
+      "sha256": "e8e49f51dfcc7f40b0dd5266d1fd179d0b7ff37809bf14560f27b45a75c34d95",
+      "base_blob": "e9308decd7a0c8044f5e4282ac77b876467af5b0"
+    },
+    {
+      "path": "maaher-lms-starter/docs/ARCHITECTURE.md",
+      "bytes": 9152,
+      "sha256": "9110d1b485697e9bffef9c7f3cbaa6d33abc0c61b84ccc6dc11868f0bf497b39",
+      "base_blob": "3f5f5bfb378d8921b2e55aca81db0c2bbf0867c6"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-CHECKLIST.md",
+      "bytes": 3468,
+      "sha256": "f8b1f6d65620c6020620ece4541a4fd00559588e68bc8f42f00f567221c0bef4",
+      "base_blob": "24a51a65e233b3f7e3183cef59aacdd19cac2795"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-FIXES-HANDOFF.md",
+      "bytes": 8311,
+      "sha256": "b439c890e601bad671086d3920f2bb3db2aafee871f7af67311ee0a03221a420",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-FIXES-MAC-SETUP.md",
+      "bytes": 4494,
+      "sha256": "56750e597df8ede0a956cad55a897712b0cc5a91066f01150167d7f951dd4f3d",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-HANDOFF.md",
+      "bytes": 11390,
+      "sha256": "7829df07d94665dab97d84822babb10e058c8773e5c1d2828f07ccc7d9823667",
+      "base_blob": "24dffe8e594b486501ce4a7ede32ed9d10de4ce3"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-MAC-SETUP.md",
+      "bytes": 8106,
+      "sha256": "52757bb4a2446769c38cc87dda2ecc24021ae27abec44f2f6dcd114f596c237b",
+      "base_blob": "0518530de82fe8f7509584839207ad7d8457153e"
+    },
+    {
+      "path": "maaher-lms-starter/docs/LMS-05-PR.md",
+      "bytes": 3095,
+      "sha256": "06b4707efdf7a8bfef661912c53d89c99da860a66f13d8b65c034b74f3e39362",
+      "base_blob": "02dff2c48150b76316912c2afb16b0b79ead544c"
+    },
+    {
+      "path": "maaher-lms-starter/docs/adr/010-parser-fairness-and-validation-boundaries.md",
+      "bytes": 6853,
+      "sha256": "85e697aff2a0734695b8be48f201b77a243cbf2b665e6d7b162c2d37009586c3",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/docs/tickets/LMS-05.md",
+      "bytes": 4467,
+      "sha256": "63bf0e206a85e1db75a39662f01119d502411bd46fd709a7eced24be3b93328c",
+      "base_blob": "9cb1785819954fbfaf6292b01f23a09abcbb6954"
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-05-claude-relay-20261111.md",
+      "bytes": 2962,
+      "sha256": "d8287b89854d154a5f6a74bf37ff6decbc6c6df143a652c878b6f98720636827",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-05-fixes-author-response.md",
+      "bytes": 3238,
+      "sha256": "d9e3093b4a76f49d65b0f166eae7a88d57443d06cd6c01821e87b6fbe57503ef",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-05-fixes-performance.json",
+      "bytes": 18786,
+      "sha256": "f926040288c19e4a26257ee59a4494c880f145db8cd03dabfd7bb6ee514523af",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/reviews/LMS-05-rereview-request.md",
+      "bytes": 3571,
+      "sha256": "6e1299018ab2a1546d3154c2beefc0d7a2219e6148da9d592bbb23ef2056fea9",
+      "base_blob": null
+    },
+    {
+      "path": "maaher-lms-starter/scripts/parser-preflight.py",
+      "bytes": 1449,
+      "sha256": "ec501dcf81e65bc2d56396f57d24a1efdb542b57a0ba3b4d0666aa902f4a280a",
+      "base_blob": "ad85970a60e882d3704fc0f57e54d0a8ec0af971"
+    }
+  ]
+}

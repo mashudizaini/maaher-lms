@@ -35,3 +35,13 @@ or production approval. See LMS-05-MAC-VALIDATION-20261111.md.
 This PR stacks on feat/LMS-04-student-learning (base54543a8). Main still includes
 unmerged auth and earlier milestones; full auth review8941a79..4733526 is separate.
 F3/N2/N3/N4/tenant-pause remain open. No grading, runner, merge or deploy approval.
+
+
+Follow-up to independent4a450d5 review: parent F5/F6/F7 closed in limited scope.
+Author fixes for F9/F10/F11 use CPU1000ms/wall3000ms, separate OS memory assertion,
+finite fair tenant/account queues, compatible signedv2 proofs and safe422 input
+errors.347 API/parser,12 scripts,16 Action,17 browser passed; expanded real HTTP
+probe adds36 author saves+36 student drafts all200 during2/4/8-actor pressure.
+Queues trade immediate global429 for bounded waiting (author max4.65s in probe),
+not unlimited capacity. No schema/backfill/config changes. Details FIXES-HANDOFF;
+Mac slow-host rerun and independent re-review pending. F12/old notes/auth unchanged.

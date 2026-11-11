@@ -5,6 +5,15 @@
 **0012_assignments**. Development implementation; independent review/Mac UAT
 pending. No merge/deploy. Full auth parent8941a79..4733526 remains unreviewed.
 
+## Latest — follow-up F9/F10/F11
+
+Pemilik melaporkan review independen4a450d5: F5/F6/F7 Linux CLOSED dalam scope
+sintetis terbatas, F9/F10 MEDIUM dan F11 LOW baru. Perbaikan author kini ada di
+[LMS-05-FIXES-HANDOFF.md](LMS-05-FIXES-HANDOFF.md), dengan347 tes API/parser,
+17 browser dan uji HTTP banyak akun/siswa. Baca itu untuk budget CPU/antrean/status
+terbaru; angka250ms dan hasil325 di bawah adalah snapshot historis4a450d5.
+F9/F10/F11 masih menunggu review ulang. F12/auth parent/temuan lama tetap terpisah.
+
 ## Update pemilik — 11 November 2026 WIB
 
 Pemilik melaporkan38 tes API/parser dan2 browser lulus di Mac, preflight Auth0

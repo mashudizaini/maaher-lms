@@ -41,6 +41,10 @@ test('versioned tasks and immutable submissions survive reload and revoke in two
   await page.getByRole('button',{name:'Terbitkan tugas',exact:true}).click();
   await expect(page.getByRole('status')).toContainText('Status tugas diperbarui');
   const tasks=await (await context.request.get(`/api/assignments?course_id=${cid}`,{headers})).json(); const aid=tasks.assignments[0].id;
+  const badInstructions=await context.request.post(`/api/assignments/${aid}`,{headers:{...headers,'content-type':'application/json'},data:JSON.stringify({version:2,title:'Invalid text',instructions:'redact-this-value-\ud800',rubric:[{criterion:'All',max_points:100}]})});
+  expect(badInstructions.status()).toBe(422);expect(await badInstructions.text()).not.toContain('redact-this-value');
+  const badDate=await context.request.post(`/api/assignments/${aid}`,{headers,data:{version:2,title:'Invalid date',instructions:'Valid',rubric:[{criterion:'All',max_points:100}],due_at:'0001-01-01T00:00:00+01:00'}});expect(badDate.status()).toBe(422);
+
   const otherTask=await context.request.post('/api/assignments',{headers,data:{course_id:cid,lesson_id:second,title:'Tugas pelajaran lain',instructions:'Latihan lain',rubric:[{criterion:'Semua',max_points:100}]}});expect(otherTask.status()).toBe(201);
   const otherId=(await otherTask.json()).id;expect((await context.request.post(`/api/assignments/${otherId}/publish`,{headers,data:{version:1}})).status()).toBe(200);
   const studentContext = await browser.newContext(); const student = await studentContext.newPage();
@@ -56,6 +60,10 @@ test('versioned tasks and immutable submissions survive reload and revoke in two
     const answer='<script>window.maaherUnsafe=true</script>\nprint("jawaban satu")';
     await student.getByLabel('Jawaban (python)',{exact:true}).fill(answer);
     await student.getByRole('button',{name:'Simpan draf jawaban',exact:true}).click();await expect(student.getByRole('status')).toContainText('Draf tersimpan');
+    const state=await (await studentContext.request.get(process.env.APP_ORIGIN!+`/api/work/assignments/${aid}`,{headers})).json();
+    const invalidDraft=await studentContext.request.post(process.env.APP_ORIGIN!+`/api/work/assignments/${aid}/draft`,{headers:{...headers,'content-type':'application/json'},data:JSON.stringify({version_id:state.published.id,revision:state.draft.revision,source_code:'redact-this-value-\ud800'})});
+    expect(invalidDraft.status()).toBe(422);expect(await invalidDraft.text()).not.toContain('redact-this-value');
+
     student.on('dialog',dialog=>dialog.accept());
     await student.getByRole('button',{name:'Kirim jawaban',exact:true}).click();await expect(student.getByRole('status')).toContainText('Jawaban terkirim');
     await expect(student.getByRole('article',{name:'Salinan submission'}).locator('pre')).toHaveText(answer);
