@@ -1,0 +1,3097 @@
+diff --git a/maaher-lms-starter/apps/api/tests/test_parser_fairness.py b/maaher-lms-starter/apps/api/tests/test_parser_fairness.py
+index 7ce74c8e98fcd2d833f91e1957660539d7966258..f095ce80527d5b42f1c5f436e0096289429c8867 100644
+--- a/maaher-lms-starter/apps/api/tests/test_parser_fairness.py
++++ b/maaher-lms-starter/apps/api/tests/test_parser_fairness.py
+@@ -14,6 +14,46 @@ from test_learning import learning
+ from test_enrollment import enrollment_case
+ 
+ 
++def pressure_response(response):
++    """Whitelist diagnostics; never emit raw bodies, headers, cookies or URLs."""
++    status=response.status_code
++    result={'status':status,'category':{200:'ok',422:'validation_rejected'}.get(status,'other_status')}
++    if status in {429,503}:
++        categories={
++            'Validasi materi sementara tidak tersedia. Coba lagi':'worker_unavailable',
++            'Batas memori validator belum tersedia':'memory_capability_unavailable',
++            'Antrean validasi penuh waktu. Coba lagi':'queue_expired',
++            'Kapasitas antrean validasi sedang penuh. Coba lagi':'queue_capacity',
++            'Validasi melewati batas waktu. Coba lagi':'caller_timeout',
++            'Validator sedang berhenti. Coba lagi':'stopping',
++            'Validator sedang berhenti':'stopping',
++            'Layanan penyimpanan sementara tidak tersedia':'storage_unavailable',
++            'Validasi akun Anda masih berlangsung. Tunggu sebelum menyimpan lagi':'principal_busy',
++            'Kapasitas validasi organisasi sedang penuh. Coba lagi':'tenant_capacity',
++            'Terlalu banyak perubahan kursus. Coba lagi sebentar lagi':'course_budget',
++            'Terlalu banyak permintaan belajar. Coba lagi sebentar lagi':'learning_budget',
++        }
++        try:body=response.json()
++        except ValueError:body=None
++        detail=body.get('detail') if isinstance(body,dict) else None
++        result['category']=categories.get(detail,'unclassified') if isinstance(detail,str) else 'unclassified'
++        retry=response.headers.get('Retry-After','')
++        if len(retry)<=4 and retry.isascii() and retry.isdigit():result['retry_after_seconds']=int(retry)
++    return result
++
++
++def test_pressure_diagnostics_whitelist_omits_response_secrets():
++    sentinel='PRIVATE-CONTENT-DO-NOT-LOG'
++    for body in ({'detail':sentinel,'token':sentinel},{'detail':{'secret':sentinel}},[sentinel],sentinel):
++        response=httpx.Response(503,json=body,headers={'Retry-After':sentinel,'Set-Cookie':sentinel})
++        assert pressure_response(response)=={'status':503,'category':'unclassified'}
++    response=httpx.Response(503,json={'detail':'Antrean validasi penuh waktu. Coba lagi','secret':sentinel},headers={'Retry-After':'1','Set-Cookie':sentinel})
++    assert pressure_response(response)=={'status':503,'category':'queue_expired','retry_after_seconds':1}
++    assert sentinel not in json.dumps(pressure_response(response))
++    assert pressure_response(httpx.Response(503,content=sentinel))=={'status':503,'category':'unclassified'}
++    assert pressure_response(httpx.Response(422,json={'detail':sentinel}))=={'status':422,'category':'validation_rejected'}
++
++
+ def await_waiting(pool,count):
+     until=time.monotonic()+3
+     while True:
+@@ -117,7 +157,7 @@ def test_real_http_fairness_multiple_accounts_and_tenants(assignment,tenant_mode
+     port_probe=socket.socket();port_probe.bind(('127.0.0.1',0));port=port_probe.getsockname()[1];port_probe.close()
+     env=os.environ.copy();env['PYTHONPATH']=str(Path(__file__).parents[1])
+     process=subprocess.Popen([sys.executable,'-m','uvicorn','app.main:app','--host','127.0.0.1','--port',str(port),'--no-access-log','--log-level','error'],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+-    metrics={'tenant_mode':tenant_mode,'api_workers':1,'rounds':[]}
++    metrics={'tenant_mode':tenant_mode,'api_workers':1,'rounds':[],'completed':False}
+     try:
+         with httpx.Client(base_url=f'http://127.0.0.1:{port}',trust_env=False,timeout=14) as health:
+             until=time.monotonic()+20
+@@ -129,6 +169,26 @@ def test_real_http_fairness_multiple_accounts_and_tenants(assignment,tenant_mode
+             # Confirm real session+membership+assignment authority before pressure.
+             for actor in [victim,*actors]:assert health.get('/courses/'+str(actor['cid']),headers=actor['headers']).status_code==200
+             for count in (2,4,8):
++                # Append before assertions so a failing full-suite run retains
++                # its partial episode. No body/source/identifier is recorded.
++                episode={'attacker_accounts':count,'attacker_max_requests_per_second_per_account':1,'requests':[],'completed':False}
++                metrics['rounds'].append(episode);metrics_lock=threading.Lock()
++                def observe(client,method,path,phase,actor_index=None,request_index=None,**kwargs):
++                    started=time.perf_counter()
++                    try:
++                        response=client.request(method,path,**kwargs)
++                        evidence=pressure_response(response)
++                    except httpx.TransportError as error:
++                        evidence={'category':'transport_error','error_type':type(error).__name__}
++                        raise
++                    finally:
++                        if 'evidence' in locals():
++                            evidence={**evidence,'phase':phase,'elapsed_ms':round((time.perf_counter()-started)*1000,2)}
++                            if actor_index is not None:evidence['actor_index']=actor_index
++                            if request_index is not None:evidence['request_index']=request_index
++                            with metrics_lock:
++                                if len(episode['requests'])<128:episode['requests'].append(evidence)
++                    return response
+                 stop_load=threading.Event();start_load=threading.Barrier(count+1)
+                 def attack(index):
+                     actor=actors[index];codes=[]
+@@ -138,7 +198,7 @@ def test_real_http_fairness_multiple_accounts_and_tenants(assignment,tenant_mode
+                             if stop_load.is_set():break
+                             tick=time.monotonic()
+                             text='[deny](javascript:alert(1))\n'+('![**'*7500)[:29800+index]+f'{count}:{n}'
+-                            response=client.post(actor['target'],headers=actor['headers'],json={'version':1,'title':'Pressure fixture','content':text})
++                            response=observe(client,'POST',actor['target'],'attacker',index,n,headers=actor['headers'],json={'version':1,'title':'Pressure fixture','content':text})
+                             codes.append(response.status_code)
+                             delay=1-(time.monotonic()-tick)
+                             if delay>0:time.sleep(delay)
+@@ -146,11 +206,11 @@ def test_real_http_fairness_multiple_accounts_and_tenants(assignment,tenant_mode
+                 def normal():
+                     values=[];codes=[];loaders=[]
+                     with httpx.Client(base_url=str(health.base_url),trust_env=False,timeout=14) as client:
+-                        version=client.get('/courses/'+str(victim['cid']),headers=victim['headers']).json()['version']
++                        version=observe(client,'GET','/courses/'+str(victim['cid']),'normal_context',headers=victim['headers']).json()['version']
+                         for n in range(6):
+                             loaders.append(sum(not f.done() for f in attacker_futures))
+                             start=time.perf_counter()
+-                            response=client.post(victim['target'],headers=victim['headers'],json={'version':version,'title':'Normal writer','content':'Valid material '+str(uuid4())})
++                            response=observe(client,'POST',victim['target'],'normal',request_index=n,headers=victim['headers'],json={'version':version,'title':'Normal writer','content':'Valid material '+str(uuid4())})
+                             codes.append(response.status_code);values.append(round((time.perf_counter()-start)*1000,2))
+                             if response.status_code==200:version=response.json()['version']
+                             time.sleep(.2)
+@@ -158,11 +218,11 @@ def test_real_http_fairness_multiple_accounts_and_tenants(assignment,tenant_mode
+                 def pupil():
+                     codes=[];latency=[];loaders=[]
+                     with httpx.Client(base_url=str(health.base_url),trust_env=False,timeout=14) as client:
+-                        row=client.get('/work/assignments/'+c['aid'],headers=pupil_headers).json()
++                        row=observe(client,'GET','/work/assignments/'+c['aid'],'student_context',headers=pupil_headers).json()
+                         revision=row['draft']['revision'] if row['draft'] else 0
+                         for n in range(6):
+                             loaders.append(sum(not f.done() for f in attacker_futures));start=time.perf_counter()
+-                            response=client.post('/work/assignments/'+c['aid']+'/draft',headers=pupil_headers,json={'version_id':row['published']['id'],'revision':revision,'source_code':'print("student '+str(uuid4())+'")'})
++                            response=observe(client,'POST','/work/assignments/'+c['aid']+'/draft','student',request_index=n,headers=pupil_headers,json={'version_id':row['published']['id'],'revision':revision,'source_code':'print("student '+str(uuid4())+'")'})
+                             codes.append(response.status_code);latency.append(round((time.perf_counter()-start)*1000,2))
+                             if response.status_code==200:revision=response.json()['revision']
+                             time.sleep(.2)
+@@ -178,19 +238,24 @@ def test_real_http_fairness_multiple_accounts_and_tenants(assignment,tenant_mode
+                         t=time.perf_counter();assert health.get('/healthz').status_code==200;samples.append((time.perf_counter()-t)*1000);time.sleep(.015)
+                     attack_codes=[code for f in attacker_futures for code in f.result()]
+                     normal_codes,latency,loaders=normal_future.result();pupil_codes,pupil_latency,pupil_loaders=pupil_future.result()
++                with psycopg.connect(identity[1]) as db:
++                    attempts=db.execute('SELECT max(attempts) FROM course_write_limits WHERE tenant_id=ANY(%s)',([a['tenant'] for a in actors],)).fetchone()[0]
++                episode.update({'attacker_statuses':dict(Counter(attack_codes)),
++                    'student_statuses':pupil_codes,'student_latency_ms':pupil_latency,'active_attacker_loops_at_each_student_save':pupil_loaders,'active_attacker_loops_at_each_normal_save':loaders,'normal_statuses':normal_codes,'normal_latency_ms':latency,'normal_429_fraction':0,
++                    'health_p95_ms':round(sorted(samples)[int((len(samples)-1)*.95)],2),'max_account_budget_attempts':attempts})
++                episode['normal_429_fraction']=normal_codes.count(429)/len(normal_codes)
+                 assert normal_codes==[200]*6,normal_codes
+                 assert all(loaders),loaders
+                 assert pupil_codes==[200]*6 and all(pupil_loaders),(pupil_codes,pupil_loaders)
+                 assert set(attack_codes)=={422},attack_codes
+                 assert max(latency)<10000
+-                with psycopg.connect(identity[1]) as db:
+-                    attempts=db.execute('SELECT max(attempts) FROM course_write_limits WHERE tenant_id=ANY(%s)',([a['tenant'] for a in actors],)).fetchone()[0]
+                 assert attempts<=60
+-                metrics['rounds'].append({'attacker_accounts':count,'attacker_max_requests_per_second_per_account':1,'attacker_statuses':dict(Counter(attack_codes)),
+-                    'student_statuses':pupil_codes,'student_latency_ms':pupil_latency,'active_attacker_loops_at_each_student_save':pupil_loaders,'active_attacker_loops_at_each_normal_save':loaders,'normal_statuses':normal_codes,'normal_latency_ms':latency,'normal_429_fraction':0,
+-                    'health_p95_ms':round(sorted(samples)[int((len(samples)-1)*.95)],2),'max_account_budget_attempts':attempts})
++                episode['completed']=True
++            metrics['completed']=True
+     finally:
+         process.terminate()
+         try:process.wait(timeout=5)
+         except subprocess.TimeoutExpired:process.kill();process.wait(timeout=2)
+-    print('LMS05_FAIRNESS_HTTP '+json.dumps(metrics,sort_keys=True))
++        # pytest captures this on FAIL; -s also retains it on PASS. Diagnostics
++        # do not turn a failed episode into a pass or relax its assertions.
++        print('LMS05_FAIRNESS_HTTP '+json.dumps(metrics,sort_keys=True))
+diff --git a/maaher-lms-starter/docs/ARCHITECTURE.md b/maaher-lms-starter/docs/ARCHITECTURE.md
+index 62e772fc0a83d7c86717364eb38df9889ca67213..8a64b248fd42a9df8c18497852c725486dd8b53c 100644
+--- a/maaher-lms-starter/docs/ARCHITECTURE.md
++++ b/maaher-lms-starter/docs/ARCHITECTURE.md
+@@ -112,6 +112,10 @@ fresh authority checks after waiting and INVOKER triggers enforce transitions.
+ No new definer, role, secret or learner execution; grades do not complete lessons.
+ Author validation is in [LMS-06-HANDOFF](LMS-06-HANDOFF.md). Independent LMS-06
+ review and Mac UAT remain pending; historical parent approvals do not cover it.
++Owner now reports synthetic grading browser2 PASS/preflight13 PASS, but full Mac
++suite378 PASS/1 SKIP/1 fairness FAIL (503+422). Isolated PASS does not close it.
++[Test-only diagnostics](LMS-06-FAIRNESS-DIAGNOSTIC.md) preserve partial episodes;
++runtime/schema/caps unchanged, investigation OPEN. Real Auth0 UAT still pending.
+ 
+ ## Coding lab / auto-grader: high-risk system
+ - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.
+diff --git a/maaher-lms-starter/docs/LMS-06-CHECKLIST.md b/maaher-lms-starter/docs/LMS-06-CHECKLIST.md
+index 6dd1d7f73d85c62e39075c71b55086f472779a1c..cc2abb4f8970ce3b7f851730fa88b366dfb51136 100644
+--- a/maaher-lms-starter/docs/LMS-06-CHECKLIST.md
++++ b/maaher-lms-starter/docs/LMS-06-CHECKLIST.md
+@@ -23,7 +23,10 @@ Statuses below are AUTHOR validation, not independent approval.
+ | Final collection /unique executed cases |380 /380 across runs; no single full380 run |
+ | Scripts /Actions /browser |12 /16 /19 PASS |
+ | Next build/typecheck, compile, pip/starter, audits |PASS; npm0,PyPI41 pins0 findings/errors |
+-| Mac install/forward migration/manual UAT |PENDING; no direct cloud access to Mac |
++| Mac services/preflight/synthetic browser |Owner reports API/web200,13 preflight PASS,2 browser PASS; actual HEAD/schema not stated in summary |
++| Mac full-suite fairness |OPEN:378 PASS,1 platform SKIP,1 FAIL; isolated PASS does not supersede FAIL |
++| Follow-up diagnostics |6 targeted PASS; controlled test-client503 remains FAIL and preserves evidence; collection381; no full381 run/runtime fix |
++| Manual owner UAT |PENDING; real Auth0 login not done |
+ | Independent LMS-06 review |PENDING |
+ | Real Auth0/FIDO2, remote CI, app Docker image, multi-worker |NOT TESTED here |
+ | Parser capacity/slow-host calibration notes, F12, F3, parent N2/N3/N4, tenant pause |OPEN/separate |
+diff --git a/maaher-lms-starter/docs/LMS-06-FAIRNESS-DIAGNOSTIC.md b/maaher-lms-starter/docs/LMS-06-FAIRNESS-DIAGNOSTIC.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..707d86019778532318a54f100e5237d47dbb94a8
+--- /dev/null
++++ b/maaher-lms-starter/docs/LMS-06-FAIRNESS-DIAGNOSTIC.md
+@@ -0,0 +1,134 @@
++# LMS-06 — diagnosis fairness pada suite Mac
++
++11 November 2026, Asia/Jakarta. Branch feat/LMS-06-teacher-grading, baseline
++6d834748f68e32df443b3bb413b8fedc147bfe09. Pemilik melaporkan suite380 kasus:
++378 PASS,1 capability SKIP,1 FAIL fairness (503 bersama422), rerun terisolasi PASS.
++[Relay](../reviews/LMS-06-mac-validation-relay-20261111.md) mempertahankan batas bukti.
++Penyebab503 **belum dipastikan**; ini bukan patch perbaikan runtime.
++
++## Perubahan diagnostik
++
++Hanya `apps/api/tests/test_parser_fairness.py` dan dokumentasi/evidence berubah.
++Episode metrik kini dimulai sebelum assertion, dicetak pada finally sehingga
++pytest menyimpannya saat FAIL. Status penulis/student/penekan, latency, penekan
++aktif, budget, p95 health dan ringkasan permintaan tetap tercatat. Maks128 record
++per episode; identitas/tenant/course/URL/body/input/header/cookie/token tidak dicetak.
++Kategori error berasal dari pesan yang persis di-allowlist; pesan asing dicatat
++sebagai `unclassified`. Retry-After hanya bilangan ASCII pendek. Transport error
++hanya mencatat nama kelas, tanpa pesan/URL mentah.
++
++Assertions tetap: seluruh simpanan normal/student200, penekan422, beban penekan
++aktif, latensi penulis<10s dan budget<=60.503 tetap FAIL. CPU1000ms,wall3s,queue8s,
++jumlah worker/budget/proof/assurance/RLS/grade schema tidak berubah. Tidak ada
++skip/xfail/retry-otomatis atau penerimaan503 agar angka menjadi hijau. Satu tes
++redaksi ditambahkan, sehingga koleksi final menjadi381 (sebelumnya380).
++
++## Hasil author cloud
++
++Pada DB kosong baru `maaher_test_lms06_fairnessdiagnostics_20261111`, file fairness
++**6 PASS**,0 SKIP,2 warning deprecation existing,78,50s. Koleksi seluruh API381;
++suite penuh tidak diulang karena runtime aplikasi tidak berubah. Tes redaksi
++sendiri juga1 PASS (kasus yang sama diulang, bukan tambahan kasus unik).
++
++HTTP nyata2/4/8 akun tenant sama/berbeda:36 simpanan penulis normal dan36 draf
++student seluruhnya200; seluruh penekan422. Maks penulis3767,46ms, student220,37ms,
++health p958,59ms. Ini keberhasilan terisolasi Linux cloud, bukan reproduksi atau
++penutupan kegagalan suite Mac.
++
++Verifikasi failure-capture memakai DB kosong lain
++`maaher_test_lms06_fairnessfaultcapture_20261111`. Plugin sementara pada klien tes
++mengganti satu respons422 yang sudah diterima menjadi503, tanpa mengubah server
++atau resource caps. Assertion tetap FAIL seperti yang diharapkan, exit1, dan
++episode parsial aman tercatat dengan completed:false. Ini **substitusi terkontrol
++pada klien tes**, bukan503 asli dari API atau reproduksi root cause Mac. Plugin
++berada di/tmp, tidak menjadi bagian runtime/repo.
++
++[Verification tambahan](../reviews/LMS-06-fairness-diagnostics-verification.json)
++menyimpan command/metrik/hash log dan batas bukti. Tidak ada build/browser/audit
++ulang karena source runtime/dependency tidak berubah. DB uji dipertahankan,
++hanya kontainer cloud milik author dihentikan setelah selesai.
++
++## Pemeriksaan Mac
++
++1. Baca laporan asli dan raw traceback lokal untuk nama node/parameter/assertion
++   yang gagal; jangan mengasumsikan same/different tenant atau assert tertentu.
++   Pertahankan file asli dan hasil suite FAIL. Catat HEAD, schema, platform/
++   arsitektur/Python, host vs container, kapasitas CPU/RAM yang tersedia dan apakah
++   ada beban lain. Jangan mencetak environment atau process command line rahasia.
++2. Ambil source diagnostik tanpa menimpa perubahan/laporan lokal. Ini tidak
++   memerlukan migrasi, restart API UAT, perubahan Auth0 atau keyring. Source
++   aplikasi tetap6d83474 dan schema0013; cek aktual secara read-only.
++3. Jalankan parser preflight/calibration pada hardware/profil yang sama untuk
++   mencatat memory capability dan CPU margin. Native Mac WARN bukan cap aktif.
++   Kalibrasi tidak menyesuaikan budget. Jangan menambah limit atau melemahkan MFA.
++4. Buat **DB uji kosong baru** dengan prefixmaaher_test_, role URL terpisah ke DB
++   yang sama, melalui workflow lokal aman. Jangan gunakan DB UAT atau DB lama.
++   Jalankan file fairness dengan output tersimpan lokal:
++
++   ```bash
++   python -m pytest -q -s apps/api/tests/test_parser_fairness.py
++   ```
++
++   Ada enam kasus (tiga queue, dua HTTP, satu redaksi). Endpoint dan fixture
++   memakai provider/session sintetis; ini bukan login Auth0 nyata.
++5. Suite penuh harus dijalankan pada **DB kosong baru lainnya**, bukan DB dari
++   langkah4 karena fixture menolak schema yang sudah terisi. Pertahankan seluruh
++   modul rollback. Koleksi381; native Mac diperkirakan hanya satu capability SKIP,
++   tetapi laporkan hasil nyata tanpa deselect:
++
++   ```bash
++   python -m pytest --collect-only -q apps/api/tests
++   python -m pytest -q -s apps/api/tests
++   ```
++
++   Tes HTTP memakai TCP/session/RLS/CPU nyata. Jangan menambahkan beban buatan
++   yang tidak dicatat atau menghentikan layanan pemilik untuk mengejar PASS.
++   Jika hanya ada waktu untuk run terisolasi, tandai full-suite NOT RUN dan
++   pertahankan kegagalan penuh sebelumnya sebagai OPEN.
++6. Simpan laporan tambahan `reviews/LMS-06-fairness-mac-diagnostic-20261111.md`:
++   command, HEAD/schema/node IDs/counts, kondisi hardware, hasil preflight,
++   FAIL/assertion asli, hasil rerun, metrik terstruktur seluruh episode yang ada.
++   Raw log lokal boleh disimpan aman; periksa/redaksi sebelum diunggah karena
++   traceback dari dependency/fixture lain tidak termasuk allowlist diagnostik.
++   Jangan menimpa laporan lama atau menyatakan sebab selesai dari satu rerun PASS.
++
++## Membaca kategori503
++
++| Kategori | Yang diketahui / langkah lanjut |
++|---|---|
++| queue_expired /queue_capacity /caller_timeout |Jalur antrean/admission. Periksa latency dan jumlah penekan; jangan naikkan queue/timeout tanpa evaluasi dampak |
++| worker_unavailable |Worker/IPC tidak mengembalikan hasil sah; bisa wall deadline, crash atau protocol failure. Kategori ini belum membedakan penyebab tersebut |
++| memory_capability_unavailable |Profil menolak cap memori yang tidak aktif; verifikasi host/profil, jangan menonaktifkan gate produksi |
++| storage_unavailable |Ingress DB gagal, bukan otomatis masalah fairness parser; periksa konektivitas/pool/DB pada run uji |
++| stopping /transport_error /unclassified |Kumpulkan bukti proses/runtime terbatas yang relevan; jangan anggap normal atau meluluskan |
++
++Jika penulis/student mendapat503 pada2/4/8 akun, selidiki regresi ketersediaan F10.
++Jika hanya penekan mendapat503 sementara semua penulis/student200, tetap pisahkan
++penolakan konten422 dari kegagalan resource503: mungkin fail-closed tetapi bukan
++bukti bahwa acceptance tes saat ini lulus. Perlu menilai resource/hardware dan
++memverifikasi tidak ada penulisan/konten tidak tervalidasi, sebelum reviewer
++memutuskan perubahan kontrak yang eksplisit. Tidak ada perubahan kontrak di sini.
++
++## Prompt Codex CLI
++
++```text
++Lanjutkan diagnosis LMS-06 pada branch feat/LMS-06-teacher-grading.
++Baca docs/LMS-06-FAIRNESS-DIAGNOSTIC.md dan laporan Mac asli. Pertahankan FAIL
++suite378 PASS/1 SKIP/1 FAIL; rerun terisolasi PASS tidak menutupnya. Ambil source
++diagnostik tanpa menimpa perubahan/laporan/.env/keyring/binding atau DB lama.
++Catat node ID dan assertion gagal, kategori503/phase/latency/health/normal/student,
++profil hardware dan parser calibration. Semua tes hanya pada DB kosong BARU;
++file fairness dan full suite masing-masing DB baru, semua modul rollback ikut.
++Koleksi kini381 karena satu tes redaksi. Jangan melonggarkan assertion menjadi
++422/503, menaikkan resource cap, skip/xfail/deselect atau retry sampai hijau.
++Tidak perlu migrasi/restart API UAT atau perubahan Auth0. Simpan laporan tambahan
++reviews/LMS-06-fairness-mac-diagnostic-20261111.md dengan hasil actual dan
++NOT TESTED. Jangan cetak secret, reset/downgrade DB lama, hapus container,
++merge/deploy. Jika penyebab belum terbukti, tetap OPEN dan berikan diagnosis
++berbasis bukti untuk AUTHOR; bukan klaim perbaikan selesai.
++```
++
++Independent review LMS-06 dapat memeriksa source dan kegagalan ini sebagai isu
++terbuka; belum ada verdict grading. Real Auth0/manual UAT dan full auth parent
++tetap terpisah. Hasil cloud diagnostik disimpan pada verification tambahan,
++tanpa mengganti manifest/patch/verifikasi LMS-06 awal pada6d83474.
+diff --git a/maaher-lms-starter/docs/LMS-06-HANDOFF.md b/maaher-lms-starter/docs/LMS-06-HANDOFF.md
+index 4061aad2879c6e94196f7c1ecb4a3fc80ca69225..f199375c1146af803a52f29e07705fa185165865 100644
+--- a/maaher-lms-starter/docs/LMS-06-HANDOFF.md
++++ b/maaher-lms-starter/docs/LMS-06-HANDOFF.md
+@@ -1,5 +1,14 @@
+ # LMS-06 — teacher grading handoff
+ 
++**Update Mac:** pemilik melaporkan preflight13 PASS, browser grading sintetis2
++PASS, suite penuh378 PASS/1 SKIP/1 FAIL fairness (503 bersama422); rerun terisolasi
++PASS tidak menutup FAIL. API/web200; login Auth0 nyata belum diuji. Baca
++[relay](../reviews/LMS-06-mac-validation-relay-20261111.md) dan
++[diagnosis](LMS-06-FAIRNESS-DIAGNOSTIC.md). Root cause masih OPEN. Follow-up hanya
++menambah diagnostik tes dan satu kasus redaksi (koleksi381); runtime/schema tetap.
++Angka author awal di bawah adalah bukti historis6d83474, tidak menggantikan hasil
++Mac. Manifest/patch/verifikasi awal tidak diregenerasi.
++
+ 11 November 2026, Asia/Jakarta. AUTHOR implementation, independent review pending.
+ Branch `feat/LMS-06-teacher-grading`; base
+ `13408bb6ab471d8d33f99162a239177f14decbec` (documentation over runtime5131f2c).
+diff --git a/maaher-lms-starter/docs/LMS-06-MAC-SETUP.md b/maaher-lms-starter/docs/LMS-06-MAC-SETUP.md
+index 6fbff59315f48d750732108054259507559958b5..dc8a3c8c666d9f0cf9004244863c16af7f4afc4c 100644
+--- a/maaher-lms-starter/docs/LMS-06-MAC-SETUP.md
++++ b/maaher-lms-starter/docs/LMS-06-MAC-SETUP.md
+@@ -1,5 +1,13 @@
+ # LMS-06 — Mac setup dan UAT penilaian
+ 
++**Latest:** pemilik sudah melaporkan layanan200, preflight13 PASS dan browser2
++PASS, tetapi suite penuh378 PASS/1 SKIP/1 FAIL fairness. Jangan ulang setup/
++migrasi untuk mengejar hasil; ikuti [panduan diagnosis](LMS-06-FAIRNESS-DIAGNOSTIC.md).
++Rerun terisolasi PASS tidak menutup FAIL. Panduan setup berikut tetap untuk
++checkout yang belum dipasang; manual login Auth0/UAT masih pending. Koleksi380
++di bawah adalah source awal6d83474; follow-up diagnostik menambah satu tes redaksi
++menjadi381, tanpa perubahan runtime/schema.
++
+ 11 November 2026, Asia/Jakarta. Branch **feat/LMS-06-teacher-grading**, base13408bb,
+ schema **0013_grading**. Panduan ini belum dijalankan pada Mac pemilik oleh AUTHOR
+ cloud. [Handoff](LMS-06-HANDOFF.md) menjelaskan tes dan batas bukti cloud.
+diff --git a/maaher-lms-starter/docs/LMS-06-PR.md b/maaher-lms-starter/docs/LMS-06-PR.md
+index 3d446adf2497b1e257feaa0fc7c9ff7d689b60e4..ece0a33bcf1d244d8850ce7c5d26a7b351612cc7 100644
+--- a/maaher-lms-starter/docs/LMS-06-PR.md
++++ b/maaher-lms-starter/docs/LMS-06-PR.md
+@@ -1,5 +1,12 @@
+ # Add private teacher grading and explicitly released student feedback
+ 
++Latest Mac validation reports378 PASS/1 platform SKIP/1 FAIL fairness; isolated
++rerun PASS does not close it. Preflight13 and synthetic browser2 PASS; real Auth0
++UAT pending. A test-only diagnostics follow-up preserves safe partial episodes
++without weakening assertions or changing runtime limits; one redaction case
++raises collection to381. See LMS-06-FAIRNESS-DIAGNOSTIC.md. Grading review and the
++Mac fairness investigation remain open; original author results below are historical.
++
+ Teachers assigned to a course and tenant admins can grade immutable submissions
+ against the submitted task version's rubric. Draft scores stay private; explicit
+ release exposes a separate student snapshot. Draft corrections preserve the
+diff --git a/maaher-lms-starter/reviews/LMS-06-fairness-diagnostics-verification.json b/maaher-lms-starter/reviews/LMS-06-fairness-diagnostics-verification.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..b78441bc8030f1fa4018abf52369370c89613392
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-06-fairness-diagnostics-verification.json
+@@ -0,0 +1,2639 @@
++{
++  "ticket": "LMS-06",
++  "scope": "Test-only safe fairness diagnostics; no runtime root-cause fix",
++  "user_facing_date": "2026-11-11",
++  "timezone": "Asia/Jakarta",
++  "role": "AUTHOR, not independent review",
++  "base_commit": "6d834748f68e32df443b3bb413b8fedc147bfe09",
++  "branch": "feat/LMS-06-teacher-grading",
++  "runtime_changed": false,
++  "schema": "0013_grading",
++  "owner_mac_relay": {
++    "original_report": "reviews/LMS-06-mac-validation-20261111.md (not available in cloud checkout)",
++    "api_full_passed": 378,
++    "api_full_skipped": 1,
++    "api_full_failed": 1,
++    "count": 380,
++    "skip": "Linux RLIMIT_AS capability only",
++    "failure": "Fairness received 503 together with 422; node/assertion/body not supplied",
++    "isolated_rerun": "PASS, does not close full-suite failure",
++    "auth0_preflight_passed": 13,
++    "synthetic_grading_browser_passed": 2,
++    "api_health_and_web_grading_status": 200,
++    "real_auth0_login_uat": "NOT TESTED",
++    "investigation_status": "OPEN"
++  },
++  "author_validation": {
++    "command": "python -m pytest apps/api/tests/test_parser_fairness.py -x -q -s",
++    "passed": 6,
++    "skipped": 0,
++    "warnings": 2,
++    "seconds": 78.5,
++    "full_suite_rerun": false,
++    "final_collection": 381,
++    "previous_collection": 380,
++    "new_case": "test_pressure_diagnostics_whitelist_omits_response_secrets",
++    "separate_unit_run": "1 passed, same redaction case repeated, not an extra unique case",
++    "real_http_records": [
++      {
++        "api_workers": 1,
++        "completed": true,
++        "rounds": [
++          {
++            "active_attacker_loops_at_each_normal_save": [
++              2,
++              2,
++              2,
++              2,
++              2,
++              2
++            ],
++            "active_attacker_loops_at_each_student_save": [
++              2,
++              2,
++              2,
++              2,
++              2,
++              2
++            ],
++            "attacker_accounts": 2,
++            "attacker_max_requests_per_second_per_account": 1,
++            "attacker_statuses": {
++              "422": 12
++            },
++            "completed": true,
++            "health_p95_ms": 4.93,
++            "max_account_budget_attempts": 8,
++            "normal_429_fraction": 0.0,
++            "normal_latency_ms": [
++              702.27,
++              680.95,
++              843.01,
++              763.39,
++              276.56,
++              383.73
++            ],
++            "normal_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ],
++            "requests": [
++              {
++                "category": "ok",
++                "elapsed_ms": 74.44,
++                "phase": "normal_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 109.15,
++                "phase": "student_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 144.11,
++                "phase": "student",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 684.69,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 128.18,
++                "phase": "student",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 753.79,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 702.23,
++                "phase": "normal",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 140.87,
++                "phase": "student",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 145.23,
++                "phase": "student",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 565.67,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 701.6,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 149.78,
++                "phase": "student",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 680.9,
++                "phase": "normal",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 188.14,
++                "phase": "student",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 594.99,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 629.96,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 842.96,
++                "phase": "normal",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 580.22,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 610.67,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 763.35,
++                "phase": "normal",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 276.52,
++                "phase": "normal",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 644.94,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 647.0,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 383.69,
++                "phase": "normal",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 526.44,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 607.52,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              }
++            ],
++            "student_latency_ms": [
++              144.14,
++              128.22,
++              140.9,
++              145.29,
++              149.82,
++              188.19
++            ],
++            "student_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ]
++          },
++          {
++            "active_attacker_loops_at_each_normal_save": [
++              4,
++              4,
++              4,
++              4,
++              4,
++              4
++            ],
++            "active_attacker_loops_at_each_student_save": [
++              4,
++              4,
++              4,
++              4,
++              4,
++              4
++            ],
++            "attacker_accounts": 4,
++            "attacker_max_requests_per_second_per_account": 1,
++            "attacker_statuses": {
++              "422": 27
++            },
++            "completed": true,
++            "health_p95_ms": 6.19,
++            "max_account_budget_attempts": 13,
++            "normal_429_fraction": 0.0,
++            "normal_latency_ms": [
++              1422.75,
++              908.89,
++              844.97,
++              836.84,
++              1019.61,
++              840.1
++            ],
++            "normal_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ],
++            "requests": [
++              {
++                "category": "ok",
++                "elapsed_ms": 84.96,
++                "phase": "normal_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 141.38,
++                "phase": "student_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 167.42,
++                "phase": "student",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 729.55,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 760.4,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 214.85,
++                "phase": "student",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 205.52,
++                "phase": "student",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1337.67,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1425.88,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1422.71,
++                "phase": "normal",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 213.32,
++                "phase": "student",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 964.56,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 160.63,
++                "phase": "student",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1032.88,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 152.84,
++                "phase": "student",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1122.13,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1163.12,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 908.79,
++                "phase": "normal",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1071.05,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1119.92,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1110.55,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1116.14,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 844.93,
++                "phase": "normal",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1054.33,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1117.54,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1043.08,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1116.34,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 836.78,
++                "phase": "normal",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1055.51,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1097.17,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1082.18,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1019.57,
++                "phase": "normal",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1446.19,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1198.9,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1452.12,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1171.09,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 840.05,
++                "phase": "normal",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1087.52,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1050.51,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1042.34,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1009.94,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              }
++            ],
++            "student_latency_ms": [
++              167.45,
++              214.9,
++              205.57,
++              213.36,
++              160.7,
++              152.89
++            ],
++            "student_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ]
++          },
++          {
++            "active_attacker_loops_at_each_normal_save": [
++              8,
++              8,
++              8,
++              8,
++              8,
++              8
++            ],
++            "active_attacker_loops_at_each_student_save": [
++              8,
++              8,
++              8,
++              8,
++              8,
++              8
++            ],
++            "attacker_accounts": 8,
++            "attacker_max_requests_per_second_per_account": 1,
++            "attacker_statuses": {
++              "422": 59
++            },
++            "completed": true,
++            "health_p95_ms": 5.97,
++            "max_account_budget_attempts": 20,
++            "normal_429_fraction": 0.0,
++            "normal_latency_ms": [
++              2168.56,
++              2162.86,
++              1972.2,
++              1833.25,
++              1843.38,
++              1765.03
++            ],
++            "normal_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ],
++            "requests": [
++              {
++                "category": "ok",
++                "elapsed_ms": 114.59,
++                "phase": "normal_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 215.33,
++                "phase": "student_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 161.85,
++                "phase": "student",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 688.54,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 793.04,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 173.22,
++                "phase": "student",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1164.35,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 160.16,
++                "phase": "student",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1381.63,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 142.69,
++                "phase": "student",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1635.3,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1955.22,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 191.72,
++                "phase": "student",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 2109.37,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 183.29,
++                "phase": "student",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 2168.52,
++                "phase": "normal",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 2592.69,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1601.98,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1926.6,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2107.87,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 2185.26,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1954.4,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 2080.65,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1980.81,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 1911.93,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1998.72,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 2162.82,
++                "phase": "normal",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1877.6,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2107.21,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1906.67,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 2153.84,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1940.83,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 2145.26,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 1947.51,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 2105.66,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1952.16,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1972.17,
++                "phase": "normal",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2026.39,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1940.32,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 2017.52,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1902.24,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 2003.89,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 1898.99,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 2039.02,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1943.63,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1833.21,
++                "phase": "normal",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2054.66,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1975.78,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 2005.3,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1965.96,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 2014.25,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 1980.52,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 2010.62,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1970.77,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1843.29,
++                "phase": "normal",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2014.71,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1925.66,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1948.16,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 2042.48,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 2017.42,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 2010.53,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1974.99,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 2077.09,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1765.0,
++                "phase": "normal",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1883.37,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2108.6,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1935.45,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 2076.28,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1886.1,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 2032.69,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1903.26,
++                "phase": "attacker",
++                "request_index": 7,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 2102.49,
++                "phase": "attacker",
++                "request_index": 7,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1913.32,
++                "phase": "attacker",
++                "request_index": 7,
++                "status": 422
++              }
++            ],
++            "student_latency_ms": [
++              161.9,
++              173.27,
++              160.23,
++              142.73,
++              191.88,
++              183.34
++            ],
++            "student_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ]
++          }
++        ],
++        "tenant_mode": "same"
++      },
++      {
++        "api_workers": 1,
++        "completed": true,
++        "rounds": [
++          {
++            "active_attacker_loops_at_each_normal_save": [
++              2,
++              2,
++              2,
++              2,
++              2,
++              2
++            ],
++            "active_attacker_loops_at_each_student_save": [
++              2,
++              2,
++              2,
++              2,
++              2,
++              2
++            ],
++            "attacker_accounts": 2,
++            "attacker_max_requests_per_second_per_account": 1,
++            "attacker_statuses": {
++              "422": 12
++            },
++            "completed": true,
++            "health_p95_ms": 6.05,
++            "max_account_budget_attempts": 6,
++            "normal_429_fraction": 0.0,
++            "normal_latency_ms": [
++              684.63,
++              762.78,
++              768.02,
++              761.92,
++              333.0,
++              292.03
++            ],
++            "normal_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ],
++            "requests": [
++              {
++                "category": "ok",
++                "elapsed_ms": 72.66,
++                "phase": "normal_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 146.04,
++                "phase": "student_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 148.74,
++                "phase": "student",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 651.15,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 707.07,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 151.86,
++                "phase": "student",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 684.57,
++                "phase": "normal",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 206.67,
++                "phase": "student",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 147.98,
++                "phase": "student",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 611.32,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 803.47,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 762.74,
++                "phase": "normal",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 189.02,
++                "phase": "student",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 168.62,
++                "phase": "student",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 601.66,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 694.28,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 767.97,
++                "phase": "normal",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 581.51,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 622.74,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 761.88,
++                "phase": "normal",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 332.96,
++                "phase": "normal",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 564.23,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 596.7,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 291.99,
++                "phase": "normal",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 576.79,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 584.2,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              }
++            ],
++            "student_latency_ms": [
++              148.77,
++              151.9,
++              206.71,
++              148.02,
++              189.07,
++              168.66
++            ],
++            "student_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ]
++          },
++          {
++            "active_attacker_loops_at_each_normal_save": [
++              4,
++              4,
++              4,
++              4,
++              4,
++              4
++            ],
++            "active_attacker_loops_at_each_student_save": [
++              4,
++              4,
++              4,
++              4,
++              4,
++              4
++            ],
++            "attacker_accounts": 4,
++            "attacker_max_requests_per_second_per_account": 1,
++            "attacker_statuses": {
++              "422": 29
++            },
++            "completed": true,
++            "health_p95_ms": 8.59,
++            "max_account_budget_attempts": 14,
++            "normal_429_fraction": 0.0,
++            "normal_latency_ms": [
++              1315.66,
++              750.03,
++              850.51,
++              1308.88,
++              1274.37,
++              947.66
++            ],
++            "normal_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ],
++            "requests": [
++              {
++                "category": "ok",
++                "elapsed_ms": 97.12,
++                "phase": "normal_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 226.74,
++                "phase": "student_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 180.57,
++                "phase": "student",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 630.97,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 789.48,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 172.44,
++                "phase": "student",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1191.84,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 220.02,
++                "phase": "student",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1472.35,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1315.63,
++                "phase": "normal",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 724.03,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 220.33,
++                "phase": "student",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1085.45,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 177.95,
++                "phase": "student",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1004.01,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 153.95,
++                "phase": "student",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 749.99,
++                "phase": "normal",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 657.51,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1216.92,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1064.51,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1054.9,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 850.36,
++                "phase": "normal",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 937.66,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1009.04,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1211.16,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1500.82,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1308.4,
++                "phase": "normal",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1418.21,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1250.13,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1302.23,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 998.15,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 982.05,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1156.12,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1274.33,
++                "phase": "normal",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1079.71,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1189.25,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1103.04,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1129.65,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 947.61,
++                "phase": "normal",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1040.47,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1165.1,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 978.52,
++                "phase": "attacker",
++                "request_index": 7,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1131.58,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              }
++            ],
++            "student_latency_ms": [
++              180.6,
++              172.48,
++              220.05,
++              220.37,
++              177.99,
++              154.0
++            ],
++            "student_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ]
++          },
++          {
++            "active_attacker_loops_at_each_normal_save": [
++              8,
++              8,
++              8,
++              8,
++              8,
++              8
++            ],
++            "active_attacker_loops_at_each_student_save": [
++              8,
++              8,
++              8,
++              8,
++              8,
++              8
++            ],
++            "attacker_accounts": 8,
++            "attacker_max_requests_per_second_per_account": 1,
++            "attacker_statuses": {
++              "422": 57
++            },
++            "completed": true,
++            "health_p95_ms": 4.75,
++            "max_account_budget_attempts": 21,
++            "normal_429_fraction": 0.0,
++            "normal_latency_ms": [
++              3767.46,
++              3521.47,
++              3295.38,
++              1842.63,
++              1904.84,
++              1838.51
++            ],
++            "normal_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ],
++            "requests": [
++              {
++                "category": "ok",
++                "elapsed_ms": 117.34,
++                "phase": "normal_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 184.15,
++                "phase": "student_context",
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 126.22,
++                "phase": "student",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 144.81,
++                "phase": "student",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1087.81,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1131.69,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 166.87,
++                "phase": "student",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 152.67,
++                "phase": "student",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 126.99,
++                "phase": "student",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1992.1,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2036.47,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 165.17,
++                "phase": "student",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 2906.16,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 2953.49,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 3802.27,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 3852.79,
++                "phase": "attacker",
++                "request_index": 0,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 3767.42,
++                "phase": "normal",
++                "request_index": 0,
++                "status": 200
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 3623.7,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 3627.5,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 3652.61,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 3655.43,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 3632.77,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 3640.35,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 3684.17,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 3686.03,
++                "phase": "attacker",
++                "request_index": 1,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 3521.43,
++                "phase": "normal",
++                "request_index": 1,
++                "status": 200
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 3684.27,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 3684.53,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 3642.98,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 3648.44,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 3645.63,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 3640.11,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 3438.56,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 3435.31,
++                "phase": "attacker",
++                "request_index": 2,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 3295.34,
++                "phase": "normal",
++                "request_index": 2,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 3072.08,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 3149.57,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 2716.68,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2719.38,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 2326.63,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 2323.13,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 2070.76,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 2133.72,
++                "phase": "attacker",
++                "request_index": 3,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1842.59,
++                "phase": "normal",
++                "request_index": 3,
++                "status": 200
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1926.07,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 2121.23,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1897.92,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2073.51,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1860.98,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 2097.72,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1899.28,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 2019.86,
++                "phase": "attacker",
++                "request_index": 4,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1914.09,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1904.8,
++                "phase": "normal",
++                "request_index": 4,
++                "status": 200
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 1977.46,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1925.28,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2019.11,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1941.42,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 1986.77,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1918.95,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 2026.97,
++                "phase": "attacker",
++                "request_index": 5,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1956.44,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "category": "ok",
++                "elapsed_ms": 1838.47,
++                "phase": "normal",
++                "request_index": 5,
++                "status": 200
++              },
++              {
++                "actor_index": 6,
++                "category": "validation_rejected",
++                "elapsed_ms": 2094.15,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 1,
++                "category": "validation_rejected",
++                "elapsed_ms": 1997.45,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 7,
++                "category": "validation_rejected",
++                "elapsed_ms": 2069.18,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 4,
++                "category": "validation_rejected",
++                "elapsed_ms": 1990.31,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 3,
++                "category": "validation_rejected",
++                "elapsed_ms": 2047.45,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 2,
++                "category": "validation_rejected",
++                "elapsed_ms": 1968.62,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 5,
++                "category": "validation_rejected",
++                "elapsed_ms": 2045.4,
++                "phase": "attacker",
++                "request_index": 6,
++                "status": 422
++              },
++              {
++                "actor_index": 0,
++                "category": "validation_rejected",
++                "elapsed_ms": 1992.01,
++                "phase": "attacker",
++                "request_index": 7,
++                "status": 422
++              }
++            ],
++            "student_latency_ms": [
++              126.26,
++              144.85,
++              166.91,
++              152.75,
++              127.03,
++              165.21
++            ],
++            "student_statuses": [
++              200,
++              200,
++              200,
++              200,
++              200,
++              200
++            ]
++          }
++        ],
++        "tenant_mode": "different"
++      }
++    ]
++  },
++  "controlled_fault_verification": {
++    "method": "Temporary pytest plugin substitutes first already-received HTTP422 response with503 in TEST CLIENT only; app/server/resource settings untouched",
++    "purpose": "Prove strict failure and partial metrics survive assertion",
++    "expected_pytest_exit": 1,
++    "observed_pytest_exit": 1,
++    "expected_failed_tests": 1,
++    "actual_failed_tests": 1,
++    "normal_statuses": [
++      200,
++      200,
++      200,
++      200,
++      200,
++      200
++    ],
++    "student_statuses": [
++      200,
++      200,
++      200,
++      200,
++      200,
++      200
++    ],
++    "safe_partial_metrics_preserved": true,
++    "completed_flag": false,
++    "category": "queue_expired (test-client substitution)",
++    "mac_failure_reproduced": false,
++    "plugin_ephemeral_path": "/tmp/lms06_fairness_fault_plugin.py",
++    "plugin_sha256": "c3f48762e770b8a55882bde4871e989d5e87e147676596aeb5ad7129c89e70c7"
++  },
++  "unchanged_acceptance": [
++    "Normal author/student must all return200",
++    "All attacker statuses must be422;503 still fails",
++    "Attack loops active, author latency<10s and original budget<=60",
++    "CPU1000ms/wall3s/queue8s, worker counts and caps unchanged",
++    "No skip/xfail/deselect/automatic retry introduced"
++  ],
++  "preservation": {
++    "database_names": [
++      "maaher_test_lms06_fairnessdiagnostics_20261111",
++      "maaher_test_lms06_fairnessfaultcapture_20261111"
++    ],
++    "tests_only_new_empty_databases": true,
++    "all_old_databases_untouched": true,
++    "all_new_databases_retained": true,
++    "container": "maaher-cloud-review-20261109",
++    "container_action": "Stop only owned cloud container at completion; no deletion",
++    "mac_env_secrets_auth0_keys_bindings_services": "Not accessed or changed",
++    "historical_manifest_patch_verification": "Preserved as6d83474 snapshot, not regenerated",
++    "merge_deploy": false
++  },
++  "limits": [
++    "Cloud isolated success does not reproduce or close Mac full-suite failure",
++    "503 message category does not distinguish all worker wall/crash/IPC causes",
++    "No real Auth0/manual UAT, full381-case run, remote CI, app Docker image, multi-worker or Mac hardware calibration performed here",
++    "Independent LMS-06 and auth-parent review remain pending"
++  ],
++  "log_evidence": [
++    {
++      "path": "/tmp/lms06-fairness-diagnostic-http.log",
++      "sha256": "2697cb58d69a139a54606a1621534851986114cb1fcfb5c950ef5499ea859586"
++    },
++    {
++      "path": "/tmp/lms06-fairness-diagnostic-unit.log",
++      "sha256": "af25e2691d74294f1fa3c93ceac5d8a60270aca7a222e67a85ccaafa92ba634c"
++    },
++    {
++      "path": "/tmp/lms06-fairness-diagnostic-collection.log",
++      "sha256": "79ebd13656d8ce79986a07dc36a15d178537945407d901c587ec1777033cd260"
++    },
++    {
++      "path": "/tmp/lms06-fairness-controlled-fault.log",
++      "sha256": "eb168d82aef96246d5a3e40624d1ed4ed148692ed9f5f98c43b34070da4b473a"
++    }
++  ]
++}
+diff --git a/maaher-lms-starter/reviews/LMS-06-mac-validation-relay-20261111.md b/maaher-lms-starter/reviews/LMS-06-mac-validation-relay-20261111.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..349a9743a4281f9ff9ec85f8a4526afc65221344
+--- /dev/null
++++ b/maaher-lms-starter/reviews/LMS-06-mac-validation-relay-20261111.md
+@@ -0,0 +1,44 @@
++# LMS-06 — hasil Mac yang dilaporkan pemilik
++
++11 November 2026, Asia/Jakarta. AUTHOR mencatat ringkasan Codex CLI pemilik dari
++chat. Ini bukan laporan asli atau pengujian ulang cloud atas kondisi Mac.
++Laporan asli `reviews/LMS-06-mac-validation-20261111.md` belum tersedia pada
++checkout cloud dan tidak ditimpa. HEAD Mac, schema aktual, nama node gagal,
++assertion dan pesan503 belum disebut dalam ringkasan.
++
++| Pemeriksaan | Hasil yang dilaporkan |
++|---|---|
++| Auth0 preflight |13 PASS |
++| Browser grading |2 PASS, provider sintetis |
++| Suite API penuh |378 PASS,1 SKIP,1 FAIL; total380 kasus |
++| SKIP |Hanya kemampuan RLIMIT_AS Linux pada native Mac |
++| FAIL |Kasus fairness mendapat503 bersama422; detail node/asal503 belum diketahui |
++| Rerun terisolasi |PASS; tidak menggantikan hasil FAIL suite penuh |
++| API /healthz, web /grading |HTTP200 |
++| Login Auth0 nyata/UAT pemilik |Belum dilakukan |
++| Merge/deploy |Belum dilakukan |
++| Durasi CLI |1 jam0 menit19 detik; ringkasan berakhir20:37 |
++
++Jumlah380 cocok dengan koleksi source LMS-06 awal. Ini tidak memverifikasi node
++ID/HEAD secara independen atau membuktikan seluruh jalur fairness sehat.13 PASS
++preflight juga bukan bukti login/MFA Auth0 end-to-end. Tidak ada bukti kebocoran
++data dalam ringkasan; status503 saja tidak cukup membuktikan root cause atau
++menyatakannya harmless/flaky.
++
++AUTHOR membaca source6d83474: tes HTTP fairness menuntut respons penekan422,
++penulis/siswa200, penekan tetap aktif dan latensi penulis<10s. Output metrik
++sebelumnya dicetak sesudah semua assertions, sehingga episode gagal dapat
++kehilangan ringkasan. Respons503 bisa berasal dari worker, antrean atau storage;
++belum diketahui mana yang terjadi pada Mac. Kaitan dengan assertion penekan
++adalah hipotesis sampai node/traceback aktual diperoleh.
++
++Tindak lanjut **diagnostik saja** di [panduan](../docs/LMS-06-FAIRNESS-DIAGNOSTIC.md):
++rekam episode sebelum assertions dan cetak pada finally, dengan kategori pesan
++yang di-allowlist tanpa body/header/URL/source/kredensial mentah. Kriteria tes,
++CPU1000ms/wall3s/queue8s, budget dan runtime aplikasi tetap. Tidak menerima503
++sebagai PASS atau menandai xfail. Uji ulang hanya pada DB kosong baru, pertahankan
++hasil asli FAIL dan seluruh data/laporan/container lama.
++
++Status terbaru: **investigasi fairness Mac OPEN**; review independen LMS-06 dan
++UAT Auth0 nyata masih pending. Catatan kapasitas parser dari re-review LMS-05,
++F12, F3, parent N2/N3/N4, tenant pause dan full auth parent tetap terpisah.
+diff --git a/maaher-lms-starter/reviews/LMS-06-review-request.md b/maaher-lms-starter/reviews/LMS-06-review-request.md
+index 6d0da2a555f70be9b802e1ab623b1fea26a92468..23b8211a3b85dd2af345189a000ee50245899ce1 100644
+--- a/maaher-lms-starter/reviews/LMS-06-review-request.md
++++ b/maaher-lms-starter/reviews/LMS-06-review-request.md
+@@ -1,5 +1,17 @@
+ # LMS-06 — independent Claude review request
+ 
++**Latest owner evidence:** Mac full suite378 PASS,1 Linux-capability SKIP,1 FAIL
++fairness (503+422), isolated rerun PASS. Actual node/503 category/HEAD not supplied;
++[relay](LMS-06-mac-validation-relay-20261111.md). Test-only follow-up retains safe
++partial metrics on failure and adds one redaction case (final collection381).
++Runtime/schema unchanged; no root-cause fix/closure claimed. Review this OPEN
++issue explicitly; do not accept503 by silently changing assertions. Earlier
++author counts380 below refer to6d83474; original artifacts stay unchanged.
++Author diagnostics:6 targeted cases PASS on new cloud DB. A separate controlled
++test-client response substitution produces expected FAIL and retains partial
++safe metrics; it is not a runtime503/Mac reproduction. Full381 not rerun; read
++LMS-06-fairness-diagnostics-verification.json and diagnostic guide for boundaries.
++
+ 11 November 2026, Asia/Jakarta. AUTHOR requests a separate read-only application
+ review. Save a NEW `reviews/LMS-06-claude.md`; preserve all older reports, source,
+ .env/keyring/bindings, UAT and test DBs, containers and the owner's running API.

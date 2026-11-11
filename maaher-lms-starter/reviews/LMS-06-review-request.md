@@ -1,5 +1,17 @@
 # LMS-06 — independent Claude review request
 
+**Latest owner evidence:** Mac full suite378 PASS,1 Linux-capability SKIP,1 FAIL
+fairness (503+422), isolated rerun PASS. Actual node/503 category/HEAD not supplied;
+[relay](LMS-06-mac-validation-relay-20261111.md). Test-only follow-up retains safe
+partial metrics on failure and adds one redaction case (final collection381).
+Runtime/schema unchanged; no root-cause fix/closure claimed. Review this OPEN
+issue explicitly; do not accept503 by silently changing assertions. Earlier
+author counts380 below refer to6d83474; original artifacts stay unchanged.
+Author diagnostics:6 targeted cases PASS on new cloud DB. A separate controlled
+test-client response substitution produces expected FAIL and retains partial
+safe metrics; it is not a runtime503/Mac reproduction. Full381 not rerun; read
+LMS-06-fairness-diagnostics-verification.json and diagnostic guide for boundaries.
+
 11 November 2026, Asia/Jakarta. AUTHOR requests a separate read-only application
 review. Save a NEW `reviews/LMS-06-claude.md`; preserve all older reports, source,
 .env/keyring/bindings, UAT and test DBs, containers and the owner's running API.

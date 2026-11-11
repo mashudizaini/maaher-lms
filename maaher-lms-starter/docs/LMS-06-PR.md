@@ -1,5 +1,12 @@
 # Add private teacher grading and explicitly released student feedback
 
+Latest Mac validation reports378 PASS/1 platform SKIP/1 FAIL fairness; isolated
+rerun PASS does not close it. Preflight13 and synthetic browser2 PASS; real Auth0
+UAT pending. A test-only diagnostics follow-up preserves safe partial episodes
+without weakening assertions or changing runtime limits; one redaction case
+raises collection to381. See LMS-06-FAIRNESS-DIAGNOSTIC.md. Grading review and the
+Mac fairness investigation remain open; original author results below are historical.
+
 Teachers assigned to a course and tenant admins can grade immutable submissions
 against the submitted task version's rubric. Draft scores stay private; explicit
 release exposes a separate student snapshot. Draft corrections preserve the

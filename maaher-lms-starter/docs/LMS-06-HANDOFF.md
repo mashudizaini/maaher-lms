@@ -1,5 +1,14 @@
 # LMS-06 — teacher grading handoff
 
+**Update Mac:** pemilik melaporkan preflight13 PASS, browser grading sintetis2
+PASS, suite penuh378 PASS/1 SKIP/1 FAIL fairness (503 bersama422); rerun terisolasi
+PASS tidak menutup FAIL. API/web200; login Auth0 nyata belum diuji. Baca
+[relay](../reviews/LMS-06-mac-validation-relay-20261111.md) dan
+[diagnosis](LMS-06-FAIRNESS-DIAGNOSTIC.md). Root cause masih OPEN. Follow-up hanya
+menambah diagnostik tes dan satu kasus redaksi (koleksi381); runtime/schema tetap.
+Angka author awal di bawah adalah bukti historis6d83474, tidak menggantikan hasil
+Mac. Manifest/patch/verifikasi awal tidak diregenerasi.
+
 11 November 2026, Asia/Jakarta. AUTHOR implementation, independent review pending.
 Branch `feat/LMS-06-teacher-grading`; base
 `13408bb6ab471d8d33f99162a239177f14decbec` (documentation over runtime5131f2c).

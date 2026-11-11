@@ -23,7 +23,10 @@ Statuses below are AUTHOR validation, not independent approval.
 | Final collection /unique executed cases |380 /380 across runs; no single full380 run |
 | Scripts /Actions /browser |12 /16 /19 PASS |
 | Next build/typecheck, compile, pip/starter, audits |PASS; npm0,PyPI41 pins0 findings/errors |
-| Mac install/forward migration/manual UAT |PENDING; no direct cloud access to Mac |
+| Mac services/preflight/synthetic browser |Owner reports API/web200,13 preflight PASS,2 browser PASS; actual HEAD/schema not stated in summary |
+| Mac full-suite fairness |OPEN:378 PASS,1 platform SKIP,1 FAIL; isolated PASS does not supersede FAIL |
+| Follow-up diagnostics |6 targeted PASS; controlled test-client503 remains FAIL and preserves evidence; collection381; no full381 run/runtime fix |
+| Manual owner UAT |PENDING; real Auth0 login not done |
 | Independent LMS-06 review |PENDING |
 | Real Auth0/FIDO2, remote CI, app Docker image, multi-worker |NOT TESTED here |
 | Parser capacity/slow-host calibration notes, F12, F3, parent N2/N3/N4, tenant pause |OPEN/separate |

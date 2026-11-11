@@ -1,0 +1,2639 @@
+{
+  "ticket": "LMS-06",
+  "scope": "Test-only safe fairness diagnostics; no runtime root-cause fix",
+  "user_facing_date": "2026-11-11",
+  "timezone": "Asia/Jakarta",
+  "role": "AUTHOR, not independent review",
+  "base_commit": "6d834748f68e32df443b3bb413b8fedc147bfe09",
+  "branch": "feat/LMS-06-teacher-grading",
+  "runtime_changed": false,
+  "schema": "0013_grading",
+  "owner_mac_relay": {
+    "original_report": "reviews/LMS-06-mac-validation-20261111.md (not available in cloud checkout)",
+    "api_full_passed": 378,
+    "api_full_skipped": 1,
+    "api_full_failed": 1,
+    "count": 380,
+    "skip": "Linux RLIMIT_AS capability only",
+    "failure": "Fairness received 503 together with 422; node/assertion/body not supplied",
+    "isolated_rerun": "PASS, does not close full-suite failure",
+    "auth0_preflight_passed": 13,
+    "synthetic_grading_browser_passed": 2,
+    "api_health_and_web_grading_status": 200,
+    "real_auth0_login_uat": "NOT TESTED",
+    "investigation_status": "OPEN"
+  },
+  "author_validation": {
+    "command": "python -m pytest apps/api/tests/test_parser_fairness.py -x -q -s",
+    "passed": 6,
+    "skipped": 0,
+    "warnings": 2,
+    "seconds": 78.5,
+    "full_suite_rerun": false,
+    "final_collection": 381,
+    "previous_collection": 380,
+    "new_case": "test_pressure_diagnostics_whitelist_omits_response_secrets",
+    "separate_unit_run": "1 passed, same redaction case repeated, not an extra unique case",
+    "real_http_records": [
+      {
+        "api_workers": 1,
+        "completed": true,
+        "rounds": [
+          {
+            "active_attacker_loops_at_each_normal_save": [
+              2,
+              2,
+              2,
+              2,
+              2,
+              2
+            ],
+            "active_attacker_loops_at_each_student_save": [
+              2,
+              2,
+              2,
+              2,
+              2,
+              2
+            ],
+            "attacker_accounts": 2,
+            "attacker_max_requests_per_second_per_account": 1,
+            "attacker_statuses": {
+              "422": 12
+            },
+            "completed": true,
+            "health_p95_ms": 4.93,
+            "max_account_budget_attempts": 8,
+            "normal_429_fraction": 0.0,
+            "normal_latency_ms": [
+              702.27,
+              680.95,
+              843.01,
+              763.39,
+              276.56,
+              383.73
+            ],
+            "normal_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ],
+            "requests": [
+              {
+                "category": "ok",
+                "elapsed_ms": 74.44,
+                "phase": "normal_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 109.15,
+                "phase": "student_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 144.11,
+                "phase": "student",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 684.69,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 128.18,
+                "phase": "student",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 753.79,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 702.23,
+                "phase": "normal",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 140.87,
+                "phase": "student",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 145.23,
+                "phase": "student",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 565.67,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 701.6,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 149.78,
+                "phase": "student",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 680.9,
+                "phase": "normal",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 188.14,
+                "phase": "student",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 594.99,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 629.96,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 842.96,
+                "phase": "normal",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 580.22,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 610.67,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 763.35,
+                "phase": "normal",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 276.52,
+                "phase": "normal",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 644.94,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 647.0,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 383.69,
+                "phase": "normal",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 526.44,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 607.52,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              }
+            ],
+            "student_latency_ms": [
+              144.14,
+              128.22,
+              140.9,
+              145.29,
+              149.82,
+              188.19
+            ],
+            "student_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ]
+          },
+          {
+            "active_attacker_loops_at_each_normal_save": [
+              4,
+              4,
+              4,
+              4,
+              4,
+              4
+            ],
+            "active_attacker_loops_at_each_student_save": [
+              4,
+              4,
+              4,
+              4,
+              4,
+              4
+            ],
+            "attacker_accounts": 4,
+            "attacker_max_requests_per_second_per_account": 1,
+            "attacker_statuses": {
+              "422": 27
+            },
+            "completed": true,
+            "health_p95_ms": 6.19,
+            "max_account_budget_attempts": 13,
+            "normal_429_fraction": 0.0,
+            "normal_latency_ms": [
+              1422.75,
+              908.89,
+              844.97,
+              836.84,
+              1019.61,
+              840.1
+            ],
+            "normal_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ],
+            "requests": [
+              {
+                "category": "ok",
+                "elapsed_ms": 84.96,
+                "phase": "normal_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 141.38,
+                "phase": "student_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 167.42,
+                "phase": "student",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 729.55,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 760.4,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 214.85,
+                "phase": "student",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 205.52,
+                "phase": "student",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1337.67,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1425.88,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1422.71,
+                "phase": "normal",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 213.32,
+                "phase": "student",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 964.56,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 160.63,
+                "phase": "student",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1032.88,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 152.84,
+                "phase": "student",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1122.13,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1163.12,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 908.79,
+                "phase": "normal",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1071.05,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1119.92,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1110.55,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1116.14,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 844.93,
+                "phase": "normal",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1054.33,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1117.54,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1043.08,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1116.34,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 836.78,
+                "phase": "normal",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1055.51,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1097.17,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1082.18,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1019.57,
+                "phase": "normal",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1446.19,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1198.9,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1452.12,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1171.09,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 840.05,
+                "phase": "normal",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1087.52,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1050.51,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1042.34,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1009.94,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              }
+            ],
+            "student_latency_ms": [
+              167.45,
+              214.9,
+              205.57,
+              213.36,
+              160.7,
+              152.89
+            ],
+            "student_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ]
+          },
+          {
+            "active_attacker_loops_at_each_normal_save": [
+              8,
+              8,
+              8,
+              8,
+              8,
+              8
+            ],
+            "active_attacker_loops_at_each_student_save": [
+              8,
+              8,
+              8,
+              8,
+              8,
+              8
+            ],
+            "attacker_accounts": 8,
+            "attacker_max_requests_per_second_per_account": 1,
+            "attacker_statuses": {
+              "422": 59
+            },
+            "completed": true,
+            "health_p95_ms": 5.97,
+            "max_account_budget_attempts": 20,
+            "normal_429_fraction": 0.0,
+            "normal_latency_ms": [
+              2168.56,
+              2162.86,
+              1972.2,
+              1833.25,
+              1843.38,
+              1765.03
+            ],
+            "normal_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ],
+            "requests": [
+              {
+                "category": "ok",
+                "elapsed_ms": 114.59,
+                "phase": "normal_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 215.33,
+                "phase": "student_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 161.85,
+                "phase": "student",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 688.54,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 793.04,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 173.22,
+                "phase": "student",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1164.35,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 160.16,
+                "phase": "student",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1381.63,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 142.69,
+                "phase": "student",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1635.3,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1955.22,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 191.72,
+                "phase": "student",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 2109.37,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 183.29,
+                "phase": "student",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 2168.52,
+                "phase": "normal",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 2592.69,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1601.98,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1926.6,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2107.87,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 2185.26,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1954.4,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 2080.65,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1980.81,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 1911.93,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1998.72,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 2162.82,
+                "phase": "normal",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1877.6,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2107.21,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1906.67,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 2153.84,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1940.83,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 2145.26,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 1947.51,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 2105.66,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1952.16,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1972.17,
+                "phase": "normal",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2026.39,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1940.32,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 2017.52,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1902.24,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 2003.89,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 1898.99,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 2039.02,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1943.63,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1833.21,
+                "phase": "normal",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2054.66,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1975.78,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 2005.3,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1965.96,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 2014.25,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 1980.52,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 2010.62,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1970.77,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1843.29,
+                "phase": "normal",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2014.71,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1925.66,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1948.16,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 2042.48,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 2017.42,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 2010.53,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1974.99,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 2077.09,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1765.0,
+                "phase": "normal",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1883.37,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2108.6,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1935.45,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 2076.28,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1886.1,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 2032.69,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1903.26,
+                "phase": "attacker",
+                "request_index": 7,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 2102.49,
+                "phase": "attacker",
+                "request_index": 7,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1913.32,
+                "phase": "attacker",
+                "request_index": 7,
+                "status": 422
+              }
+            ],
+            "student_latency_ms": [
+              161.9,
+              173.27,
+              160.23,
+              142.73,
+              191.88,
+              183.34
+            ],
+            "student_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ]
+          }
+        ],
+        "tenant_mode": "same"
+      },
+      {
+        "api_workers": 1,
+        "completed": true,
+        "rounds": [
+          {
+            "active_attacker_loops_at_each_normal_save": [
+              2,
+              2,
+              2,
+              2,
+              2,
+              2
+            ],
+            "active_attacker_loops_at_each_student_save": [
+              2,
+              2,
+              2,
+              2,
+              2,
+              2
+            ],
+            "attacker_accounts": 2,
+            "attacker_max_requests_per_second_per_account": 1,
+            "attacker_statuses": {
+              "422": 12
+            },
+            "completed": true,
+            "health_p95_ms": 6.05,
+            "max_account_budget_attempts": 6,
+            "normal_429_fraction": 0.0,
+            "normal_latency_ms": [
+              684.63,
+              762.78,
+              768.02,
+              761.92,
+              333.0,
+              292.03
+            ],
+            "normal_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ],
+            "requests": [
+              {
+                "category": "ok",
+                "elapsed_ms": 72.66,
+                "phase": "normal_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 146.04,
+                "phase": "student_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 148.74,
+                "phase": "student",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 651.15,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 707.07,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 151.86,
+                "phase": "student",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 684.57,
+                "phase": "normal",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 206.67,
+                "phase": "student",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 147.98,
+                "phase": "student",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 611.32,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 803.47,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 762.74,
+                "phase": "normal",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 189.02,
+                "phase": "student",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 168.62,
+                "phase": "student",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 601.66,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 694.28,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 767.97,
+                "phase": "normal",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 581.51,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 622.74,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 761.88,
+                "phase": "normal",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 332.96,
+                "phase": "normal",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 564.23,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 596.7,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 291.99,
+                "phase": "normal",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 576.79,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 584.2,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              }
+            ],
+            "student_latency_ms": [
+              148.77,
+              151.9,
+              206.71,
+              148.02,
+              189.07,
+              168.66
+            ],
+            "student_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ]
+          },
+          {
+            "active_attacker_loops_at_each_normal_save": [
+              4,
+              4,
+              4,
+              4,
+              4,
+              4
+            ],
+            "active_attacker_loops_at_each_student_save": [
+              4,
+              4,
+              4,
+              4,
+              4,
+              4
+            ],
+            "attacker_accounts": 4,
+            "attacker_max_requests_per_second_per_account": 1,
+            "attacker_statuses": {
+              "422": 29
+            },
+            "completed": true,
+            "health_p95_ms": 8.59,
+            "max_account_budget_attempts": 14,
+            "normal_429_fraction": 0.0,
+            "normal_latency_ms": [
+              1315.66,
+              750.03,
+              850.51,
+              1308.88,
+              1274.37,
+              947.66
+            ],
+            "normal_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ],
+            "requests": [
+              {
+                "category": "ok",
+                "elapsed_ms": 97.12,
+                "phase": "normal_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 226.74,
+                "phase": "student_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 180.57,
+                "phase": "student",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 630.97,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 789.48,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 172.44,
+                "phase": "student",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1191.84,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 220.02,
+                "phase": "student",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1472.35,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1315.63,
+                "phase": "normal",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 724.03,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 220.33,
+                "phase": "student",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1085.45,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 177.95,
+                "phase": "student",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1004.01,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 153.95,
+                "phase": "student",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 749.99,
+                "phase": "normal",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 657.51,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1216.92,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1064.51,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1054.9,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 850.36,
+                "phase": "normal",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 937.66,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1009.04,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1211.16,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1500.82,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1308.4,
+                "phase": "normal",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1418.21,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1250.13,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1302.23,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 998.15,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 982.05,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1156.12,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1274.33,
+                "phase": "normal",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1079.71,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1189.25,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1103.04,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1129.65,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 947.61,
+                "phase": "normal",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1040.47,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1165.1,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 978.52,
+                "phase": "attacker",
+                "request_index": 7,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1131.58,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              }
+            ],
+            "student_latency_ms": [
+              180.6,
+              172.48,
+              220.05,
+              220.37,
+              177.99,
+              154.0
+            ],
+            "student_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ]
+          },
+          {
+            "active_attacker_loops_at_each_normal_save": [
+              8,
+              8,
+              8,
+              8,
+              8,
+              8
+            ],
+            "active_attacker_loops_at_each_student_save": [
+              8,
+              8,
+              8,
+              8,
+              8,
+              8
+            ],
+            "attacker_accounts": 8,
+            "attacker_max_requests_per_second_per_account": 1,
+            "attacker_statuses": {
+              "422": 57
+            },
+            "completed": true,
+            "health_p95_ms": 4.75,
+            "max_account_budget_attempts": 21,
+            "normal_429_fraction": 0.0,
+            "normal_latency_ms": [
+              3767.46,
+              3521.47,
+              3295.38,
+              1842.63,
+              1904.84,
+              1838.51
+            ],
+            "normal_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ],
+            "requests": [
+              {
+                "category": "ok",
+                "elapsed_ms": 117.34,
+                "phase": "normal_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 184.15,
+                "phase": "student_context",
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 126.22,
+                "phase": "student",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 144.81,
+                "phase": "student",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1087.81,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1131.69,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 166.87,
+                "phase": "student",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 152.67,
+                "phase": "student",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 126.99,
+                "phase": "student",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1992.1,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2036.47,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 165.17,
+                "phase": "student",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 2906.16,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 2953.49,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 3802.27,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 3852.79,
+                "phase": "attacker",
+                "request_index": 0,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 3767.42,
+                "phase": "normal",
+                "request_index": 0,
+                "status": 200
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 3623.7,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 3627.5,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 3652.61,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 3655.43,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 3632.77,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 3640.35,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 3684.17,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 3686.03,
+                "phase": "attacker",
+                "request_index": 1,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 3521.43,
+                "phase": "normal",
+                "request_index": 1,
+                "status": 200
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 3684.27,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 3684.53,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 3642.98,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 3648.44,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 3645.63,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 3640.11,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 3438.56,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 3435.31,
+                "phase": "attacker",
+                "request_index": 2,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 3295.34,
+                "phase": "normal",
+                "request_index": 2,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 3072.08,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 3149.57,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 2716.68,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2719.38,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 2326.63,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 2323.13,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 2070.76,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 2133.72,
+                "phase": "attacker",
+                "request_index": 3,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1842.59,
+                "phase": "normal",
+                "request_index": 3,
+                "status": 200
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1926.07,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 2121.23,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1897.92,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2073.51,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1860.98,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 2097.72,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1899.28,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 2019.86,
+                "phase": "attacker",
+                "request_index": 4,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1914.09,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1904.8,
+                "phase": "normal",
+                "request_index": 4,
+                "status": 200
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 1977.46,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1925.28,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2019.11,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1941.42,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 1986.77,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1918.95,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 2026.97,
+                "phase": "attacker",
+                "request_index": 5,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1956.44,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "category": "ok",
+                "elapsed_ms": 1838.47,
+                "phase": "normal",
+                "request_index": 5,
+                "status": 200
+              },
+              {
+                "actor_index": 6,
+                "category": "validation_rejected",
+                "elapsed_ms": 2094.15,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 1,
+                "category": "validation_rejected",
+                "elapsed_ms": 1997.45,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 7,
+                "category": "validation_rejected",
+                "elapsed_ms": 2069.18,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 4,
+                "category": "validation_rejected",
+                "elapsed_ms": 1990.31,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 3,
+                "category": "validation_rejected",
+                "elapsed_ms": 2047.45,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 2,
+                "category": "validation_rejected",
+                "elapsed_ms": 1968.62,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 5,
+                "category": "validation_rejected",
+                "elapsed_ms": 2045.4,
+                "phase": "attacker",
+                "request_index": 6,
+                "status": 422
+              },
+              {
+                "actor_index": 0,
+                "category": "validation_rejected",
+                "elapsed_ms": 1992.01,
+                "phase": "attacker",
+                "request_index": 7,
+                "status": 422
+              }
+            ],
+            "student_latency_ms": [
+              126.26,
+              144.85,
+              166.91,
+              152.75,
+              127.03,
+              165.21
+            ],
+            "student_statuses": [
+              200,
+              200,
+              200,
+              200,
+              200,
+              200
+            ]
+          }
+        ],
+        "tenant_mode": "different"
+      }
+    ]
+  },
+  "controlled_fault_verification": {
+    "method": "Temporary pytest plugin substitutes first already-received HTTP422 response with503 in TEST CLIENT only; app/server/resource settings untouched",
+    "purpose": "Prove strict failure and partial metrics survive assertion",
+    "expected_pytest_exit": 1,
+    "observed_pytest_exit": 1,
+    "expected_failed_tests": 1,
+    "actual_failed_tests": 1,
+    "normal_statuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "student_statuses": [
+      200,
+      200,
+      200,
+      200,
+      200,
+      200
+    ],
+    "safe_partial_metrics_preserved": true,
+    "completed_flag": false,
+    "category": "queue_expired (test-client substitution)",
+    "mac_failure_reproduced": false,
+    "plugin_ephemeral_path": "/tmp/lms06_fairness_fault_plugin.py",
+    "plugin_sha256": "c3f48762e770b8a55882bde4871e989d5e87e147676596aeb5ad7129c89e70c7"
+  },
+  "unchanged_acceptance": [
+    "Normal author/student must all return200",
+    "All attacker statuses must be422;503 still fails",
+    "Attack loops active, author latency<10s and original budget<=60",
+    "CPU1000ms/wall3s/queue8s, worker counts and caps unchanged",
+    "No skip/xfail/deselect/automatic retry introduced"
+  ],
+  "preservation": {
+    "database_names": [
+      "maaher_test_lms06_fairnessdiagnostics_20261111",
+      "maaher_test_lms06_fairnessfaultcapture_20261111"
+    ],
+    "tests_only_new_empty_databases": true,
+    "all_old_databases_untouched": true,
+    "all_new_databases_retained": true,
+    "container": "maaher-cloud-review-20261109",
+    "container_action": "Stop only owned cloud container at completion; no deletion",
+    "mac_env_secrets_auth0_keys_bindings_services": "Not accessed or changed",
+    "historical_manifest_patch_verification": "Preserved as6d83474 snapshot, not regenerated",
+    "merge_deploy": false
+  },
+  "limits": [
+    "Cloud isolated success does not reproduce or close Mac full-suite failure",
+    "503 message category does not distinguish all worker wall/crash/IPC causes",
+    "No real Auth0/manual UAT, full381-case run, remote CI, app Docker image, multi-worker or Mac hardware calibration performed here",
+    "Independent LMS-06 and auth-parent review remain pending"
+  ],
+  "log_evidence": [
+    {
+      "path": "/tmp/lms06-fairness-diagnostic-http.log",
+      "sha256": "2697cb58d69a139a54606a1621534851986114cb1fcfb5c950ef5499ea859586"
+    },
+    {
+      "path": "/tmp/lms06-fairness-diagnostic-unit.log",
+      "sha256": "af25e2691d74294f1fa3c93ceac5d8a60270aca7a222e67a85ccaafa92ba634c"
+    },
+    {
+      "path": "/tmp/lms06-fairness-diagnostic-collection.log",
+      "sha256": "79ebd13656d8ce79986a07dc36a15d178537945407d901c587ec1777033cd260"
+    },
+    {
+      "path": "/tmp/lms06-fairness-controlled-fault.log",
+      "sha256": "eb168d82aef96246d5a3e40624d1ed4ed148692ed9f5f98c43b34070da4b473a"
+    }
+  ]
+}

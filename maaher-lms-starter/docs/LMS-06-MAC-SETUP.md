@@ -1,5 +1,13 @@
 # LMS-06 — Mac setup dan UAT penilaian
 
+**Latest:** pemilik sudah melaporkan layanan200, preflight13 PASS dan browser2
+PASS, tetapi suite penuh378 PASS/1 SKIP/1 FAIL fairness. Jangan ulang setup/
+migrasi untuk mengejar hasil; ikuti [panduan diagnosis](LMS-06-FAIRNESS-DIAGNOSTIC.md).
+Rerun terisolasi PASS tidak menutup FAIL. Panduan setup berikut tetap untuk
+checkout yang belum dipasang; manual login Auth0/UAT masih pending. Koleksi380
+di bawah adalah source awal6d83474; follow-up diagnostik menambah satu tes redaksi
+menjadi381, tanpa perubahan runtime/schema.
+
 11 November 2026, Asia/Jakarta. Branch **feat/LMS-06-teacher-grading**, base13408bb,
 schema **0013_grading**. Panduan ini belum dijalankan pada Mac pemilik oleh AUTHOR
 cloud. [Handoff](LMS-06-HANDOFF.md) menjelaskan tes dan batas bukti cloud.

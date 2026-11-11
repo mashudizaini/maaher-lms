@@ -112,6 +112,10 @@ fresh authority checks after waiting and INVOKER triggers enforce transitions.
 No new definer, role, secret or learner execution; grades do not complete lessons.
 Author validation is in [LMS-06-HANDOFF](LMS-06-HANDOFF.md). Independent LMS-06
 review and Mac UAT remain pending; historical parent approvals do not cover it.
+Owner now reports synthetic grading browser2 PASS/preflight13 PASS, but full Mac
+suite378 PASS/1 SKIP/1 fairness FAIL (503+422). Isolated PASS does not close it.
+[Test-only diagnostics](LMS-06-FAIRNESS-DIAGNOSTIC.md) preserve partial episodes;
+runtime/schema/caps unchanged, investigation OPEN. Real Auth0 UAT still pending.
 
 ## Coding lab / auto-grader: high-risk system
 - Frontend editor (e.g. Monaco) only edits/saves text; not an executor.
